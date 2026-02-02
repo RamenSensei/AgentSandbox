@@ -1,0 +1,22 @@
+[package]
+name = "ak-core"
+description = "Core types and traits of the AgentKernel execution semantics: episodes, steps, branches, principals, capability leases, effects, receipts, observations and replay classes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+async-trait = { workspace = true }
+indexmap = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

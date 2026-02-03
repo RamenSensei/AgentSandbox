@@ -67,3 +67,17 @@ impl ActionKind {
         }
     }
 }
+
+/// A fully-specified execution request from a principal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Action {
+    pub kind: ActionKind,
+    /// Lease presented as authority for this action.
+    pub lease: LeaseId,
+    /// Free-text intent hint. Used ONLY for scheduling (prewarming, backend
+    /// selection) and audit narration — never as an authorization input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_hint: Option<String>,
+    /// Budget the caller is willing to spend on this action.
+    pub budget: ResourceBudget,
+}

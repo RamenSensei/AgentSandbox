@@ -31,3 +31,39 @@ pub enum ActionKind {
     /// Ask for a semantic diff of a branch since a state.
     BranchDiff { since: crate::ids::StateId },
 }
+
+impl ActionKind {
+    /// The capability operation this action requires.
+    pub fn required_operation(&self) -> crate::capability::Operation {
+        use crate::capability::Operation;
+        match self {
+            ActionKind::Shell { .. } => Operation::new("proc.shell"),
+            ActionKind::ReadFile { .. } => Operation::new("fs.read"),
+            ActionKind::WriteFile { .. } => Operation::new("fs.write"),
+            ActionKind::DeletePath { .. } => Operation::new("fs.delete"),
+            ActionKind::HttpRead { .. } => Operation::new("net.http_read"),
+            ActionKind::McpInvoke { .. } => Operation::new("mcp.invoke"),
+            ActionKind::ConnectorOp { connector, operation, .. } => {
+                Operation::new(format!("{connector}.{operation}"))
+            }
+            ActionKind::TraceQuery { .. } => Operation::new("trace.query"),
+            ActionKind::BranchDiff { .. } => Operation::new("state.diff"),
+        }
+    }
+
+    /// Canonical parameters used for constraint checking.
+    pub fn params(&self) -> serde_json::Value {
+        match self {
+            ActionKind::Shell { command, cwd, .. } => serde_json::json!({"command": command, "cwd": cwd}),
+            ActionKind::ReadFile { path } | ActionKind::DeletePath { path } => serde_json::json!({"path": path}),
+            ActionKind::WriteFile { path, .. } => serde_json::json!({"path": path}),
+            ActionKind::HttpRead { url } => serde_json::json!({"url": url}),
+            ActionKind::McpInvoke { server, tool, arguments } => {
+                serde_json::json!({"server": server, "tool": tool, "arguments": arguments})
+            }
+            ActionKind::ConnectorOp { params, .. } => params.clone(),
+            ActionKind::TraceQuery { query } => serde_json::json!({"query": query}),
+            ActionKind::BranchDiff { since } => serde_json::json!({"since": since}),
+        }
+    }
+}

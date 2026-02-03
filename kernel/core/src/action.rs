@@ -81,3 +81,19 @@ pub struct Action {
     /// Budget the caller is willing to spend on this action.
     pub budget: ResourceBudget,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connector_ops_map_to_namespaced_operations() {
+        let a = ActionKind::ConnectorOp {
+            connector: "github".into(),
+            operation: "create_pull_request".into(),
+            params: serde_json::json!({}),
+        };
+        assert_eq!(a.required_operation().0, "github.create_pull_request");
+        assert_eq!(a.required_operation().namespace(), "github");
+    }
+}

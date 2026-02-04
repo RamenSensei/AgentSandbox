@@ -75,3 +75,15 @@ impl ResourceBudget {
         exhausted
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn charge_reports_exhausted_dimensions() {
+        let mut b = ResourceBudget { cpu_ms: 100, tokens: 10, ..ResourceBudget::zero() };
+        let over = ResourceBudget { cpu_ms: 50, tokens: 20, ..ResourceBudget::zero() };
+        assert_eq!(b.charge(&over), vec!["tokens"]);
+        assert_eq!(b.cpu_ms, 50);
+        assert_eq!(b.tokens, 0);
+    }
+}

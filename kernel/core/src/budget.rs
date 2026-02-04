@@ -75,9 +75,11 @@ impl ResourceBudget {
         exhausted
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn charge_reports_exhausted_dimensions() {
         let mut b = ResourceBudget { cpu_ms: 100, tokens: 10, ..ResourceBudget::zero() };
@@ -85,5 +87,14 @@ mod tests {
         assert_eq!(b.charge(&over), vec!["tokens"]);
         assert_eq!(b.cpu_ms, 50);
         assert_eq!(b.tokens, 0);
+    }
+
+    #[test]
+    fn fits_within_is_dimension_wise() {
+        let outer = ResourceBudget::step_default();
+        let mut inner = ResourceBudget::zero();
+        assert!(inner.fits_within(&outer));
+        inner.risk_units = 11;
+        assert!(!inner.fits_within(&outer));
     }
 }

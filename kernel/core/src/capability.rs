@@ -25,3 +25,74 @@ impl Operation {
         self.0.split('.').next().unwrap_or("")
     }
 }
+
+/// A deterministic constraint on one parameter of an operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum Constraint {
+    /// Parameter must equal this JSON value exactly.
+    Equals { value: serde_json::Value },
+    /// Parameter must be one of these values.
+    OneOf { values: Vec<serde_json::Value> },
+    /// String parameter must match this glob (only `*` wildcards).
+    Glob { pattern: String },
+    /// String parameter must start with this prefix (e.g. path scoping).
+    Prefix { prefix: String },
+    /// Numeric parameter must be `<= max`.
+    Max { max: f64 },
+    /// Parameter must be absent or JSON `false`.
+    Forbidden,
+}
+
+impl Constraint {
+    /// Check a candidate value against this constraint. `None` means the
+    /// parameter was not supplied.
+    pub fn allows(&self, value: Option<&serde_json::Value>) -> bool {
+        match self {
+            Constraint::Equals { value: want } => value == Some(want),
+            Constraint::OneOf { values } => value.map(|v| values.contains(v)).unwrap_or(false),
+            Constraint::Glob { pattern } => value
+                .and_then(|v| v.as_str())
+                .map(|s| glob_match(pattern, s))
+                .unwrap_or(false),
+            Constraint::Prefix { prefix } => value
+                .and_then(|v| v.as_str())
+                .map(|s| s.starts_with(prefix.as_str()))
+                .unwrap_or(false),
+            Constraint::Max { max } => value
+                .and_then(|v| v.as_f64())
+                .map(|n| n <= *max)
+                .unwrap_or(false),
+            Constraint::Forbidden => {
+                matches!(value, None | Some(serde_json::Value::Bool(false)))
+            }
+        }
+    }
+
+    /// Is `self` at least as restrictive as `parent` for every possible value?
+    /// Used to verify attenuation. Conservative: returns `false` when the
+    /// relationship cannot be proven.
+    pub fn narrows(&self, parent: &Constraint) -> bool {
+        use Constraint::*;
+        match (self, parent) {
+            (a, b) if a == b => true,
+            (Equals { value }, OneOf { values }) => values.contains(value),
+            (Equals { value }, Glob { pattern }) => value
+                .as_str()
+                .map(|s| glob_match(pattern, s))
+                .unwrap_or(false),
+            (Equals { value }, Prefix { prefix }) => value
+                .as_str()
+                .map(|s| s.starts_with(prefix.as_str()))
+                .unwrap_or(false),
+            (Equals { value }, Max { max }) => value.as_f64().map(|n| n <= *max).unwrap_or(false),
+            (OneOf { values }, parent) => values
+                .iter()
+                .all(|v| parent.allows(Some(v))),
+            (Prefix { prefix: child }, Prefix { prefix: parent_p }) => child.starts_with(parent_p.as_str()),
+            (Max { max: child }, Max { max: parent_m }) => child <= parent_m,
+            (Forbidden, _) => true,
+            _ => false,
+        }
+    }
+}

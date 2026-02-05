@@ -151,3 +151,105 @@ pub struct CapabilityLease {
     pub preconditions: IndexMap<String, serde_json::Value>,
     pub revoked: bool,
 }
+
+/// Why a lease does not authorize a given invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+pub enum LeaseCheckFailure {
+    Revoked,
+    Expired { expired_at: DateTime<Utc> },
+    Exhausted,
+    WrongPrincipal,
+    WrongOperation { granted: Operation },
+    WrongBranch { bound: BranchId },
+    ConstraintViolated { parameter: String },
+}
+
+impl CapabilityLease {
+    /// Deterministically check whether this lease authorizes `principal` to
+    /// invoke `operation` with `params` on `branch` at time `now`.
+    pub fn check(
+        &self,
+        principal: &PrincipalId,
+        operation: &Operation,
+        params: &serde_json::Value,
+        branch: Option<&BranchId>,
+        now: DateTime<Utc>,
+    ) -> Result<(), LeaseCheckFailure> {
+        if self.revoked {
+            return Err(LeaseCheckFailure::Revoked);
+        }
+        if now >= self.expires_at {
+            return Err(LeaseCheckFailure::Expired { expired_at: self.expires_at });
+        }
+        if self.remaining_uses == 0 {
+            return Err(LeaseCheckFailure::Exhausted);
+        }
+        if &self.principal != principal {
+            return Err(LeaseCheckFailure::WrongPrincipal);
+        }
+        if &self.operation != operation {
+            return Err(LeaseCheckFailure::WrongOperation { granted: self.operation.clone() });
+        }
+        if let Some(bound) = &self.bound_branch {
+            if branch != Some(bound) {
+                return Err(LeaseCheckFailure::WrongBranch { bound: bound.clone() });
+            }
+        }
+        for (param, constraint) in &self.constraints {
+            if !constraint.allows(params.get(param)) {
+                return Err(LeaseCheckFailure::ConstraintViolated { parameter: param.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Derive an attenuated lease for a child principal. Fails unless every
+    /// dimension (constraints, uses, expiry, budget) is no broader than the
+    /// parent's. Delegation is explicit, attenuated, time-bound and auditable.
+    pub fn attenuate(
+        &self,
+        child: PrincipalId,
+        constraints: IndexMap<String, Constraint>,
+        uses: u32,
+        expires_at: DateTime<Utc>,
+        budget: ResourceBudget,
+        now: DateTime<Utc>,
+    ) -> Result<CapabilityLease, AttenuationError> {
+        if self.revoked || now >= self.expires_at {
+            return Err(AttenuationError::ParentUnusable);
+        }
+        if uses > self.remaining_uses {
+            return Err(AttenuationError::UsesExceedParent);
+        }
+        if expires_at > self.expires_at {
+            return Err(AttenuationError::ExpiryExceedsParent);
+        }
+        if !budget.fits_within(&self.budget) {
+            return Err(AttenuationError::BudgetExceedsParent);
+        }
+        // Every parent constraint must be present and narrowed (or identical).
+        for (param, parent_c) in &self.constraints {
+            match constraints.get(param) {
+                Some(child_c) if child_c.narrows(parent_c) => {}
+                _ => {
+                    return Err(AttenuationError::ConstraintWidened { parameter: param.clone() })
+                }
+            }
+        }
+        Ok(CapabilityLease {
+            id: LeaseId::generate(),
+            principal: child,
+            operation: self.operation.clone(),
+            constraints,
+            remaining_uses: uses,
+            issued_at: now,
+            expires_at,
+            bound_branch: self.bound_branch.clone(),
+            budget,
+            parent_lease: Some(self.id.clone()),
+            preconditions: self.preconditions.clone(),
+            revoked: false,
+        })
+    }
+}

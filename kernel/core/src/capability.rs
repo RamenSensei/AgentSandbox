@@ -124,3 +124,30 @@ pub fn glob_match(pattern: &str, input: &str) -> bool {
     }
     parts.last().map(|p| p.is_empty()).unwrap_or(false) || parts.len() == 1
 }
+
+/// A grant of bounded authority to one principal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapabilityLease {
+    pub id: LeaseId,
+    pub principal: PrincipalId,
+    pub operation: Operation,
+    /// Constraints keyed by canonical parameter name.
+    pub constraints: IndexMap<String, Constraint>,
+    /// Remaining invocation count.
+    pub remaining_uses: u32,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// Branch this lease is bound to, if any: authority does not follow the
+    /// agent across speculative branches unless explicitly rebound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_branch: Option<BranchId>,
+    pub budget: ResourceBudget,
+    /// Lease this one was attenuated from, for the audit chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_lease: Option<LeaseId>,
+    /// Deterministic preconditions revalidated at commit time,
+    /// e.g. `{"repo_head_sha": "abc123"}`.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub preconditions: IndexMap<String, serde_json::Value>,
+    pub revoked: bool,
+}

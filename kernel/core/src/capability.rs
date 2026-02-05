@@ -268,3 +268,55 @@ pub enum AttenuationError {
     #[error("constraint on `{parameter}` is wider than the parent's")]
     ConstraintWidened { parameter: String },
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use serde_json::json;
+
+    fn lease(now: DateTime<Utc>) -> CapabilityLease {
+        let mut constraints = IndexMap::new();
+        constraints.insert("repository".into(), Constraint::Equals { value: json!("org/repo") });
+        constraints.insert("base".into(), Constraint::Equals { value: json!("main") });
+        constraints.insert(
+            "head".into(),
+            Constraint::Prefix { prefix: "sandbox/".into() },
+        );
+        constraints.insert("merge".into(), Constraint::Forbidden);
+        CapabilityLease {
+            id: LeaseId::generate(),
+            principal: PrincipalId("pr-agent".into()),
+            operation: Operation::new("github.create_pull_request"),
+            constraints,
+            remaining_uses: 1,
+            issued_at: now,
+            expires_at: now + Duration::minutes(10),
+            bound_branch: Some(BranchId("br-42".into())),
+            budget: ResourceBudget::default(),
+            parent_lease: None,
+            preconditions: IndexMap::new(),
+            revoked: false,
+        }
+    }
+    #[test]
+    fn lease_authorizes_exact_pr_and_nothing_wider() {
+        let now = Utc::now();
+        let l = lease(now);
+        let ok = json!({"repository": "org/repo", "base": "main", "head": "sandbox/fix-1"});
+        assert!(l
+            .check(&l.principal, &l.operation, &ok, Some(&BranchId("br-42".into())), now)
+            .is_ok());
+
+        let merge = json!({"repository": "org/repo", "base": "main", "head": "sandbox/fix-1", "merge": true});
+        assert_eq!(
+            l.check(&l.principal, &l.operation, &merge, Some(&BranchId("br-42".into())), now),
+            Err(LeaseCheckFailure::ConstraintViolated { parameter: "merge".into() })
+        );
+
+        let wrong_branch = l.check(&l.principal, &l.operation, &ok, Some(&BranchId("br-7".into())), now);
+        assert!(matches!(wrong_branch, Err(LeaseCheckFailure::WrongBranch { .. })));
+
+        let expired = l.check(&l.principal, &l.operation, &ok, Some(&BranchId("br-42".into())), now + Duration::minutes(11));
+        assert!(matches!(expired, Err(LeaseCheckFailure::Expired { .. })));
+    }
+}

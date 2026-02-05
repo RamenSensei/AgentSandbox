@@ -96,3 +96,31 @@ impl Constraint {
         }
     }
 }
+
+/// Simple `*`-only glob matcher (deterministic, no regex engine).
+pub fn glob_match(pattern: &str, input: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == input;
+    }
+    let mut rest = input;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            match rest.strip_prefix(part) {
+                Some(r) => rest = r,
+                None => return false,
+            }
+        } else if i == parts.len() - 1 {
+            return rest.ends_with(part);
+        } else {
+            match rest.find(part) {
+                Some(pos) => rest = &rest[pos + part.len()..],
+                None => return false,
+            }
+        }
+    }
+    parts.last().map(|p| p.is_empty()).unwrap_or(false) || parts.len() == 1
+}

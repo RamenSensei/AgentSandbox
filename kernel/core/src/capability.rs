@@ -253,3 +253,18 @@ impl CapabilityLease {
         })
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "error")]
+pub enum AttenuationError {
+    #[error("parent lease is revoked or expired")]
+    ParentUnusable,
+    #[error("child use count exceeds parent's remaining uses")]
+    UsesExceedParent,
+    #[error("child expiry exceeds parent expiry")]
+    ExpiryExceedsParent,
+    #[error("child budget exceeds parent budget")]
+    BudgetExceedsParent,
+    #[error("constraint on `{parameter}` is wider than the parent's")]
+    ConstraintWidened { parameter: String },
+}

@@ -319,4 +319,26 @@ mod tests {
         let expired = l.check(&l.principal, &l.operation, &ok, Some(&BranchId("br-42".into())), now + Duration::minutes(11));
         assert!(matches!(expired, Err(LeaseCheckFailure::Expired { .. })));
     }
+
+    #[test]
+    fn attenuation_cannot_widen() {
+        let now = Utc::now();
+        let l = lease(now);
+        let child = PrincipalId("pr-child".into());
+        // Attempt to widen `head` from Prefix("sandbox/") to Prefix("") — rejected.
+        let mut widened = l.constraints.clone();
+        widened.insert("head".into(), Constraint::Prefix { prefix: "".into() });
+        let err = l
+            .attenuate(child.clone(), widened, 1, l.expires_at, ResourceBudget::default(), now)
+            .unwrap_err();
+        assert_eq!(err, AttenuationError::ConstraintWidened { parameter: "head".into() });
+
+        // A proper narrowing succeeds and records lineage.
+        let mut narrowed = l.constraints.clone();
+        narrowed.insert("head".into(), Constraint::Equals { value: json!("sandbox/fix-1") });
+        let child_lease = l
+            .attenuate(child, narrowed, 1, l.expires_at, ResourceBudget::default(), now)
+            .unwrap();
+        assert_eq!(child_lease.parent_lease.as_ref(), Some(&l.id));
+    }
 }

@@ -268,6 +268,7 @@ pub enum AttenuationError {
     #[error("constraint on `{parameter}` is wider than the parent's")]
     ConstraintWidened { parameter: String },
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +299,7 @@ mod tests {
             revoked: false,
         }
     }
+
     #[test]
     fn lease_authorizes_exact_pr_and_nothing_wider() {
         let now = Utc::now();
@@ -340,5 +342,15 @@ mod tests {
             .attenuate(child, narrowed, 1, l.expires_at, ResourceBudget::default(), now)
             .unwrap();
         assert_eq!(child_lease.parent_lease.as_ref(), Some(&l.id));
+    }
+
+    #[test]
+    fn glob_matcher() {
+        assert!(glob_match("*.example.com", "api.example.com"));
+        assert!(glob_match("org/*", "org/repo"));
+        assert!(!glob_match("org/*", "other/repo"));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(!glob_match("a*b*c", "aXXbYY"));
+        assert!(glob_match("exact", "exact"));
     }
 }

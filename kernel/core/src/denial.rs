@@ -73,3 +73,35 @@ impl Denial {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::principal::TrustLevel;
+
+    fn denial() -> Denial {
+        Denial {
+            code: DenialCode::CapabilityDenied,
+            attempted_operation: Operation::new("net.raw_socket"),
+            reason: "credential may only be used by the typed GitHub connector".into(),
+            safe_alternatives: vec![Operation::new("github.create_pull_request")],
+            requestable_scopes: vec![RequestableScope {
+                operation: Operation::new("net.http_read"),
+                constraints: serde_json::json!({"domain": "api.github.com"}),
+                requires_human: false,
+            }],
+            escalation_allowed: true,
+        }
+    }
+
+    #[test]
+    fn quarantined_principals_get_redacted_denials() {
+        let d = denial();
+        let r = d.redact_for(TrustLevel::Quarantined);
+        assert!(r.requestable_scopes.is_empty());
+        assert!(!r.escalation_allowed);
+        assert_eq!(r.safe_alternatives, d.safe_alternatives);
+        // Standard principals see everything.
+        assert_eq!(d.redact_for(TrustLevel::Standard), d);
+    }
+}

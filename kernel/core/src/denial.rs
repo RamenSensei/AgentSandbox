@@ -55,3 +55,21 @@ pub struct Denial {
     /// Whether this branch permits capability escalation requests at all.
     pub escalation_allowed: bool,
 }
+
+impl Denial {
+    /// Redact details not appropriate for low-trust principals.
+    pub fn redact_for(&self, trust: crate::principal::TrustLevel) -> Denial {
+        use crate::principal::TrustLevel;
+        if trust >= TrustLevel::Limited {
+            return self.clone();
+        }
+        Denial {
+            code: self.code,
+            attempted_operation: self.attempted_operation.clone(),
+            reason: "operation not permitted for this principal".into(),
+            safe_alternatives: self.safe_alternatives.clone(),
+            requestable_scopes: Vec::new(),
+            escalation_allowed: false,
+        }
+    }
+}

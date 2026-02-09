@@ -58,3 +58,47 @@ pub struct EffectContract {
     pub idempotency_key: String,
     pub class: EffectClass,
 }
+
+impl EffectContract {
+    pub fn contract_hash(&self) -> ContentHash {
+        hash_canonical(self)
+    }
+}
+
+/// A pending (not yet committed) external effect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingEffect {
+    pub id: EffectId,
+    pub contract: EffectContract,
+    pub contract_hash: ContentHash,
+    pub proposer: PrincipalId,
+    pub branch: BranchId,
+    pub step: StepId,
+    pub lease: LeaseId,
+    pub phase: EffectPhase,
+    pub proposed_at: DateTime<Utc>,
+}
+
+impl PendingEffect {
+    pub fn new(
+        contract: EffectContract,
+        proposer: PrincipalId,
+        branch: BranchId,
+        step: StepId,
+        lease: LeaseId,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let contract_hash = contract.contract_hash();
+        Self {
+            id: EffectId::generate(),
+            contract,
+            contract_hash,
+            proposer,
+            branch,
+            step,
+            lease,
+            phase: EffectPhase::Proposed,
+            proposed_at: now,
+        }
+    }
+}

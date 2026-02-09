@@ -49,3 +49,25 @@ pub enum KernelError {
     #[error("{0}")]
     Other(String),
 }
+
+impl KernelError {
+    /// Stable machine-readable code for the wire protocol.
+    pub fn code(&self) -> &'static str {
+        match self {
+            KernelError::InvalidId { .. } => "INVALID_ID",
+            KernelError::NotFound { .. } => "NOT_FOUND",
+            KernelError::Denied(_) => "DENIED",
+            KernelError::WrongEffectPhase { .. } => "WRONG_EFFECT_PHASE",
+            KernelError::StaleAuthorization { .. } => "STALE_AUTHORIZATION",
+            KernelError::DuplicateCommit { .. } => "DUPLICATE_COMMIT",
+            KernelError::BackendUnavailable { .. } => "BACKEND_UNAVAILABLE",
+            KernelError::BranchDiscarded { .. } => "BRANCH_DISCARDED",
+            KernelError::MergeConflict { .. } => "MERGE_CONFLICT",
+            KernelError::Storage(_) => "STORAGE",
+            KernelError::Connector(_) => "CONNECTOR",
+            KernelError::Serde(_) => "SERDE",
+            KernelError::Io(_) => "IO",
+            KernelError::Other(_) => "OTHER",
+        }
+    }
+}

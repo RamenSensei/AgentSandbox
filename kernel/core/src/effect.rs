@@ -102,3 +102,32 @@ impl PendingEffect {
         }
     }
 }
+
+/// A non-repudiable record of a committed effect. Signed by the kernel's
+/// receipt key; the signature covers the canonical JSON of `body`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Receipt {
+    pub id: ReceiptId,
+    pub body: ReceiptBody,
+    /// Ed25519 signature over `canonical_json(body)`, hex-encoded.
+    pub signature: String,
+    /// Identifier of the signing key.
+    pub key_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReceiptBody {
+    pub effect: EffectId,
+    pub who: PrincipalId,
+    pub operation: String,
+    pub resource: String,
+    pub contract_hash: ContentHash,
+    pub branch: BranchId,
+    pub step: StepId,
+    pub policy_epoch: u64,
+    /// Hash of the approval decision (who approved what, when).
+    pub authorization_witness: ContentHash,
+    /// Digest of the external system's response.
+    pub external_response_digest: ContentHash,
+    pub committed_at: DateTime<Utc>,
+}

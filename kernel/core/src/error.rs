@@ -71,3 +71,27 @@ impl KernelError {
         }
     }
 }
+
+/// Wire-serializable error envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorEnvelope {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denial: Option<crate::denial::Denial>,
+}
+
+impl From<&KernelError> for ErrorEnvelope {
+    fn from(e: &KernelError) -> Self {
+        let denial = match e {
+            KernelError::Denied(d) => Some((**d).clone()),
+            _ => None,
+        };
+        ErrorEnvelope { code: e.code().to_string(), message: e.to_string(), denial }
+    }
+}
+impl From<crate::denial::Denial> for KernelError {
+    fn from(d: crate::denial::Denial) -> Self {
+        KernelError::Denied(Box::new(d))
+    }
+}

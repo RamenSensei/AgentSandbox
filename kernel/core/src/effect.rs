@@ -131,6 +131,7 @@ pub struct ReceiptBody {
     pub external_response_digest: ContentHash,
     pub committed_at: DateTime<Utc>,
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +147,7 @@ mod tests {
             class: EffectClass::Compensatable,
         }
     }
+
     #[test]
     fn contract_hash_is_stable_and_content_sensitive() {
         let a = contract();
@@ -153,5 +155,11 @@ mod tests {
         assert_eq!(a.contract_hash(), b.contract_hash());
         b.arguments = json!({"base": "main", "head": "sandbox/fix", "draft": false});
         assert_ne!(a.contract_hash(), b.contract_hash());
+    }
+
+    #[test]
+    fn effect_class_orders_by_severity() {
+        assert!(EffectClass::Pure < EffectClass::Irreversible);
+        assert!(EffectClass::Irreversible < EffectClass::OpaqueExternal);
     }
 }

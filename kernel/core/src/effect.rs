@@ -131,3 +131,27 @@ pub struct ReceiptBody {
     pub external_response_digest: ContentHash,
     pub committed_at: DateTime<Utc>,
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn contract() -> EffectContract {
+        EffectContract {
+            operation: "github.create_pull_request".into(),
+            resource: "org/repo".into(),
+            arguments: json!({"base": "main", "head": "sandbox/fix", "draft": true}),
+            preconditions: json!({"base_head_sha": "abc123"}),
+            idempotency_key: "ep-7-step-98".into(),
+            class: EffectClass::Compensatable,
+        }
+    }
+    #[test]
+    fn contract_hash_is_stable_and_content_sensitive() {
+        let a = contract();
+        let mut b = contract();
+        assert_eq!(a.contract_hash(), b.contract_hash());
+        b.arguments = json!({"base": "main", "head": "sandbox/fix", "draft": false});
+        assert_ne!(a.contract_hash(), b.contract_hash());
+    }
+}

@@ -86,4 +86,11 @@ mod tests {
             r#"{"a":{"y":[1,{"p":3,"q":2}],"z":true},"b":1}"#
         );
     }
+
+    #[test]
+    fn key_order_does_not_change_hash() {
+        let a = json!({"x": 1, "y": 2});
+        let b = json!({"y": 2, "x": 1});
+        assert_eq!(hash_canonical(&a), hash_canonical(&b));
+    }
 }

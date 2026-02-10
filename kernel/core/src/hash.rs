@@ -74,10 +74,12 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
         other => out.push_str(&serde_json::to_string(other).unwrap()),
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
     #[test]
     fn canonicalization_sorts_keys_recursively() {
         let a = json!({"b": 1, "a": {"z": true, "y": [1, {"q": 2, "p": 3}]}});
@@ -92,5 +94,10 @@ mod tests {
         let a = json!({"x": 1, "y": 2});
         let b = json!({"y": 2, "x": 1});
         assert_eq!(hash_canonical(&a), hash_canonical(&b));
+    }
+
+    #[test]
+    fn different_values_hash_differently() {
+        assert_ne!(hash_canonical(&json!({"x": 1})), hash_canonical(&json!({"x": 2})));
     }
 }

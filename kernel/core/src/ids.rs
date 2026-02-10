@@ -1,0 +1,46 @@
+//! Strongly-typed identifiers for every object in the world-state DAG.
+//!
+//! All IDs are newtype wrappers over UUID-or-content-hash strings so that they
+//! cannot be confused with one another at compile time and serialize as plain
+//! strings on the wire.
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+macro_rules! id_type {
+    ($(#[$doc:meta])* $name:ident, $prefix:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl $name {
+            /// Create a new random identifier with the canonical prefix.
+            pub fn generate() -> Self {
+                Self(format!("{}-{}", $prefix, uuid::Uuid::new_v4()))
+            }
+
+            /// Wrap an existing identifier string, validating its prefix.
+            pub fn parse(s: &str) -> Result<Self, crate::error::KernelError> {
+                if s.starts_with(concat!($prefix, "-")) {
+                    Ok(Self(s.to_string()))
+                } else {
+                    Err(crate::error::KernelError::InvalidId {
+                        expected_prefix: $prefix,
+                        got: s.to_string(),
+                    })
+                }
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}

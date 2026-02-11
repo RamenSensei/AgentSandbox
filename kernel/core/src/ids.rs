@@ -79,14 +79,22 @@ id_type!(
 );
 
 pub use self::{EffectId as PendingEffectId, ReceiptId as CommittedReceiptId};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn ids_round_trip_and_validate_prefix() {
         let ep = EpisodeId::generate();
         assert!(ep.as_str().starts_with("ep-"));
         assert_eq!(EpisodeId::parse(ep.as_str()).unwrap(), ep);
         assert!(EpisodeId::parse("st-123").is_err());
+    }
+
+    #[test]
+    fn ids_serialize_as_plain_strings() {
+        let st = StateId("st-abc".into());
+        assert_eq!(serde_json::to_string(&st).unwrap(), "\"st-abc\"");
     }
 }

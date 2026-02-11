@@ -44,3 +44,36 @@ macro_rules! id_type {
         }
     };
 }
+
+id_type!(
+    /// A long-running task: the root of a state DAG.
+    EpisodeId, "ep"
+);
+id_type!(
+    /// One decision-and-execution unit inside an episode.
+    StepId, "step"
+);
+id_type!(
+    /// A speculative world branch forked from a state node.
+    BranchId, "br"
+);
+id_type!(
+    /// A content-addressed, immutable world-state node.
+    StateId, "st"
+);
+id_type!(
+    /// An agent, sub-agent, tool or human identity.
+    PrincipalId, "pr"
+);
+id_type!(
+    /// A capability lease grant.
+    LeaseId, "lease"
+);
+id_type!(
+    /// A proposed-but-uncommitted external effect.
+    EffectId, "fx"
+);
+id_type!(
+    /// A signed receipt for a committed external effect.
+    ReceiptId, "rcpt"
+);

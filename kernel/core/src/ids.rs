@@ -77,3 +77,5 @@ id_type!(
     /// A signed receipt for a committed external effect.
     ReceiptId, "rcpt"
 );
+
+pub use self::{EffectId as PendingEffectId, ReceiptId as CommittedReceiptId};

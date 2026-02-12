@@ -43,3 +43,17 @@ pub enum Observation {
     /// An external effect committed; the receipt is the proof.
     EffectCommitted { receipt: crate::ids::ReceiptId },
 }
+
+impl Observation {
+    pub fn is_denial(&self) -> bool {
+        matches!(self, Observation::Denied { .. })
+    }
+}
+
+/// Distill raw process output into a bounded head + hash reference.
+pub fn distill_output(raw: &[u8], head_limit: usize) -> (Option<String>, ContentHash, bool) {
+    let hash = crate::hash::hash_bytes(raw);
+    let truncated = raw.len() > head_limit;
+    let head = String::from_utf8_lossy(&raw[..raw.len().min(head_limit)]).into_owned();
+    (Some(head), hash, truncated)
+}

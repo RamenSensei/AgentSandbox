@@ -57,3 +57,17 @@ pub fn distill_output(raw: &[u8], head_limit: usize) -> (Option<String>, Content
     let head = String::from_utf8_lossy(&raw[..raw.len().min(head_limit)]).into_owned();
     (Some(head), hash, truncated)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distill_bounds_output_and_keeps_full_hash() {
+        let raw = vec![b'x'; 10_000];
+        let (head, hash, truncated) = distill_output(&raw, 512);
+        assert_eq!(head.unwrap().len(), 512);
+        assert!(truncated);
+        assert_eq!(hash, crate::hash::hash_bytes(&raw));
+    }
+}

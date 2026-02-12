@@ -31,3 +31,19 @@ pub mod principal;
 pub mod replay;
 pub mod state;
 pub mod traits;
+
+pub use action::{Action, ActionKind};
+pub use budget::ResourceBudget;
+pub use capability::{CapabilityLease, Constraint, Operation};
+pub use denial::Denial;
+pub use effect::{EffectClass, EffectContract, PendingEffect, Receipt};
+pub use error::{KernelError, KernelResult};
+pub use ids::{BranchId, EpisodeId, LeaseId, PrincipalId, StateId, StepId};
+pub use observation::Observation;
+pub use principal::{Principal, PrincipalKind, TrustLevel};
+pub use replay::ReplayClass;
+pub use state::{StateDelta, StateNode};
+pub use traits::{Backend, Connector, ExecutionOutcome, ExecutionRequest};
+
+/// Semantic version of the Agent Execution Protocol implemented by this tree.
+pub const PROTOCOL_VERSION: &str = "0.6";

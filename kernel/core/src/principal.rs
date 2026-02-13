@@ -21,3 +21,28 @@ pub enum PrincipalKind {
     /// The kernel itself (system maintenance actions).
     Kernel,
 }
+
+/// How much the kernel trusts a principal. Trust controls the *granularity of
+/// policy explanations* (a quarantined skill gets less detail than the primary
+/// agent) — never whether enforcement applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    Quarantined,
+    Untrusted,
+    Limited,
+    Standard,
+    Elevated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Principal {
+    pub id: PrincipalId,
+    pub kind: PrincipalKind,
+    /// Human-readable name, e.g. `coding-agent/fix-issue-42`.
+    pub display_name: String,
+    /// Parent principal, if this principal was spawned by another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<PrincipalId>,
+    pub trust: TrustLevel,
+}

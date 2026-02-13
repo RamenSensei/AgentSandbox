@@ -71,3 +71,17 @@ impl Principal {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn children_never_exceed_limited_trust_by_default() {
+        let parent = Principal::new_agent("root");
+        assert_eq!(parent.trust, TrustLevel::Standard);
+        let child = parent.spawn_child(PrincipalKind::SubAgent, "worker");
+        assert_eq!(child.trust, TrustLevel::Limited);
+        assert_eq!(child.parent.as_ref(), Some(&parent.id));
+    }
+}

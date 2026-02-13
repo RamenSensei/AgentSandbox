@@ -46,3 +46,28 @@ pub struct Principal {
     pub parent: Option<PrincipalId>,
     pub trust: TrustLevel,
 }
+
+impl Principal {
+    pub fn new_agent(display_name: impl Into<String>) -> Self {
+        Self {
+            id: PrincipalId::generate(),
+            kind: PrincipalKind::Agent,
+            display_name: display_name.into(),
+            parent: None,
+            trust: TrustLevel::Standard,
+        }
+    }
+
+    /// Spawn a child principal. The child starts at a trust level no higher
+    /// than its parent and with *no* leases; authority must be delegated
+    /// explicitly via [`crate::capability::CapabilityLease::attenuate`].
+    pub fn spawn_child(&self, kind: PrincipalKind, display_name: impl Into<String>) -> Self {
+        Self {
+            id: PrincipalId::generate(),
+            kind,
+            display_name: display_name.into(),
+            parent: Some(self.id.clone()),
+            trust: self.trust.min(TrustLevel::Limited),
+        }
+    }
+}

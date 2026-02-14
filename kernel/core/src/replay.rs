@@ -49,3 +49,23 @@ impl ReplayClass {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_replay_is_universal() {
+        for c in [
+            ReplayClass::AuditOnly,
+            ReplayClass::FilesystemOnly,
+            ReplayClass::ProcessAndFilesystem,
+            ReplayClass::FrameworkHostCalls,
+            ReplayClass::BrowserProfile,
+        ] {
+            assert!(c.supports(ReplayMode::Audit));
+        }
+        assert!(!ReplayClass::AuditOnly.supports(ReplayMode::Sandbox));
+        assert!(ReplayClass::FilesystemOnly.supports(ReplayMode::Sandbox));
+    }
+}

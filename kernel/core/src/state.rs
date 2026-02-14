@@ -28,3 +28,26 @@ impl FileChange {
         }
     }
 }
+
+/// The immutable delta produced by one step, spanning all adapters.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct StateDelta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileChange>,
+    /// Processes started (still running at step end), by command line digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes_started: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes_exited: Vec<String>,
+    /// Tool/MCP sessions opened or mutated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_sessions: Vec<String>,
+    /// Policy epoch after this step (bumps when policy changed).
+    pub policy_epoch: u64,
+    /// Effects proposed during this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects_proposed: Vec<crate::ids::EffectId>,
+    /// Effects committed during this step (receipts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects_committed: Vec<crate::ids::ReceiptId>,
+}

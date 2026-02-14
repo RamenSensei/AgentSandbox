@@ -22,3 +22,30 @@ pub enum ReplayClass {
     /// Browser profile and page state are restorable.
     BrowserProfile,
 }
+
+/// The three replay modes exposed by the protocol. Deliberately distinct:
+/// "fully deterministic replay" of an open network is not a claim we make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayMode {
+    /// Play back recorded model responses, tool results and receipts.
+    /// Never re-executes anything.
+    Audit,
+    /// Restore internal state and re-execute local code with recorded inputs
+    /// (time, randomness, DNS, model responses) substituted where captured.
+    Sandbox,
+    /// Reconnect to the live external world and re-execute the same effect
+    /// contracts. Guarantees the *contract*, not the outcome.
+    Live,
+}
+
+impl ReplayClass {
+    /// Whether a step recorded at this class can honor the requested mode.
+    pub fn supports(&self, mode: ReplayMode) -> bool {
+        match mode {
+            ReplayMode::Audit => true,
+            ReplayMode::Sandbox => *self >= ReplayClass::FilesystemOnly,
+            ReplayMode::Live => *self >= ReplayClass::FilesystemOnly,
+        }
+    }
+}

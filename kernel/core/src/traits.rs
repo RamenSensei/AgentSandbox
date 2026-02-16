@@ -26,3 +26,31 @@ pub struct ExecutionRequest {
     /// Allowed egress domains for `HttpRead` (empty = no network).
     pub egress_domains: Vec<String>,
 }
+
+/// What a backend reports back after executing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOutcome {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub usage: ResourceBudget,
+    /// Workspace-relative paths the backend observed being written.
+    pub paths_written: Vec<String>,
+    pub replay_class: ReplayClass,
+}
+
+/// Capabilities a backend advertises so the router can pick the cheapest one
+/// that satisfies the request's risk and compatibility requirements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendProfile {
+    pub name: String,
+    /// 0 = weakest (in-process), 100 = hardware-virtualized.
+    pub isolation_strength: u8,
+    /// Typical cold-start latency in milliseconds, self-reported.
+    pub cold_start_ms: u64,
+    pub replay_class: ReplayClass,
+    pub supports_fork: bool,
+    pub supports_gui: bool,
+    /// Whether arbitrary Linux binaries run (vs. e.g. WASI-only).
+    pub full_linux: bool,
+}

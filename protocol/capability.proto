@@ -23,3 +23,27 @@ message ResourceBudget {
   uint64 cost_micro_usd = 5;
   uint32 risk_units = 6;
 }
+
+// ---------------------------------------------------------------------------
+// Principals
+// ---------------------------------------------------------------------------
+
+// JSON: snake_case strings ("agent", "sub_agent", ...).
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_AGENT = 1;
+  PRINCIPAL_KIND_SUB_AGENT = 2;
+  PRINCIPAL_KIND_TOOL = 3;
+  PRINCIPAL_KIND_HUMAN = 4;
+  PRINCIPAL_KIND_KERNEL = 5;
+}
+
+// JSON: snake_case strings ("quarantined", ...). Ordered by increasing trust.
+enum TrustLevel {
+  TRUST_LEVEL_UNSPECIFIED = 0;
+  TRUST_LEVEL_QUARANTINED = 1;
+  TRUST_LEVEL_UNTRUSTED = 2;
+  TRUST_LEVEL_LIMITED = 3;
+  TRUST_LEVEL_STANDARD = 4;
+  TRUST_LEVEL_ELEVATED = 5;
+}

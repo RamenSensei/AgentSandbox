@@ -54,3 +54,33 @@ pub struct BackendProfile {
     /// Whether arbitrary Linux binaries run (vs. e.g. WASI-only).
     pub full_linux: bool,
 }
+
+/// An isolation backend: local OS sandbox, gVisor, microVM, cluster, …
+#[async_trait]
+pub trait Backend: Send + Sync {
+    fn profile(&self) -> BackendProfile;
+
+    /// Materialize `base_state`'s workspace and execute the action.
+    async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome>;
+
+    /// Fork the backend-side state of a branch (CoW where supported).
+    /// Backends without native fork return `Ok(false)`; the kernel then
+    /// falls back to workspace re-materialization from the CAS.
+    async fn fork(&self, _from: &StateId, _to_branch: &BranchId) -> KernelResult<bool> {
+        Ok(false)
+    }
+
+    /// Drop any backend-side resources for a discarded branch.
+    async fn discard(&self, _branch: &BranchId) -> KernelResult<()> {
+        Ok(())
+    }
+}
+
+/// Result of preparing an effect against the live external system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedEffect {
+    /// Human/agent-reviewable preview of exactly what will happen.
+    pub preview: serde_json::Value,
+    /// Current values of the contract's preconditions, observed now.
+    pub observed_preconditions: serde_json::Value,
+}

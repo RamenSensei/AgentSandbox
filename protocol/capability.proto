@@ -1,0 +1,25 @@
+// AgentKernel Execution Protocol — capabilities, leases, denials, budgets.
+//
+// Wire-compatible with the canonical JSON encoding in ak-core
+// (kernel/core/src/{capability,denial,budget,principal}.rs). JSON field names
+// are snake_case; enums map to ak-core serde renames as documented per enum.
+syntax = "proto3";
+
+package agentkernel.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Budgets
+// ---------------------------------------------------------------------------
+
+// Unified resource accounting (ak-core ResourceBudget).
+message ResourceBudget {
+  uint64 cpu_ms = 1;
+  uint64 memory_bytes = 2;
+  uint64 network_bytes = 3;
+  uint64 tokens = 4;
+  uint64 cost_micro_usd = 5;
+  uint32 risk_units = 6;
+}

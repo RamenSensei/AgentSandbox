@@ -85,3 +85,19 @@ pub struct StateNode {
     pub replay_class: ReplayClass,
     pub created_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_delta_detection() {
+        let mut d = StateDelta::default();
+        assert!(d.is_empty());
+        d.files.push(FileChange::Deleted {
+            path: "a.txt".into(),
+            old_blob: crate::hash::hash_bytes(b"x"),
+        });
+        assert!(!d.is_empty());
+    }
+}

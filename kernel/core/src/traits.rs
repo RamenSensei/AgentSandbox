@@ -84,3 +84,40 @@ pub struct PreparedEffect {
     /// Current values of the contract's preconditions, observed now.
     pub observed_preconditions: serde_json::Value,
 }
+
+/// Result of committing an effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitResult {
+    /// External system response (canonicalized subset).
+    pub response: serde_json::Value,
+}
+
+/// A typed connector to an external system. Connectors are the ONLY code that
+/// touches real credentials; guests never see them. A connector declares the
+/// semantic contract of each operation — the kernel does not trust HTTP verbs.
+#[async_trait]
+pub trait Connector: Send + Sync {
+    fn name(&self) -> &str;
+
+    /// Operations this connector supports, with their effect class.
+    fn operations(&self) -> Vec<(String, EffectClass)>;
+
+    /// Validate + canonicalize arguments for an operation.
+    fn canonicalize(&self, operation: &str, args: &serde_json::Value)
+        -> KernelResult<serde_json::Value>;
+
+    /// Observe the live world and produce a preview (dry-run). Must not
+    /// cause any external side effect.
+    async fn prepare(&self, contract: &EffectContract) -> KernelResult<PreparedEffect>;
+
+    /// Perform the effect. Called only after commit-time revalidation.
+    async fn commit(&self, contract: &EffectContract) -> KernelResult<CommitResult>;
+
+    /// Best-effort compensation for a committed effect (e.g. close the PR).
+    async fn compensate(&self, contract: &EffectContract) -> KernelResult<CommitResult> {
+        let _ = contract;
+        Err(crate::error::KernelError::Connector(
+            "operation is not compensatable".into(),
+        ))
+    }
+}

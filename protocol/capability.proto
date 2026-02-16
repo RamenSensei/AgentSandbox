@@ -47,3 +47,29 @@ enum TrustLevel {
   TRUST_LEVEL_STANDARD = 4;
   TRUST_LEVEL_ELEVATED = 5;
 }
+
+message Principal {
+  string id = 1; // "pr-..."
+  PrincipalKind kind = 2;
+  string display_name = 3;
+  optional string parent = 4; // "pr-..."
+  TrustLevel trust = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Constraints
+// ---------------------------------------------------------------------------
+
+// A deterministic constraint on one operation parameter.
+// JSON: internally tagged with "kind" ("equals" | "one_of" | "glob" |
+// "prefix" | "max" | "forbidden") per ak-core Constraint.
+message Constraint {
+  oneof kind {
+    ConstraintEquals equals = 1;
+    ConstraintOneOf one_of = 2;
+    ConstraintGlob glob = 3;
+    ConstraintPrefix prefix = 4;
+    ConstraintMax max = 5;
+    ConstraintForbidden forbidden = 6;
+  }
+}

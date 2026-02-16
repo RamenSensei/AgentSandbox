@@ -51,3 +51,37 @@ pub struct StateDelta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects_committed: Vec<crate::ids::ReceiptId>,
 }
+
+impl StateDelta {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+            && self.processes_started.is_empty()
+            && self.processes_exited.is_empty()
+            && self.tool_sessions.is_empty()
+            && self.effects_proposed.is_empty()
+            && self.effects_committed.is_empty()
+    }
+}
+
+/// An immutable node in the world-state DAG.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateNode {
+    pub id: StateId,
+    pub episode: EpisodeId,
+    pub branch: BranchId,
+    /// Parent state; `None` only for the episode root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<StateId>,
+    /// Step that produced this node; `None` for roots and merge nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub produced_by: Option<StepId>,
+    /// Additional parent for merge nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_parent: Option<StateId>,
+    pub actor: PrincipalId,
+    pub delta: StateDelta,
+    /// Merkle root of the workspace tree at this node.
+    pub workspace_root: ContentHash,
+    pub replay_class: ReplayClass,
+    pub created_at: DateTime<Utc>,
+}

@@ -118,3 +118,32 @@ message CapabilityLease {
   google.protobuf.Struct preconditions = 11;
   bool revoked = 12;
 }
+
+// ---------------------------------------------------------------------------
+// Denials
+// ---------------------------------------------------------------------------
+
+// JSON: SCREAMING_SNAKE_CASE strings, e.g. "CAPABILITY_DENIED".
+enum DenialCode {
+  DENIAL_CODE_UNSPECIFIED = 0;
+  CAPABILITY_DENIED = 1;
+  CAPABILITY_EXPIRED = 2;
+  CAPABILITY_EXHAUSTED = 3;
+  BUDGET_EXHAUSTED = 4;
+  CONSTRAINT_VIOLATED = 5;
+  BRANCH_MISMATCH = 6;
+  EFFECT_REQUIRES_APPROVAL = 7;
+  STALE_AUTHORIZATION = 8;
+  PRECONDITION_FAILED = 9;
+  DUPLICATE_COMMIT = 10;
+  BACKEND_UNAVAILABLE = 11;
+  POLICY_FORBIDDEN = 12;
+}
+
+// A scope the agent may request to unblock itself.
+message RequestableScope {
+  string operation = 1;
+  // Constraint sketch the policy would consider.
+  google.protobuf.Value constraints = 2;
+  bool requires_human = 3;
+}

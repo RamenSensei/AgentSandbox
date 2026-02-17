@@ -73,3 +73,48 @@ message Constraint {
     ConstraintForbidden forbidden = 6;
   }
 }
+
+message ConstraintEquals {
+  google.protobuf.Value value = 1;
+}
+message ConstraintOneOf {
+  repeated google.protobuf.Value values = 1;
+}
+message ConstraintGlob {
+  string pattern = 1; // `*`-only glob
+}
+message ConstraintPrefix {
+  string prefix = 1;
+}
+message ConstraintMax {
+  double max = 1;
+}
+message ConstraintForbidden {}
+
+// ---------------------------------------------------------------------------
+// Leases
+// ---------------------------------------------------------------------------
+
+// A grant of bounded authority to one principal (ak-core CapabilityLease).
+// Operations are namespaced strings, e.g. "fs.write",
+// "github.create_pull_request".
+message CapabilityLease {
+  string id = 1; // "lease-..."
+  string principal = 2; // "pr-..."
+  string operation = 3;
+  // Constraints keyed by canonical parameter name (insertion-ordered in the
+  // JSON binding).
+  map<string, Constraint> constraints = 4;
+  uint32 remaining_uses = 5;
+  google.protobuf.Timestamp issued_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  // Branch this lease is bound to, if any. Authority does not follow the
+  // agent across branches unless explicitly rebound.
+  optional string bound_branch = 8; // "br-..."
+  ResourceBudget budget = 9;
+  // Lease this one was attenuated from, for the audit chain.
+  optional string parent_lease = 10; // "lease-..."
+  // Deterministic preconditions revalidated at commit time.
+  google.protobuf.Struct preconditions = 11;
+  bool revoked = 12;
+}

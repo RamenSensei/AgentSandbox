@@ -169,3 +169,25 @@ message ErrorEnvelope {
 // ---------------------------------------------------------------------------
 // Capability service
 // ---------------------------------------------------------------------------
+
+message CapabilityDescribeRequest {
+  string principal = 1; // "pr-..."
+  // If set, only leases for this operation namespace.
+  optional string namespace = 2;
+}
+
+message CapabilityDescribeResponse {
+  repeated CapabilityLease leases = 1;
+}
+
+message CapabilityRequestRequest {
+  string principal = 1;
+  string operation = 2;
+  map<string, Constraint> constraints = 3;
+  uint32 uses = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  ResourceBudget budget = 6;
+  optional string bound_branch = 7;
+  // Free-text justification for policy / human review. Audit-only input.
+  string justification = 8;
+}

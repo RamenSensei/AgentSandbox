@@ -147,3 +147,25 @@ message RequestableScope {
   google.protobuf.Value constraints = 2;
   bool requires_human = 3;
 }
+
+// The structured denial returned instead of a bare "Permission denied".
+// Invariant: no denial without a machine-readable explanation.
+message Denial {
+  DenialCode code = 1;
+  string attempted_operation = 2;
+  string reason = 3;
+  repeated string safe_alternatives = 4;
+  repeated RequestableScope requestable_scopes = 5;
+  bool escalation_allowed = 6;
+}
+
+// Wire-serializable error envelope (ak-core ErrorEnvelope).
+message ErrorEnvelope {
+  string code = 1; // e.g. "DENIED", "NOT_FOUND", "STALE_AUTHORIZATION"
+  string message = 2;
+  optional Denial denial = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Capability service
+// ---------------------------------------------------------------------------

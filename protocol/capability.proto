@@ -191,3 +191,25 @@ message CapabilityRequestRequest {
   // Free-text justification for policy / human review. Audit-only input.
   string justification = 8;
 }
+
+message CapabilityRequestResponse {
+  oneof outcome {
+    CapabilityLease lease = 1;
+    Denial denial = 2;
+    // The request is queued for a human decision.
+    string pending_approval_id = 3;
+  }
+}
+
+message CapabilityDelegateRequest {
+  string parent_lease = 1; // "lease-..."
+  string child_principal = 2; // "pr-..."
+  map<string, Constraint> constraints = 3;
+  uint32 uses = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  ResourceBudget budget = 6;
+}
+
+message CapabilityDelegateResponse {
+  CapabilityLease lease = 1;
+}

@@ -1,0 +1,32 @@
+// AgentKernel Execution Protocol — external effects.
+//
+// Anything that leaves the sandbox goes through:
+// propose -> canonicalize -> prepare -> authorize -> commit-time
+// revalidation -> commit -> signed receipt.
+// Mirrors ak-core kernel/core/src/effect.rs.
+syntax = "proto3";
+
+package agentkernel.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "protocol/capability.proto";
+
+// Honest classification of an effect's reversibility.
+// JSON: snake_case strings ("pure", ..., "opaque_external").
+// Ordered by increasing severity.
+enum EffectClass {
+  EFFECT_CLASS_UNSPECIFIED = 0;
+  // No observable side effect.
+  EFFECT_CLASS_PURE = 1;
+  // Reversible by rolling back local state.
+  EFFECT_CLASS_LOCAL_REVERSIBLE = 2;
+  // The remote system offers a true undo.
+  EFFECT_CLASS_REMOTE_REVERSIBLE = 3;
+  // Reversible only via a compensating action (e.g. close the PR).
+  EFFECT_CLASS_COMPENSATABLE = 4;
+  // Cannot be undone (e.g. an email that has been read).
+  EFFECT_CLASS_IRREVERSIBLE = 5;
+  // Semantics unknown; treated as irreversible and maximally restricted.
+  EFFECT_CLASS_OPAQUE_EXTERNAL = 6;
+}

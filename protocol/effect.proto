@@ -30,3 +30,31 @@ enum EffectClass {
   // Semantics unknown; treated as irreversible and maximally restricted.
   EFFECT_CLASS_OPAQUE_EXTERNAL = 6;
 }
+
+// The canonical, immutable description of what will be done to the world.
+// The hash of this structure is what humans approve; approving an effect
+// means approving *exactly* this.
+message EffectContract {
+  string operation = 1; // e.g. "github.create_pull_request"
+  string resource = 2; // e.g. "org/repo"
+  google.protobuf.Struct arguments = 3;
+  // Deterministic preconditions on the external world, revalidated at commit.
+  google.protobuf.Struct preconditions = 4;
+  // Exactly-once key: "episode-<n>-step-<m>" by convention.
+  string idempotency_key = 5;
+  EffectClass class = 6;
+}
+
+// Lifecycle of a pending effect.
+// JSON: internally tagged with "phase" ("proposed" | "prepared" | "approved" |
+// "committed" | "aborted" | "compensated").
+message EffectPhase {
+  oneof phase {
+    EffectPhaseProposed proposed = 1;
+    EffectPhasePrepared prepared = 2;
+    EffectPhaseApproved approved = 3;
+    EffectPhaseCommitted committed = 4;
+    EffectPhaseAborted aborted = 5;
+    EffectPhaseCompensated compensated = 6;
+  }
+}

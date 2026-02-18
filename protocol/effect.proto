@@ -58,3 +58,35 @@ message EffectPhase {
     EffectPhaseCompensated compensated = 6;
   }
 }
+
+message EffectPhaseProposed {}
+message EffectPhasePrepared {
+  google.protobuf.Value preview = 1;
+}
+message EffectPhaseApproved {
+  string approver = 1; // "pr-..."
+  google.protobuf.Timestamp approved_at = 2;
+  uint64 policy_epoch = 3;
+}
+message EffectPhaseCommitted {
+  string receipt = 1; // "rcpt-..."
+}
+message EffectPhaseAborted {
+  string reason = 1;
+}
+message EffectPhaseCompensated {
+  string compensating_receipt = 1; // "rcpt-..."
+}
+
+// A pending (not yet committed) external effect.
+message PendingEffect {
+  string id = 1; // "fx-..."
+  EffectContract contract = 2;
+  string contract_hash = 3; // "sha256:..."
+  string proposer = 4; // "pr-..."
+  string branch = 5; // "br-..."
+  string step = 6; // "step-..."
+  string lease = 7; // "lease-..."
+  EffectPhase phase = 8;
+  google.protobuf.Timestamp proposed_at = 9;
+}

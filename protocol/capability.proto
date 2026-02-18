@@ -213,3 +213,23 @@ message CapabilityDelegateRequest {
 message CapabilityDelegateResponse {
   CapabilityLease lease = 1;
 }
+
+message CapabilityRevokeRequest {
+  string lease = 1; // "lease-..."
+  // Revoke the whole attenuation subtree rooted at this lease.
+  bool cascade = 2;
+  string reason = 3;
+}
+
+message CapabilityRevokeResponse {
+  repeated string revoked_leases = 1;
+}
+
+// capability.describe / capability.request / capability.delegate /
+// capability.revoke
+service CapabilityService {
+  rpc Describe(CapabilityDescribeRequest) returns (CapabilityDescribeResponse);
+  rpc Request(CapabilityRequestRequest) returns (CapabilityRequestResponse);
+  rpc Delegate(CapabilityDelegateRequest) returns (CapabilityDelegateResponse);
+  rpc Revoke(CapabilityRevokeRequest) returns (CapabilityRevokeResponse);
+}

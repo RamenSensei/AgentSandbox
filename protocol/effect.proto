@@ -139,3 +139,25 @@ message EffectProposeResponse {
 message EffectPrepareRequest {
   string effect = 1; // "fx-..."
 }
+
+message EffectPrepareResponse {
+  // Human/agent-reviewable preview of exactly what will happen.
+  google.protobuf.Value preview = 1;
+  // Current values of the contract's preconditions, observed now.
+  google.protobuf.Value observed_preconditions = 2;
+  PendingEffect effect = 3;
+}
+
+message EffectCommitRequest {
+  string effect = 1; // "fx-..."
+  // The contract hash the caller believes it is committing. Commit fails
+  // with STALE_AUTHORIZATION when this does not match the stored contract.
+  string expected_contract_hash = 2;
+}
+
+message EffectCommitResponse {
+  oneof outcome {
+    Receipt receipt = 1;
+    Denial denial = 2;
+  }
+}

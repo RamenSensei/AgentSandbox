@@ -90,3 +90,29 @@ message PendingEffect {
   EffectPhase phase = 8;
   google.protobuf.Timestamp proposed_at = 9;
 }
+
+message ReceiptBody {
+  string effect = 1; // "fx-..."
+  string who = 2; // "pr-..."
+  string operation = 3;
+  string resource = 4;
+  string contract_hash = 5;
+  string branch = 6;
+  string step = 7;
+  uint64 policy_epoch = 8;
+  // Hash of the approval decision (who approved what, when).
+  string authorization_witness = 9;
+  // Digest of the external system's response.
+  string external_response_digest = 10;
+  google.protobuf.Timestamp committed_at = 11;
+}
+
+// A non-repudiable record of a committed effect. The signature covers
+// canonical_json(body).
+message Receipt {
+  string id = 1; // "rcpt-..."
+  ReceiptBody body = 2;
+  // Ed25519 signature over canonical JSON of body, hex-encoded.
+  string signature = 3;
+  string key_id = 4;
+}

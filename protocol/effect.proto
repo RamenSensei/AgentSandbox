@@ -161,3 +161,24 @@ message EffectCommitResponse {
     Denial denial = 2;
   }
 }
+
+message EffectCompensateRequest {
+  string effect = 1; // "fx-..." (must be committed)
+  string reason = 2;
+}
+
+message EffectCompensateResponse {
+  Receipt compensating_receipt = 1;
+}
+
+// effect.propose / effect.prepare / effect.commit / effect.compensate
+service EffectService {
+  rpc Propose(EffectProposeRequest) returns (EffectProposeResponse);
+  // Dry-run against the live external system. Never causes a side effect.
+  rpc Prepare(EffectPrepareRequest) returns (EffectPrepareResponse);
+  // Runs commit-time revalidation of lease, preconditions and contract hash
+  // before touching the world. Duplicate idempotency keys return the
+  // original receipt.
+  rpc Commit(EffectCommitRequest) returns (EffectCommitResponse);
+  rpc Compensate(EffectCompensateRequest) returns (EffectCompensateResponse);
+}

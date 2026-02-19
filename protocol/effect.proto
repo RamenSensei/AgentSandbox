@@ -116,3 +116,26 @@ message Receipt {
   string signature = 3;
   string key_id = 4;
 }
+
+// ---------------------------------------------------------------------------
+// Effect service
+// ---------------------------------------------------------------------------
+
+message EffectProposeRequest {
+  EffectContract contract = 1;
+  string proposer = 2; // "pr-..."
+  string branch = 3; // "br-..."
+  string step = 4; // "step-..."
+  string lease = 5; // "lease-..."
+}
+
+message EffectProposeResponse {
+  oneof outcome {
+    PendingEffect effect = 1;
+    Denial denial = 2;
+  }
+}
+
+message EffectPrepareRequest {
+  string effect = 1; // "fx-..."
+}

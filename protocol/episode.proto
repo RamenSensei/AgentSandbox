@@ -80,3 +80,29 @@ message Action {
   optional string intent_hint = 3;
   ResourceBudget budget = 4;
 }
+
+// ---------------------------------------------------------------------------
+// Observations
+// ---------------------------------------------------------------------------
+
+// JSON: internally tagged with "kind" ("success" | "failure" | "denied" |
+// "effect_pending" | "effect_committed").
+message Observation {
+  oneof kind {
+    ObservationSuccess success = 1;
+    ObservationFailure failure = 2;
+    ObservationDenied denied = 3;
+    ObservationEffectPending effect_pending = 4;
+    ObservationEffectCommitted effect_committed = 5;
+  }
+}
+
+message ObservationSuccess {
+  string summary = 1;
+  optional google.protobuf.Value data = 2;
+  optional string stdout_head = 3;
+  int32 exit_code = 4;
+  // Full output is addressable in the ledger via this hash.
+  string full_output = 5; // "sha256:..."
+  bool truncated = 6;
+}

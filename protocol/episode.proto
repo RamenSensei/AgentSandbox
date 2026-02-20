@@ -1,0 +1,36 @@
+// AgentKernel Execution Protocol — episodes, steps and branches.
+//
+// Mirrors ak-core kernel/core/src/{action,observation}.rs plus the episode /
+// branch surface of the kernel API server.
+syntax = "proto3";
+
+package agentkernel.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "protocol/capability.proto";
+import "protocol/effect.proto";
+import "protocol/trace.proto";
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+// The action taxonomy. Every variant is a *semantic* request; the kernel —
+// not the agent — decides which isolation backend executes it.
+// JSON: internally tagged with "kind" ("shell" | "read_file" | "write_file" |
+// "delete_path" | "http_read" | "mcp_invoke" | "connector_op" |
+// "trace_query" | "branch_diff").
+message ActionKind {
+  oneof kind {
+    ActionShell shell = 1;
+    ActionReadFile read_file = 2;
+    ActionWriteFile write_file = 3;
+    ActionDeletePath delete_path = 4;
+    ActionHttpRead http_read = 5;
+    ActionMcpInvoke mcp_invoke = 6;
+    ActionConnectorOp connector_op = 7;
+    ActionTraceQuery trace_query = 8;
+    ActionBranchDiff branch_diff = 9;
+  }
+}

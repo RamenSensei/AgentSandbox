@@ -208,3 +208,27 @@ message StepExplainResponse {
   string backend = 4;
   string backend_rationale = 5;
 }
+
+message StepRetryRequest {
+  string step = 1; // "step-..."
+  // Retry on this branch (defaults to the original branch).
+  optional string branch = 2;
+  // Override budget for the retry.
+  optional ResourceBudget budget = 3;
+}
+
+message StepRetryResponse {
+  StepExecuteResponse result = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Branches
+// ---------------------------------------------------------------------------
+
+message BranchForkRequest {
+  string branch = 1; // "br-..." branch to fork from
+  // Fork from this state instead of the head.
+  optional string from_state = 2; // "st-..."
+  // Number of sibling forks to create (parallel speculation).
+  uint32 count = 3;
+}

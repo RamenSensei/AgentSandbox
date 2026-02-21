@@ -106,3 +106,24 @@ message ObservationSuccess {
   string full_output = 5; // "sha256:..."
   bool truncated = 6;
 }
+message ObservationFailure {
+  string summary = 1;
+  int32 exit_code = 2;
+  optional string first_causal_failure = 3;
+  string full_output = 4;
+}
+message ObservationDenied {
+  Denial denial = 1;
+}
+message ObservationEffectPending {
+  string effect = 1; // "fx-..."
+  string contract_hash = 2;
+  EffectClass class = 3;
+}
+message ObservationEffectCommitted {
+  string receipt = 1; // "rcpt-..."
+}
+
+// ---------------------------------------------------------------------------
+// Episodes
+// ---------------------------------------------------------------------------

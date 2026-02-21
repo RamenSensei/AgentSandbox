@@ -127,3 +127,32 @@ message ObservationEffectCommitted {
 // ---------------------------------------------------------------------------
 // Episodes
 // ---------------------------------------------------------------------------
+
+message Episode {
+  string id = 1; // "ep-..."
+  string title = 2;
+  string owner = 3; // "pr-..."
+  string root_state = 4; // "st-..."
+  // The default branch created with the episode.
+  string main_branch = 5; // "br-..."
+  ResourceBudget budget = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message Branch {
+  string id = 1; // "br-..."
+  string episode = 2; // "ep-..."
+  optional string parent_branch = 3; // "br-..."
+  string forked_from = 4; // "st-..."
+  string head = 5; // "st-..."
+  bool discarded = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message EpisodeCreateRequest {
+  string title = 1;
+  string owner = 2; // "pr-..."
+  ResourceBudget budget = 3;
+  // Optional initial workspace, as a content-addressed tree root.
+  optional string workspace_root = 4; // "sha256:..."
+}

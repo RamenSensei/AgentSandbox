@@ -156,3 +156,30 @@ message EpisodeCreateRequest {
   // Optional initial workspace, as a content-addressed tree root.
   optional string workspace_root = 4; // "sha256:..."
 }
+
+message EpisodeCreateResponse {
+  Episode episode = 1;
+  Branch main_branch = 2;
+}
+
+message EpisodeDescribeRequest {
+  string episode = 1; // "ep-..."
+}
+
+message EpisodeDescribeResponse {
+  Episode episode = 1;
+  repeated Branch branches = 2;
+  uint32 step_count = 3;
+  uint32 pending_effects = 4;
+  ResourceBudget budget_remaining = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Steps
+// ---------------------------------------------------------------------------
+
+message StepExecuteRequest {
+  string branch = 1; // "br-..."
+  string actor = 2; // "pr-..."
+  Action action = 3;
+}

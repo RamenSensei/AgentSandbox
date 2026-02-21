@@ -183,3 +183,28 @@ message StepExecuteRequest {
   string actor = 2; // "pr-..."
   Action action = 3;
 }
+
+message StepExecuteResponse {
+  string step = 1; // "step-..."
+  Observation observation = 2;
+  // State node produced by this step (absent when the step was denied and
+  // produced no transition — no invisible state transitions).
+  optional string produced_state = 3; // "st-..."
+  ResourceBudget usage = 4;
+}
+
+message StepExplainRequest {
+  string step = 1; // "step-..."
+}
+
+// Why the kernel did what it did: the full authorization narrative.
+message StepExplainResponse {
+  TraceEntry entry = 1;
+  // The lease presented, as recorded at execution time.
+  CapabilityLease lease = 2;
+  // Constraint checks performed: parameter name -> outcome narrative.
+  map<string, string> constraint_checks = 3;
+  // Chosen isolation backend and why.
+  string backend = 4;
+  string backend_rationale = 5;
+}

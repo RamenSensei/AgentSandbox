@@ -85,3 +85,41 @@ message StateDelta {
   repeated string effects_proposed = 6; // "fx-..."
   repeated string effects_committed = 7; // "rcpt-..."
 }
+
+// An immutable node in the world-state DAG.
+message StateNode {
+  string id = 1; // "st-..."
+  string episode = 2; // "ep-..."
+  string branch = 3; // "br-..."
+  optional string parent = 4; // "st-..."; absent only for the episode root
+  optional string produced_by = 5; // "step-..."; absent for roots and merges
+  optional string merge_parent = 6; // "st-..." for merge nodes
+  string actor = 7; // "pr-..."
+  StateDelta delta = 8;
+  // Merkle root of the workspace tree at this node.
+  string workspace_root = 9; // "sha256:..."
+  ReplayClass replay_class = 10;
+  google.protobuf.Timestamp created_at = 11;
+}
+
+// ---------------------------------------------------------------------------
+// Trace entries
+// ---------------------------------------------------------------------------
+
+// One entry of the causal ledger: an action, its authorization, its
+// observation, and the state node it produced.
+message TraceEntry {
+  string step = 1; // "step-..."
+  string episode = 2; // "ep-..."
+  string branch = 3; // "br-..."
+  string actor = 4; // "pr-..."
+  // The action as canonical JSON (ActionKind, tagged with "kind").
+  google.protobuf.Struct action = 5;
+  string lease = 6; // "lease-..."
+  // The observation as canonical JSON (Observation, tagged with "kind").
+  google.protobuf.Struct observation = 7;
+  optional string produced_state = 8; // "st-..."
+  ResourceBudget usage = 9;
+  google.protobuf.Timestamp started_at = 10;
+  google.protobuf.Timestamp finished_at = 11;
+}

@@ -123,3 +123,26 @@ message TraceEntry {
   google.protobuf.Timestamp started_at = 10;
   google.protobuf.Timestamp finished_at = 11;
 }
+
+message TraceQueryRequest {
+  // Query in the trace query language, e.g.
+  // `effects where class >= compensatable and branch = "br-42"`.
+  string query = 1;
+  optional string episode = 2; // scope: "ep-..."
+  uint32 limit = 3;
+  string page_token = 4;
+}
+
+message TraceQueryResponse {
+  repeated TraceEntry entries = 1;
+  string next_page_token = 2;
+}
+
+// trace.query
+service TraceService {
+  rpc Query(TraceQueryRequest) returns (TraceQueryResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Replay service
+// ---------------------------------------------------------------------------

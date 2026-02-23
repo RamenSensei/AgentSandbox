@@ -286,3 +286,33 @@ message BranchDiscardRequest {
   string branch = 1; // "br-..."
   string reason = 2;
 }
+
+message BranchDiscardResponse {
+  Branch branch = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
+
+// episode.create / episode.describe
+service EpisodeService {
+  rpc Create(EpisodeCreateRequest) returns (EpisodeCreateResponse);
+  rpc Describe(EpisodeDescribeRequest) returns (EpisodeDescribeResponse);
+}
+
+// step.execute / step.explain / step.retry
+service StepService {
+  rpc Execute(StepExecuteRequest) returns (StepExecuteResponse);
+  rpc Explain(StepExplainRequest) returns (StepExplainResponse);
+  rpc Retry(StepRetryRequest) returns (StepRetryResponse);
+}
+
+// branch.fork / branch.diff / branch.compare / branch.merge / branch.discard
+service BranchService {
+  rpc Fork(BranchForkRequest) returns (BranchForkResponse);
+  rpc Diff(BranchDiffRequest) returns (BranchDiffResponse);
+  rpc Compare(BranchCompareRequest) returns (BranchCompareResponse);
+  rpc Merge(BranchMergeRequest) returns (BranchMergeResponse);
+  rpc Discard(BranchDiscardRequest) returns (BranchDiscardResponse);
+}

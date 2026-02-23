@@ -1,0 +1,32 @@
+// AgentKernel Execution Protocol — the causal ledger and replay.
+//
+// Mirrors ak-core kernel/core/src/{state,replay,observation}.rs.
+syntax = "proto3";
+
+package agentkernel.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "protocol/capability.proto";
+import "protocol/effect.proto";
+
+// ---------------------------------------------------------------------------
+// Replay classes and modes
+// ---------------------------------------------------------------------------
+
+// What a backend can faithfully capture and replay.
+// JSON: snake_case strings ("audit_only", ...). Ordered by capability.
+enum ReplayClass {
+  REPLAY_CLASS_UNSPECIFIED = 0;
+  // Only the recorded observations can be played back; no re-execution.
+  REPLAY_CLASS_AUDIT_ONLY = 1;
+  // Workspace files are content-addressed and restorable.
+  REPLAY_CLASS_FILESYSTEM_ONLY = 2;
+  // Filesystem plus process tree checkpoint/restore.
+  REPLAY_CLASS_PROCESS_AND_FILESYSTEM = 3;
+  // Framework-level host calls recorded, replayable byte-identically under
+  // pinned time/randomness.
+  REPLAY_CLASS_FRAMEWORK_HOST_CALLS = 4;
+  // Browser profile and page state are restorable.
+  REPLAY_CLASS_BROWSER_PROFILE = 5;
+}

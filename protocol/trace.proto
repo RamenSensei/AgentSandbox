@@ -30,3 +30,32 @@ enum ReplayClass {
   // Browser profile and page state are restorable.
   REPLAY_CLASS_BROWSER_PROFILE = 5;
 }
+
+// The three replay modes exposed by the protocol.
+// JSON: "audit" | "sandbox" | "live".
+enum ReplayMode {
+  REPLAY_MODE_UNSPECIFIED = 0;
+  // Play back recorded model responses, tool results and receipts.
+  // Never re-executes anything.
+  REPLAY_MODE_AUDIT = 1;
+  // Restore internal state and re-execute local code with recorded inputs
+  // substituted where captured.
+  REPLAY_MODE_SANDBOX = 2;
+  // Reconnect to the live external world and re-execute the same effect
+  // contracts. Guarantees the *contract*, not the outcome.
+  REPLAY_MODE_LIVE = 3;
+}
+
+// ---------------------------------------------------------------------------
+// State DAG
+// ---------------------------------------------------------------------------
+
+// One file-level change in the workspace adapter.
+// JSON: internally tagged with "op" ("added" | "modified" | "deleted").
+message FileChange {
+  oneof op {
+    FileChangeAdded added = 1;
+    FileChangeModified modified = 2;
+    FileChangeDeleted deleted = 3;
+  }
+}

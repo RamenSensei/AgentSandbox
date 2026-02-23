@@ -262,3 +262,27 @@ message BranchCompareResponse {
   // Paths modified in both branches.
   repeated string conflicting_paths = 4;
 }
+
+message BranchMergeRequest {
+  string branch = 1; // "br-..." source
+  string into = 2; // "br-..." destination
+  // Fail instead of merging when conflicting paths exist.
+  bool require_clean = 3;
+}
+
+message BranchMergeResponse {
+  oneof outcome {
+    // The merge state node created on the destination branch.
+    StateNode merged = 1;
+    BranchMergeConflict conflict = 2;
+  }
+}
+
+message BranchMergeConflict {
+  repeated string paths = 1;
+}
+
+message BranchDiscardRequest {
+  string branch = 1; // "br-..."
+  string reason = 2;
+}

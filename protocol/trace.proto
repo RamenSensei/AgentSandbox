@@ -59,3 +59,29 @@ message FileChange {
     FileChangeDeleted deleted = 3;
   }
 }
+
+message FileChangeAdded {
+  string path = 1;
+  string blob = 2; // "sha256:..."
+  uint32 mode = 3;
+}
+message FileChangeModified {
+  string path = 1;
+  string old_blob = 2;
+  string new_blob = 3;
+}
+message FileChangeDeleted {
+  string path = 1;
+  string old_blob = 2;
+}
+
+// The immutable delta produced by one step, spanning all adapters.
+message StateDelta {
+  repeated FileChange files = 1;
+  repeated string processes_started = 2;
+  repeated string processes_exited = 3;
+  repeated string tool_sessions = 4;
+  uint64 policy_epoch = 5;
+  repeated string effects_proposed = 6; // "fx-..."
+  repeated string effects_committed = 7; // "rcpt-..."
+}

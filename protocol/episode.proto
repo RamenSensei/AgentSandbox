@@ -232,3 +232,33 @@ message BranchForkRequest {
   // Number of sibling forks to create (parallel speculation).
   uint32 count = 3;
 }
+
+message BranchForkResponse {
+  repeated Branch branches = 1;
+}
+
+message BranchDiffRequest {
+  string branch = 1; // "br-..."
+  // Diff since this state (defaults to the fork point).
+  optional string since = 2; // "st-..."
+}
+
+message BranchDiffResponse {
+  StateDelta delta = 1;
+  // Semantic summary, e.g. "3 files changed, 1 effect proposed".
+  string summary = 2;
+}
+
+message BranchCompareRequest {
+  string branch = 1; // "br-..."
+  string other = 2; // "br-..."
+}
+
+message BranchCompareResponse {
+  // Delta of each branch since the common ancestor state.
+  string common_ancestor = 1; // "st-..."
+  StateDelta left_delta = 2;
+  StateDelta right_delta = 3;
+  // Paths modified in both branches.
+  repeated string conflicting_paths = 4;
+}

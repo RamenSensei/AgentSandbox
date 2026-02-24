@@ -146,3 +146,33 @@ service TraceService {
 // ---------------------------------------------------------------------------
 // Replay service
 // ---------------------------------------------------------------------------
+
+message ReplayRequest {
+  string episode = 1; // "ep-..."
+  // Replay only this contiguous step range (empty = whole episode).
+  optional string from_step = 2;
+  optional string to_step = 3;
+}
+
+// One divergence between the recorded run and the replayed run.
+message ReplayDivergence {
+  string step = 1;
+  // "observation" | "state" | "effect_contract" | "effect_outcome"
+  string layer = 2;
+  string recorded_digest = 3;
+  string replayed_digest = 4;
+  string detail = 5;
+}
+
+message ReplayReport {
+  string episode = 1;
+  ReplayMode mode = 2;
+  // The weakest replay class among the replayed steps: the honest ceiling
+  // of what this report can claim.
+  ReplayClass effective_class = 3;
+  uint32 steps_replayed = 4;
+  repeated ReplayDivergence divergences = 5;
+  // For live replay: receipts of re-executed effect contracts.
+  repeated Receipt receipts = 6;
+  google.protobuf.Timestamp completed_at = 7;
+}

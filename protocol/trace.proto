@@ -176,3 +176,11 @@ message ReplayReport {
   repeated Receipt receipts = 6;
   google.protobuf.Timestamp completed_at = 7;
 }
+
+// replay.audit / replay.sandbox / replay.live
+service ReplayService {
+  rpc Audit(ReplayRequest) returns (ReplayReport);
+  rpc Sandbox(ReplayRequest) returns (ReplayReport);
+  // Live replay guarantees the contract, not the outcome.
+  rpc Live(ReplayRequest) returns (ReplayReport);
+}

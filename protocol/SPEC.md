@@ -54,3 +54,35 @@ Everything else in the protocol is machinery for enforcing these:
    present.
 
 ---
+
+## 2. Objects and identifiers
+
+All identifiers are opaque strings with a fixed prefix:
+
+| Prefix   | Object            | Description |
+|----------|-------------------|-------------|
+| `ep-`    | Episode           | A long-running task; root of a state DAG. |
+| `step-`  | Step              | One decision-and-execution unit. |
+| `br-`    | Branch            | A speculative world line forked from a state. |
+| `st-`    | StateNode         | Immutable, content-addressed world state. |
+| `pr-`    | Principal         | Agent, sub-agent, tool, human or kernel. |
+| `lease-` | CapabilityLease   | Time-bound, budgeted, attenuable authority. |
+| `fx-`    | PendingEffect     | Proposed-but-uncommitted external effect. |
+| `rcpt-`  | Receipt           | Signed proof of a committed effect. |
+
+Content hashes are strings of the form `sha256:<hex>` computed over
+*canonical JSON*: object keys sorted lexicographically, compact separators,
+UTF-8. Contract hashes and receipt signatures depend on this encoding being
+stable across implementations.
+
+JSON encoding rules (mirroring ak-core serde):
+
+- Field names are `snake_case`.
+- Sum types are internally tagged: `ActionKind` and `Observation` by
+  `"kind"`, `EffectPhase` by `"phase"`, `FileChange` by `"op"`,
+  `Constraint` by `"kind"` — with `snake_case` variant names.
+- `DenialCode` values are `SCREAMING_SNAKE_CASE` (e.g.
+  `CAPABILITY_DENIED`).
+- `EffectClass`, `ReplayClass`, `ReplayMode`, `TrustLevel`,
+  `PrincipalKind` values are `snake_case` strings.
+- Optional fields are omitted when absent, never `null`-filled by servers.

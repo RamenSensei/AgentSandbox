@@ -86,3 +86,47 @@ JSON encoding rules (mirroring ak-core serde):
 - `EffectClass`, `ReplayClass`, `ReplayMode`, `TrustLevel`,
   `PrincipalKind` values are `snake_case` strings.
 - Optional fields are omitted when absent, never `null`-filled by servers.
+
+### 2.1 Errors
+
+Every non-2xx HTTP response is an `ErrorEnvelope`:
+
+```json
+{ "code": "STALE_AUTHORIZATION", "message": "...", "denial": { ... } }
+```
+
+`denial` is present exactly when `code` is `DENIED`; denials are served as
+HTTP **403** with the full structured `Denial`. Merge conflicts are `409
+MERGE_CONFLICT`; failed commit-time revalidation is `409
+STALE_AUTHORIZATION` / `PRECONDITION_FAILED`; unknown objects are `404
+NOT_FOUND`.
+
+---
+
+## 3. The world-state DAG
+
+```
+                    ep-1 (episode)
+                      |
+    root  st-0 ───────┼──────────────────────────────
+            \         |            main branch br-0
+             st-1 ── st-2 ─────────── st-6 ── st-7(M)
+                       \                       /
+                        \  fork               / merge
+                br-1:    st-3 ── st-4 ── st-5
+```
+
+- An **episode** is created with a root state and a main branch.
+- Each successful **step** appends one `StateNode` whose `StateDelta` is
+  the complete, adapter-spanning record of what changed.
+- A **branch** is a mutable head pointer into the DAG; `branch.fork` (with
+  `count > 1` for parallel speculation) creates siblings that share history
+  by construction. Nodes are immutable; branches never rewrite them.
+- `branch.diff` returns the accumulated delta since a state (default: the
+  fork point). `branch.compare` diffs two branches against their common
+  ancestor and lists `conflicting_paths`. `branch.merge` creates a merge
+  node (with `merge_parent`) or reports a conflict. `branch.discard` marks
+  the branch dead and releases backend resources; the nodes remain in the
+  ledger for audit.
+- Leases may be **branch-bound** (`bound_branch`): authority does not
+  follow an agent across speculative branches unless explicitly rebound.

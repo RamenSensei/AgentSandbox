@@ -206,3 +206,30 @@ Key rules:
 - `effect.compensate` runs the connector's compensating action (e.g. close
   the PR) and yields a second receipt; it never pretends compensation is
   undo.
+
+## 6. Capabilities
+
+```
+   capability.request ──> lease-A (principal pr-agent, github.create_pull_request,
+        │                          constraints{repository=org/repo, head prefix
+        │                          "sandbox/", merge forbidden}, 1 use, 10 min,
+        │                          bound to br-42)
+        │ capability.delegate (attenuate)
+        v
+   lease-B (pr-child) — every dimension ≤ lease-A; parent_lease = lease-A
+        │ capability.revoke {cascade: true}
+        v
+   lease-A, lease-B revoked (whole subtree)
+```
+
+- `capability.describe` lists a principal's live leases.
+- `capability.request` yields a lease, a `Denial`, or a
+  `pending_approval_id` when a human must decide.
+- `capability.delegate` verifies attenuation per-dimension: every parent
+  constraint must be present and provably narrowed or identical; uses,
+  expiry and budget must fit within the parent; the child records
+  `parent_lease` for the audit chain.
+- `capability.revoke` with `cascade` revokes the delegation subtree.
+- Budgets (`cpu_ms`, `memory_bytes`, `network_bytes`, `tokens`,
+  `cost_micro_usd`, `risk_units`) are a single model shared by episodes,
+  actions and leases, charged at step boundaries.

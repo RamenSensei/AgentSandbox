@@ -154,3 +154,55 @@ Authorization of a step is deterministic: lease revocation, expiry,
 remaining uses, principal, operation, branch binding, and per-parameter
 `Constraint` checks (`equals`, `one_of`, `glob` (`*`-only), `prefix`,
 `max`, `forbidden`), in that order. The first failure becomes the denial.
+
+## 5. Effect lifecycle
+
+OS snapshots are not a transaction for the external world. Anything that
+leaves the sandbox goes through:
+
+```
+            propose ──> canonicalize ──> PROPOSED
+                                            │ effect.prepare (dry-run,
+                                            │  never a side effect)
+                                            v
+                                        PREPARED ──preview──> human/policy
+                                            │ effect.approve
+                                            │  (approves exactly the
+                                            │   contract_hash, nothing else)
+                                            v
+                                        APPROVED
+                                            │ effect.commit:
+                                            │  revalidate lease + policy
+                                            │  epoch + preconditions +
+                                            │  expected_contract_hash
+                            ┌───────────────┴───────────────┐
+                     stale/failed                       revalidated
+                            v                                v
+                        ABORTED                         COMMITTED ──> signed
+                                                            │         Receipt
+                                                            │ effect.compensate
+                                                            v
+                                                       COMPENSATED
+```
+
+Key rules:
+
+- The `EffectContract` (`operation`, `resource`, canonical `arguments`,
+  `preconditions`, `idempotency_key`, `class`) is immutable once proposed.
+  Its canonical-JSON hash is what gets approved; **approving an effect
+  means approving exactly that hash**. Any drift fails commit with
+  `STALE_AUTHORIZATION`.
+- `EffectClass` is the honest reversibility scale, ordered by severity:
+  `pure < local_reversible < remote_reversible < compensatable <
+  irreversible < opaque_external`. Unknown semantics are `opaque_external`
+  and treated as irreversible and maximally restricted.
+- Commit is exactly-once: a duplicate `idempotency_key` returns the
+  original receipt instead of re-executing.
+- The `Receipt` is non-repudiable: an Ed25519 signature over
+  `canonical_json(body)`, where the body binds effect, principal,
+  operation, resource, contract hash, branch, step, policy epoch, an
+  `authorization_witness` (hash of who approved what, when) and the digest
+  of the external system's response.
+- `effect.compensate` runs the connector's compensating action (e.g. close
+  the PR) and yields a second receipt; it never pretends compensation is
+  undo.

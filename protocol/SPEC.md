@@ -130,3 +130,27 @@ NOT_FOUND`.
   ledger for audit.
 - Leases may be **branch-bound** (`bound_branch`): authority does not
   follow an agent across speculative branches unless explicitly rebound.
+
+## 4. Steps and observations
+
+`step.execute` takes `{branch, actor, action}`. The kernel — never the
+agent — selects the isolation backend. The response's `Observation` is one
+of:
+
+| kind               | Meaning |
+|--------------------|---------|
+| `success`          | Ran; distilled summary + `full_output` hash in the ledger. |
+| `failure`          | Ran and failed; includes `first_causal_failure` when derivable. |
+| `denied`           | Refused; carries the full structured `Denial`. |
+| `effect_pending`   | A connector op became a proposed effect (`fx-...`). |
+| `effect_committed` | An auto-committable effect committed; receipt id. |
+
+`step.explain` returns the full authorization narrative for any recorded
+step: the trace entry, the lease as presented, per-parameter constraint
+check outcomes, and the backend selection rationale. `step.retry`
+re-executes a step, optionally on a different branch or with a new budget.
+
+Authorization of a step is deterministic: lease revocation, expiry,
+remaining uses, principal, operation, branch binding, and per-parameter
+`Constraint` checks (`equals`, `one_of`, `glob` (`*`-only), `prefix`,
+`max`, `forbidden`), in that order. The first failure becomes the denial.

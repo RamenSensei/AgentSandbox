@@ -233,3 +233,35 @@ Key rules:
 - Budgets (`cpu_ms`, `memory_bytes`, `network_bytes`, `tokens`,
   `cost_micro_usd`, `risk_units`) are a single model shared by episodes,
   actions and leases, charged at step boundaries.
+
+## 7. Trace and replay
+
+Every step becomes a `TraceEntry`: action, presented lease, observation,
+produced state, usage, timing. `trace.query` runs the trace query language,
+e.g.:
+
+```
+effects where class >= compensatable and branch = "br-42"
+steps where observation.kind = "denied" and actor = "pr-child"
+```
+
+### 7.1 Replay classes
+
+A backend does not claim "supports snapshot"; it declares exactly which
+layers it can capture, and the kernel stamps every state node with the
+resulting `ReplayClass`: `audit_only`, `filesystem_only`,
+`process_and_filesystem`, `framework_host_calls`, `browser_profile`. A
+replay report's `effective_class` is the *weakest* class among the replayed
+steps — the honest ceiling of what the report can claim.
+
+### 7.2 Replay modes
+
+| Mode      | What it does | What it guarantees |
+|-----------|--------------|--------------------|
+| `audit`   | Plays back recorded model responses, tool results and receipts. Never re-executes anything. | Byte-identical narration of what happened. Works for every replay class. |
+| `sandbox` | Restores internal state and re-executes local code, substituting recorded inputs (time, randomness, DNS, model responses) where captured. | Determinism up to the recorded class; divergences are reported per step and layer. Requires `filesystem_only` or better. |
+| `live`    | Reconnects to the real external world and re-executes the same effect contracts through the full propose/prepare/commit pipeline. | **The contract, not the outcome.** The same canonical contracts are presented; the world may answer differently. New receipts are issued and returned. |
+
+"Fully deterministic replay of an open network" is not a claim this
+protocol makes; the mode split exists so that no one has to pretend
+otherwise.

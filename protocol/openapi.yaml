@@ -22,3 +22,504 @@ tags:
   - name: trace
   - name: replay
   - name: receipts
+
+paths:
+  /v1/episodes:
+    post:
+      tags: [episodes]
+      operationId: episode.create
+      summary: Create an episode with its root state and main branch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EpisodeCreateRequest" }
+      responses:
+        "201":
+          description: Episode created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EpisodeCreateResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/episodes/{id}:
+    get:
+      tags: [episodes]
+      operationId: episode.describe
+      summary: Describe an episode, its branches and remaining budget.
+      parameters:
+        - $ref: "#/components/parameters/EpisodeId"
+      responses:
+        "200":
+          description: Episode description.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EpisodeDescribeResponse" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/steps/execute:
+    post:
+      tags: [steps]
+      operationId: step.execute
+      summary: Execute one action on a branch as a principal.
+      description: |
+        Every action must present a lease (no ambient authority). A policy
+        rejection is returned as HTTP 200 with an Observation of kind
+        "denied" when the step itself was recorded, or HTTP 403 with an
+        ErrorEnvelope when the request could not be admitted at all.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepExecuteRequest" }
+      responses:
+        "200":
+          description: The step ran (possibly to a denial observation).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StepExecuteResponse" }
+        "403": { $ref: "#/components/responses/Denied" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/steps/{id}/explain:
+    get:
+      tags: [steps]
+      operationId: step.explain
+      summary: Full authorization narrative for a recorded step.
+      parameters:
+        - $ref: "#/components/parameters/StepId"
+      responses:
+        "200":
+          description: Explanation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StepExplainResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/steps/{id}/retry:
+    post:
+      tags: [steps]
+      operationId: step.retry
+      summary: Re-execute a recorded step, optionally on another branch.
+      parameters:
+        - $ref: "#/components/parameters/StepId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepRetryRequest" }
+      responses:
+        "200":
+          description: Retry result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StepExecuteResponse" }
+        "403": { $ref: "#/components/responses/Denied" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/fork:
+    post:
+      tags: [branches]
+      operationId: branch.fork
+      summary: Fork one or more sibling branches (parallel speculation).
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchForkRequest" }
+      responses:
+        "200":
+          description: Forked branches.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchForkResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/diff:
+    post:
+      tags: [branches]
+      operationId: branch.diff
+      summary: Semantic diff of a branch since a state (default fork point).
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchDiffRequest" }
+      responses:
+        "200":
+          description: Diff.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchDiffResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/compare/{other}:
+    get:
+      tags: [branches]
+      operationId: branch.compare
+      summary: Compare two branches since their common ancestor.
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+        - name: other
+          in: path
+          required: true
+          schema: { type: string, pattern: "^br-" }
+      responses:
+        "200":
+          description: Comparison.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchCompareResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/merge:
+    post:
+      tags: [branches]
+      operationId: branch.merge
+      summary: Merge this branch into a destination branch.
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchMergeRequest" }
+      responses:
+        "200":
+          description: Merge result (merged state node or conflict).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchMergeResponse" }
+        "409":
+          description: Merge conflict (code MERGE_CONFLICT).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/discard:
+    post:
+      tags: [branches]
+      operationId: branch.discard
+      summary: Discard a speculative branch and its backend resources.
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchDiscardRequest" }
+      responses:
+        "200":
+          description: Discarded branch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Branch" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/capabilities/request:
+    post:
+      tags: [capabilities]
+      operationId: capability.request
+      summary: Request a new capability lease.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityRequestRequest" }
+      responses:
+        "200":
+          description: Lease granted or queued for human approval.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityRequestResponse" }
+        "403": { $ref: "#/components/responses/Denied" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/capabilities/delegate:
+    post:
+      tags: [capabilities]
+      operationId: capability.delegate
+      summary: Attenuate a lease for a child principal. Never widens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityDelegateRequest" }
+      responses:
+        "200":
+          description: Child lease.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityLease" }
+        "403": { $ref: "#/components/responses/Denied" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/capabilities/revoke:
+    post:
+      tags: [capabilities]
+      operationId: capability.revoke
+      summary: Revoke a lease (optionally its whole delegation subtree).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityRevokeRequest" }
+      responses:
+        "200":
+          description: Revoked lease ids.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityRevokeResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/capabilities/{principal}:
+    get:
+      tags: [capabilities]
+      operationId: capability.describe
+      summary: List the leases currently held by a principal.
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema: { type: string, pattern: "^pr-" }
+        - name: namespace
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Leases.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityDescribeResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects:
+    post:
+      tags: [effects]
+      operationId: effect.propose
+      summary: Propose an external effect (canonicalized on ingest).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EffectProposeRequest" }
+      responses:
+        "201":
+          description: Pending effect (or a denial in the body union).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EffectProposeResponse" }
+        "403": { $ref: "#/components/responses/Denied" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/{id}:
+    get:
+      tags: [effects]
+      operationId: effect.get
+      summary: Fetch a pending or resolved effect.
+      parameters:
+        - $ref: "#/components/parameters/EffectId"
+      responses:
+        "200":
+          description: The effect.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PendingEffect" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/{id}/prepare:
+    post:
+      tags: [effects]
+      operationId: effect.prepare
+      summary: Dry-run the effect against the live world. No side effects.
+      parameters:
+        - $ref: "#/components/parameters/EffectId"
+      responses:
+        "200":
+          description: Preview and observed preconditions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EffectPrepareResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/{id}/approve:
+    post:
+      tags: [effects]
+      operationId: effect.approve
+      summary: Record an approval of exactly this contract hash.
+      parameters:
+        - $ref: "#/components/parameters/EffectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EffectApproveRequest" }
+      responses:
+        "200":
+          description: The effect, now in phase "approved".
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PendingEffect" }
+        "403": { $ref: "#/components/responses/Denied" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/{id}/commit:
+    post:
+      tags: [effects]
+      operationId: effect.commit
+      summary: Commit the effect after commit-time revalidation.
+      description: |
+        Revalidates lease, preconditions, policy epoch and contract hash
+        before touching the world. A mismatched expected_contract_hash fails
+        with STALE_AUTHORIZATION. Duplicate idempotency keys return the
+        original receipt (code DUPLICATE_COMMIT is not an error here).
+      parameters:
+        - $ref: "#/components/parameters/EffectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EffectCommitRequest" }
+      responses:
+        "200":
+          description: Signed receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Receipt" }
+        "403": { $ref: "#/components/responses/Denied" }
+        "409":
+          description: Stale authorization or failed precondition.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/{id}/abort:
+    post:
+      tags: [effects]
+      operationId: effect.abort
+      summary: Abort a pending effect before commit.
+      parameters:
+        - $ref: "#/components/parameters/EffectId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: The effect, now in phase "aborted".
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PendingEffect" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/{id}/compensate:
+    post:
+      tags: [effects]
+      operationId: effect.compensate
+      summary: Run the compensating action for a committed effect.
+      parameters:
+        - $ref: "#/components/parameters/EffectId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EffectCompensateRequest" }
+      responses:
+        "200":
+          description: Compensating receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Receipt" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/trace/query:
+    get:
+      tags: [trace]
+      operationId: trace.query
+      summary: Query the causal ledger.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+          description: >
+            Trace query, e.g.
+            `effects where class >= compensatable and branch = "br-42"`.
+        - name: episode
+          in: query
+          required: false
+          schema: { type: string, pattern: "^ep-" }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+        - name: page_token
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Matching trace entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TraceQueryResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/replay/{mode}:
+    post:
+      tags: [replay]
+      operationId: replay.run
+      summary: Replay an episode in audit, sandbox or live mode.
+      description: |
+        audit — play back the recorded ledger; never re-executes.
+        sandbox — restore state and re-execute local code with recorded
+        inputs substituted where captured.
+        live — re-execute the same effect contracts against the real world.
+        Live replay guarantees the contract, not the outcome.
+      parameters:
+        - name: mode
+          in: path
+          required: true
+          schema: { type: string, enum: [audit, sandbox, live] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplayRequest" }
+      responses:
+        "200":
+          description: Replay report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplayReport" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/receipts/{id}:
+    get:
+      tags: [receipts]
+      operationId: receipt.get
+      summary: Fetch a signed receipt.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^rcpt-" }
+      responses:
+        "200":
+          description: Receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Receipt" }
+        default: { $ref: "#/components/responses/Error" }

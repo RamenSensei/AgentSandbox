@@ -327,3 +327,21 @@ Verb-to-route summary:
   `effective_class` than the weakest replayed step, and live replay
   responses must be labeled as new receipts, not as reproductions of the
   originals.
+
+## 10. Versioning policy
+
+- The wire package is `agentkernel.v1`; the HTTP prefix is `/v1`.
+- **Backward-compatible** (minor): adding fields, adding enum values,
+  adding endpoints, adding oneof/union variants. Clients must ignore
+  unknown fields and treat unknown internally-tagged variants and enum
+  strings as "unknown but present" (fail closed for authorization-relevant
+  values: an unknown `EffectClass` must be handled like
+  `opaque_external`).
+- **Breaking** (new major, side-by-side `agentkernel.v2` + `/v2`):
+  removing or renaming fields, changing tags/serde names, changing the
+  canonical JSON encoding, changing hash or signature inputs.
+- Canonicalization and signature inputs are frozen per major version;
+  receipts remain verifiable for the lifetime of the major version that
+  issued them.
+- Servers advertise supported majors; deprecated majors get a minimum
+  12-month sunset.

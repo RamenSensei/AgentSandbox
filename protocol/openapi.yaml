@@ -1,0 +1,24 @@
+openapi: 3.1.0
+info:
+  title: AgentKernel Execution Protocol — HTTP/JSON binding
+  version: 1.0.0
+  description: |
+    JSON/HTTP binding of the AgentKernel Execution Protocol exposed by the
+    kernel API server. Wire objects use the canonical JSON encoding of
+    ak-core (snake_case fields, internally tagged enums, prefixed string
+    ids: ep-/step-/br-/st-/pr-/lease-/fx-/rcpt-).
+
+    Errors are returned as an ErrorEnvelope `{code, message, denial?}`.
+    Policy denials are HTTP 403 with `code: "DENIED"` and the full
+    structured Denial — never a bare "permission denied".
+servers:
+  - url: /
+tags:
+  - name: episodes
+  - name: steps
+  - name: branches
+  - name: capabilities
+  - name: effects
+  - name: trace
+  - name: replay
+  - name: receipts

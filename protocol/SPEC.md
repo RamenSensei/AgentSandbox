@@ -265,3 +265,43 @@ steps — the honest ceiling of what the report can claim.
 "Fully deterministic replay of an open network" is not a claim this
 protocol makes; the mode split exists so that no one has to pretend
 otherwise.
+
+## 8. Transport bindings
+
+Two bindings carry the same objects:
+
+- **gRPC** (`protocol/*.proto`): services `EpisodeService`, `StepService`,
+  `BranchService`, `CapabilityService`, `EffectService`, `TraceService`,
+  `ReplayService` under package `agentkernel.v1`. Rust sum types map to
+  `oneof` fields whose case names equal the JSON tag values; JSON-typed
+  fields map to `google.protobuf.Struct`/`Value`.
+- **HTTP/JSON** (`protocol/openapi.yaml`): the canonical encoding of
+  section 2 over the `/v1` routes. This binding is normative for hashes
+  and signatures, since receipts sign canonical JSON.
+
+Verb-to-route summary:
+
+| Verb                 | HTTP |
+|----------------------|------|
+| episode.create       | `POST /v1/episodes` |
+| episode.describe     | `GET /v1/episodes/{id}` |
+| step.execute         | `POST /v1/steps/execute` |
+| step.explain         | `GET /v1/steps/{id}/explain` |
+| step.retry           | `POST /v1/steps/{id}/retry` |
+| branch.fork          | `POST /v1/branches/{id}/fork` |
+| branch.diff          | `POST /v1/branches/{id}/diff` |
+| branch.compare       | `GET /v1/branches/{id}/compare/{other}` |
+| branch.merge         | `POST /v1/branches/{id}/merge` |
+| branch.discard       | `POST /v1/branches/{id}/discard` |
+| capability.describe  | `GET /v1/capabilities/{principal}` |
+| capability.request   | `POST /v1/capabilities/request` |
+| capability.delegate  | `POST /v1/capabilities/delegate` |
+| capability.revoke    | `POST /v1/capabilities/revoke` |
+| effect.propose       | `POST /v1/effects` |
+| effect.prepare       | `POST /v1/effects/{id}/prepare` |
+| effect.approve       | `POST /v1/effects/{id}/approve` |
+| effect.commit        | `POST /v1/effects/{id}/commit` |
+| effect.compensate    | `POST /v1/effects/{id}/compensate` |
+| trace.query          | `GET /v1/trace/query` |
+| replay.audit/sandbox/live | `POST /v1/replay/{mode}` |
+| receipt fetch        | `GET /v1/receipts/{id}` |

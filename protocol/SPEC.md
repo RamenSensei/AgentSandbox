@@ -305,3 +305,25 @@ Verb-to-route summary:
 | trace.query          | `GET /v1/trace/query` |
 | replay.audit/sandbox/live | `POST /v1/replay/{mode}` |
 | receipt fetch        | `GET /v1/receipts/{id}` |
+
+## 9. Security considerations
+
+- **Credentials never enter the sandbox.** Typed connectors are the only
+  code that touches real credentials; agents interact with the world only
+  through `connector_op` actions that become proposed effects. Backends
+  receive pre-authorized work and compiled confinement — never leases or
+  secrets.
+- **Intent is not authority.** `intent_hint` and `justification` fields
+  are audit/scheduling inputs only. Implementations must not consult them
+  when deciding whether an action is allowed.
+- **Denial calibration.** Denials are redacted by trust level; a
+  quarantined principal must not be able to map the policy surface by
+  probing (it receives codes and safe alternatives, not scope sketches).
+- **Time-of-check/time-of-use.** The prepare preview is advisory; only
+  commit-time revalidation is authoritative. Approvals bind to a contract
+  hash and a policy epoch, so neither argument drift nor policy change can
+  ride an old approval.
+- **Replay honesty.** Reports must never claim a stronger
+  `effective_class` than the weakest replayed step, and live replay
+  responses must be labeled as new receipts, not as reproductions of the
+  originals.

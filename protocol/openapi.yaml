@@ -523,3 +523,765 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Receipt" }
         default: { $ref: "#/components/responses/Error" }
+
+components:
+  parameters:
+    EpisodeId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^ep-" }
+    StepId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^step-" }
+    BranchId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^br-" }
+    EffectId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^fx-" }
+
+  responses:
+    Denied:
+      description: >
+        Policy denial. Always carries the full structured Denial so a benign
+        agent can repair itself (invariant: no denial without a
+        machine-readable explanation).
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorEnvelope"
+              - required: [denial]
+    Error:
+      description: Error envelope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: >
+            Stable machine code, e.g. INVALID_ID, NOT_FOUND, DENIED,
+            WRONG_EFFECT_PHASE, STALE_AUTHORIZATION, DUPLICATE_COMMIT,
+            BACKEND_UNAVAILABLE, BRANCH_DISCARDED, MERGE_CONFLICT, STORAGE,
+            CONNECTOR, SERDE, IO, OTHER.
+        message: { type: string }
+        denial: { $ref: "#/components/schemas/Denial" }
+
+    ResourceBudget:
+      type: object
+      required:
+        [cpu_ms, memory_bytes, network_bytes, tokens, cost_micro_usd, risk_units]
+      properties:
+        cpu_ms: { type: integer, minimum: 0 }
+        memory_bytes: { type: integer, minimum: 0 }
+        network_bytes: { type: integer, minimum: 0 }
+        tokens: { type: integer, minimum: 0 }
+        cost_micro_usd: { type: integer, minimum: 0 }
+        risk_units: { type: integer, minimum: 0 }
+
+    Constraint:
+      description: Internally tagged by "kind" (ak-core Constraint).
+      oneOf:
+        - type: object
+          required: [kind, value]
+          properties:
+            kind: { const: equals }
+            value: {}
+        - type: object
+          required: [kind, values]
+          properties:
+            kind: { const: one_of }
+            values: { type: array }
+        - type: object
+          required: [kind, pattern]
+          properties:
+            kind: { const: glob }
+            pattern: { type: string }
+        - type: object
+          required: [kind, prefix]
+          properties:
+            kind: { const: prefix }
+            prefix: { type: string }
+        - type: object
+          required: [kind, max]
+          properties:
+            kind: { const: max }
+            max: { type: number }
+        - type: object
+          required: [kind]
+          properties:
+            kind: { const: forbidden }
+
+    CapabilityLease:
+      type: object
+      required:
+        [id, principal, operation, constraints, remaining_uses, issued_at,
+         expires_at, budget, revoked]
+      properties:
+        id: { type: string, pattern: "^lease-" }
+        principal: { type: string, pattern: "^pr-" }
+        operation: { type: string }
+        constraints:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Constraint" }
+        remaining_uses: { type: integer, minimum: 0 }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        bound_branch: { type: string, pattern: "^br-" }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+        parent_lease: { type: string, pattern: "^lease-" }
+        preconditions: { type: object }
+        revoked: { type: boolean }
+
+    DenialCode:
+      type: string
+      enum:
+        - CAPABILITY_DENIED
+        - CAPABILITY_EXPIRED
+        - CAPABILITY_EXHAUSTED
+        - BUDGET_EXHAUSTED
+        - CONSTRAINT_VIOLATED
+        - BRANCH_MISMATCH
+        - EFFECT_REQUIRES_APPROVAL
+        - STALE_AUTHORIZATION
+        - PRECONDITION_FAILED
+        - DUPLICATE_COMMIT
+        - BACKEND_UNAVAILABLE
+        - POLICY_FORBIDDEN
+
+    RequestableScope:
+      type: object
+      required: [operation, constraints, requires_human]
+      properties:
+        operation: { type: string }
+        constraints: {}
+        requires_human: { type: boolean }
+
+    Denial:
+      type: object
+      required: [code, attempted_operation, reason, escalation_allowed]
+      properties:
+        code: { $ref: "#/components/schemas/DenialCode" }
+        attempted_operation: { type: string }
+        reason: { type: string }
+        safe_alternatives:
+          type: array
+          items: { type: string }
+        requestable_scopes:
+          type: array
+          items: { $ref: "#/components/schemas/RequestableScope" }
+        escalation_allowed: { type: boolean }
+
+    ActionKind:
+      description: Internally tagged by "kind" (ak-core ActionKind).
+      oneOf:
+        - type: object
+          required: [kind, command]
+          properties:
+            kind: { const: shell }
+            command: { type: string }
+            cwd: { type: [string, "null"] }
+            env:
+              type: object
+              additionalProperties: { type: string }
+        - type: object
+          required: [kind, path]
+          properties:
+            kind: { const: read_file }
+            path: { type: string }
+        - type: object
+          required: [kind, path, contents_b64]
+          properties:
+            kind: { const: write_file }
+            path: { type: string }
+            contents_b64: { type: string }
+        - type: object
+          required: [kind, path]
+          properties:
+            kind: { const: delete_path }
+            path: { type: string }
+        - type: object
+          required: [kind, url]
+          properties:
+            kind: { const: http_read }
+            url: { type: string }
+        - type: object
+          required: [kind, server, tool, arguments]
+          properties:
+            kind: { const: mcp_invoke }
+            server: { type: string }
+            tool: { type: string }
+            arguments: {}
+        - type: object
+          required: [kind, connector, operation, params]
+          properties:
+            kind: { const: connector_op }
+            connector: { type: string }
+            operation: { type: string }
+            params: {}
+        - type: object
+          required: [kind, query]
+          properties:
+            kind: { const: trace_query }
+            query: { type: string }
+        - type: object
+          required: [kind, since]
+          properties:
+            kind: { const: branch_diff }
+            since: { type: string, pattern: "^st-" }
+
+    Action:
+      type: object
+      required: [kind, lease, budget]
+      properties:
+        kind: { $ref: "#/components/schemas/ActionKind" }
+        lease: { type: string, pattern: "^lease-" }
+        intent_hint: { type: string }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+
+    Observation:
+      description: Internally tagged by "kind" (ak-core Observation).
+      oneOf:
+        - type: object
+          required: [kind, summary, exit_code, full_output, truncated]
+          properties:
+            kind: { const: success }
+            summary: { type: string }
+            data: {}
+            stdout_head: { type: string }
+            exit_code: { type: integer }
+            full_output: { type: string }
+            truncated: { type: boolean }
+        - type: object
+          required: [kind, summary, exit_code, full_output]
+          properties:
+            kind: { const: failure }
+            summary: { type: string }
+            exit_code: { type: integer }
+            first_causal_failure: { type: string }
+            full_output: { type: string }
+        - type: object
+          required: [kind, denial]
+          properties:
+            kind: { const: denied }
+            denial: { $ref: "#/components/schemas/Denial" }
+        - type: object
+          required: [kind, effect, contract_hash, class]
+          properties:
+            kind: { const: effect_pending }
+            effect: { type: string, pattern: "^fx-" }
+            contract_hash: { type: string }
+            class: { $ref: "#/components/schemas/EffectClass" }
+        - type: object
+          required: [kind, receipt]
+          properties:
+            kind: { const: effect_committed }
+            receipt: { type: string, pattern: "^rcpt-" }
+
+    EffectClass:
+      type: string
+      enum:
+        - pure
+        - local_reversible
+        - remote_reversible
+        - compensatable
+        - irreversible
+        - opaque_external
+
+    EffectContract:
+      type: object
+      required:
+        [operation, resource, arguments, preconditions, idempotency_key, class]
+      properties:
+        operation: { type: string }
+        resource: { type: string }
+        arguments: {}
+        preconditions: {}
+        idempotency_key: { type: string }
+        class: { $ref: "#/components/schemas/EffectClass" }
+
+    EffectPhase:
+      description: Internally tagged by "phase" (ak-core EffectPhase).
+      oneOf:
+        - type: object
+          required: [phase]
+          properties:
+            phase: { const: proposed }
+        - type: object
+          required: [phase, preview]
+          properties:
+            phase: { const: prepared }
+            preview: {}
+        - type: object
+          required: [phase, approver, approved_at, policy_epoch]
+          properties:
+            phase: { const: approved }
+            approver: { type: string, pattern: "^pr-" }
+            approved_at: { type: string, format: date-time }
+            policy_epoch: { type: integer }
+        - type: object
+          required: [phase, receipt]
+          properties:
+            phase: { const: committed }
+            receipt: { type: string, pattern: "^rcpt-" }
+        - type: object
+          required: [phase, reason]
+          properties:
+            phase: { const: aborted }
+            reason: { type: string }
+        - type: object
+          required: [phase, compensating_receipt]
+          properties:
+            phase: { const: compensated }
+            compensating_receipt: { type: string, pattern: "^rcpt-" }
+
+    PendingEffect:
+      type: object
+      required:
+        [id, contract, contract_hash, proposer, branch, step, lease, phase,
+         proposed_at]
+      properties:
+        id: { type: string, pattern: "^fx-" }
+        contract: { $ref: "#/components/schemas/EffectContract" }
+        contract_hash: { type: string }
+        proposer: { type: string, pattern: "^pr-" }
+        branch: { type: string, pattern: "^br-" }
+        step: { type: string, pattern: "^step-" }
+        lease: { type: string, pattern: "^lease-" }
+        phase: { $ref: "#/components/schemas/EffectPhase" }
+        proposed_at: { type: string, format: date-time }
+
+    ReceiptBody:
+      type: object
+      required:
+        [effect, who, operation, resource, contract_hash, branch, step,
+         policy_epoch, authorization_witness, external_response_digest,
+         committed_at]
+      properties:
+        effect: { type: string, pattern: "^fx-" }
+        who: { type: string, pattern: "^pr-" }
+        operation: { type: string }
+        resource: { type: string }
+        contract_hash: { type: string }
+        branch: { type: string, pattern: "^br-" }
+        step: { type: string, pattern: "^step-" }
+        policy_epoch: { type: integer }
+        authorization_witness: { type: string }
+        external_response_digest: { type: string }
+        committed_at: { type: string, format: date-time }
+
+    Receipt:
+      type: object
+      required: [id, body, signature, key_id]
+      properties:
+        id: { type: string, pattern: "^rcpt-" }
+        body: { $ref: "#/components/schemas/ReceiptBody" }
+        signature:
+          type: string
+          description: Ed25519 over canonical_json(body), hex-encoded.
+        key_id: { type: string }
+
+    FileChange:
+      description: Internally tagged by "op" (ak-core FileChange).
+      oneOf:
+        - type: object
+          required: [op, path, blob, mode]
+          properties:
+            op: { const: added }
+            path: { type: string }
+            blob: { type: string }
+            mode: { type: integer }
+        - type: object
+          required: [op, path, old_blob, new_blob]
+          properties:
+            op: { const: modified }
+            path: { type: string }
+            old_blob: { type: string }
+            new_blob: { type: string }
+        - type: object
+          required: [op, path, old_blob]
+          properties:
+            op: { const: deleted }
+            path: { type: string }
+            old_blob: { type: string }
+
+    StateDelta:
+      type: object
+      required: [policy_epoch]
+      properties:
+        files:
+          type: array
+          items: { $ref: "#/components/schemas/FileChange" }
+        processes_started:
+          type: array
+          items: { type: string }
+        processes_exited:
+          type: array
+          items: { type: string }
+        tool_sessions:
+          type: array
+          items: { type: string }
+        policy_epoch: { type: integer }
+        effects_proposed:
+          type: array
+          items: { type: string, pattern: "^fx-" }
+        effects_committed:
+          type: array
+          items: { type: string, pattern: "^rcpt-" }
+
+    ReplayClass:
+      type: string
+      enum:
+        - audit_only
+        - filesystem_only
+        - process_and_filesystem
+        - framework_host_calls
+        - browser_profile
+
+    StateNode:
+      type: object
+      required:
+        [id, episode, branch, actor, delta, workspace_root, replay_class,
+         created_at]
+      properties:
+        id: { type: string, pattern: "^st-" }
+        episode: { type: string, pattern: "^ep-" }
+        branch: { type: string, pattern: "^br-" }
+        parent: { type: string, pattern: "^st-" }
+        produced_by: { type: string, pattern: "^step-" }
+        merge_parent: { type: string, pattern: "^st-" }
+        actor: { type: string, pattern: "^pr-" }
+        delta: { $ref: "#/components/schemas/StateDelta" }
+        workspace_root: { type: string }
+        replay_class: { $ref: "#/components/schemas/ReplayClass" }
+        created_at: { type: string, format: date-time }
+
+    Episode:
+      type: object
+      required: [id, title, owner, root_state, main_branch, budget, created_at]
+      properties:
+        id: { type: string, pattern: "^ep-" }
+        title: { type: string }
+        owner: { type: string, pattern: "^pr-" }
+        root_state: { type: string, pattern: "^st-" }
+        main_branch: { type: string, pattern: "^br-" }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+        created_at: { type: string, format: date-time }
+
+    Branch:
+      type: object
+      required: [id, episode, forked_from, head, discarded, created_at]
+      properties:
+        id: { type: string, pattern: "^br-" }
+        episode: { type: string, pattern: "^ep-" }
+        parent_branch: { type: string, pattern: "^br-" }
+        forked_from: { type: string, pattern: "^st-" }
+        head: { type: string, pattern: "^st-" }
+        discarded: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    EpisodeCreateRequest:
+      type: object
+      required: [title, owner, budget]
+      properties:
+        title: { type: string }
+        owner: { type: string, pattern: "^pr-" }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+        workspace_root: { type: string }
+
+    EpisodeCreateResponse:
+      type: object
+      required: [episode, main_branch]
+      properties:
+        episode: { $ref: "#/components/schemas/Episode" }
+        main_branch: { $ref: "#/components/schemas/Branch" }
+
+    EpisodeDescribeResponse:
+      type: object
+      required: [episode, branches, step_count, pending_effects, budget_remaining]
+      properties:
+        episode: { $ref: "#/components/schemas/Episode" }
+        branches:
+          type: array
+          items: { $ref: "#/components/schemas/Branch" }
+        step_count: { type: integer }
+        pending_effects: { type: integer }
+        budget_remaining: { $ref: "#/components/schemas/ResourceBudget" }
+
+    StepExecuteRequest:
+      type: object
+      required: [branch, actor, action]
+      properties:
+        branch: { type: string, pattern: "^br-" }
+        actor: { type: string, pattern: "^pr-" }
+        action: { $ref: "#/components/schemas/Action" }
+
+    StepExecuteResponse:
+      type: object
+      required: [step, observation, usage]
+      properties:
+        step: { type: string, pattern: "^step-" }
+        observation: { $ref: "#/components/schemas/Observation" }
+        produced_state: { type: string, pattern: "^st-" }
+        usage: { $ref: "#/components/schemas/ResourceBudget" }
+
+    TraceEntry:
+      type: object
+      required:
+        [step, episode, branch, actor, action, lease, observation, usage,
+         started_at, finished_at]
+      properties:
+        step: { type: string, pattern: "^step-" }
+        episode: { type: string, pattern: "^ep-" }
+        branch: { type: string, pattern: "^br-" }
+        actor: { type: string, pattern: "^pr-" }
+        action: { $ref: "#/components/schemas/ActionKind" }
+        lease: { type: string, pattern: "^lease-" }
+        observation: { $ref: "#/components/schemas/Observation" }
+        produced_state: { type: string, pattern: "^st-" }
+        usage: { $ref: "#/components/schemas/ResourceBudget" }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+
+    StepExplainResponse:
+      type: object
+      required: [entry, lease, constraint_checks, backend, backend_rationale]
+      properties:
+        entry: { $ref: "#/components/schemas/TraceEntry" }
+        lease: { $ref: "#/components/schemas/CapabilityLease" }
+        constraint_checks:
+          type: object
+          additionalProperties: { type: string }
+        backend: { type: string }
+        backend_rationale: { type: string }
+
+    StepRetryRequest:
+      type: object
+      properties:
+        branch: { type: string, pattern: "^br-" }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+
+    BranchForkRequest:
+      type: object
+      properties:
+        from_state: { type: string, pattern: "^st-" }
+        count: { type: integer, minimum: 1, default: 1 }
+
+    BranchForkResponse:
+      type: object
+      required: [branches]
+      properties:
+        branches:
+          type: array
+          items: { $ref: "#/components/schemas/Branch" }
+
+    BranchDiffRequest:
+      type: object
+      properties:
+        since: { type: string, pattern: "^st-" }
+
+    BranchDiffResponse:
+      type: object
+      required: [delta, summary]
+      properties:
+        delta: { $ref: "#/components/schemas/StateDelta" }
+        summary: { type: string }
+
+    BranchCompareResponse:
+      type: object
+      required: [common_ancestor, left_delta, right_delta, conflicting_paths]
+      properties:
+        common_ancestor: { type: string, pattern: "^st-" }
+        left_delta: { $ref: "#/components/schemas/StateDelta" }
+        right_delta: { $ref: "#/components/schemas/StateDelta" }
+        conflicting_paths:
+          type: array
+          items: { type: string }
+
+    BranchMergeRequest:
+      type: object
+      required: [into]
+      properties:
+        into: { type: string, pattern: "^br-" }
+        require_clean: { type: boolean, default: false }
+
+    BranchMergeResponse:
+      type: object
+      description: Exactly one of merged / conflict is present.
+      properties:
+        merged: { $ref: "#/components/schemas/StateNode" }
+        conflict:
+          type: object
+          required: [paths]
+          properties:
+            paths:
+              type: array
+              items: { type: string }
+
+    BranchDiscardRequest:
+      type: object
+      properties:
+        reason: { type: string }
+
+    CapabilityDescribeResponse:
+      type: object
+      required: [leases]
+      properties:
+        leases:
+          type: array
+          items: { $ref: "#/components/schemas/CapabilityLease" }
+
+    CapabilityRequestRequest:
+      type: object
+      required: [principal, operation]
+      properties:
+        principal: { type: string, pattern: "^pr-" }
+        operation: { type: string }
+        constraints:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Constraint" }
+        uses: { type: integer, minimum: 1 }
+        expires_at: { type: string, format: date-time }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+        bound_branch: { type: string, pattern: "^br-" }
+        justification: { type: string }
+
+    CapabilityRequestResponse:
+      type: object
+      description: Exactly one of lease / denial / pending_approval_id.
+      properties:
+        lease: { $ref: "#/components/schemas/CapabilityLease" }
+        denial: { $ref: "#/components/schemas/Denial" }
+        pending_approval_id: { type: string }
+
+    CapabilityDelegateRequest:
+      type: object
+      required: [parent_lease, child_principal, constraints, uses, expires_at, budget]
+      properties:
+        parent_lease: { type: string, pattern: "^lease-" }
+        child_principal: { type: string, pattern: "^pr-" }
+        constraints:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Constraint" }
+        uses: { type: integer, minimum: 1 }
+        expires_at: { type: string, format: date-time }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+
+    CapabilityRevokeRequest:
+      type: object
+      required: [lease]
+      properties:
+        lease: { type: string, pattern: "^lease-" }
+        cascade: { type: boolean, default: false }
+        reason: { type: string }
+
+    CapabilityRevokeResponse:
+      type: object
+      required: [revoked_leases]
+      properties:
+        revoked_leases:
+          type: array
+          items: { type: string, pattern: "^lease-" }
+
+    EffectProposeRequest:
+      type: object
+      required: [contract, proposer, branch]
+      properties:
+        contract: { $ref: "#/components/schemas/EffectContract" }
+        proposer: { type: string, pattern: "^pr-" }
+        branch: { type: string, pattern: "^br-" }
+        step: { type: string }
+        lease: { type: string }
+
+    EffectProposeResponse:
+      type: object
+      description: Exactly one of effect / denial.
+      properties:
+        effect: { $ref: "#/components/schemas/PendingEffect" }
+        denial: { $ref: "#/components/schemas/Denial" }
+
+    EffectApproveRequest:
+      type: object
+      required: [approver, contract_hash]
+      properties:
+        approver: { type: string, pattern: "^pr-" }
+        contract_hash:
+          type: string
+          description: Approving an effect means approving exactly this hash.
+
+    EffectCommitRequest:
+      type: object
+      required: [expected_contract_hash]
+      properties:
+        expected_contract_hash: { type: string }
+
+    EffectCompensateRequest:
+      type: object
+      properties:
+        reason: { type: string }
+
+    EffectPrepareResponse:
+      type: object
+      required: [preview, observed_preconditions, effect]
+      properties:
+        preview: {}
+        observed_preconditions: {}
+        effect: { $ref: "#/components/schemas/PendingEffect" }
+
+    TraceQueryResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/TraceEntry" }
+        next_page_token: { type: string }
+
+    ReplayRequest:
+      type: object
+      required: [episode]
+      properties:
+        episode: { type: string, pattern: "^ep-" }
+        from_step: { type: string, pattern: "^step-" }
+        to_step: { type: string, pattern: "^step-" }
+
+    ReplayDivergence:
+      type: object
+      required: [step, layer, recorded_digest, replayed_digest, detail]
+      properties:
+        step: { type: string, pattern: "^step-" }
+        layer:
+          type: string
+          enum: [observation, state, effect_contract, effect_outcome]
+        recorded_digest: { type: string }
+        replayed_digest: { type: string }
+        detail: { type: string }
+
+    ReplayReport:
+      type: object
+      required: [episode, mode, effective_class, steps_replayed, divergences, completed_at]
+      properties:
+        episode: { type: string, pattern: "^ep-" }
+        mode: { type: string, enum: [audit, sandbox, live] }
+        effective_class: { $ref: "#/components/schemas/ReplayClass" }
+        steps_replayed: { type: integer }
+        divergences:
+          type: array
+          items: { $ref: "#/components/schemas/ReplayDivergence" }
+        receipts:
+          type: array
+          items: { $ref: "#/components/schemas/Receipt" }
+        completed_at: { type: string, format: date-time }

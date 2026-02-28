@@ -51,3 +51,7 @@ Signed-off-by: Your Name <you@example.com>
 ```
 
 (`git commit -s` adds this automatically.)
+
+## Code of conduct
+
+All participation in the project is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).

@@ -23,3 +23,48 @@ The kernel enforces a hard distinction between two worlds:
 
 - **Local world**: files, processes, tool sessions, browser state inside a branch. Here the agent is encouraged to be bold — fork multiple speculative branches, try competing fixes in parallel, and discard or roll back failures cheaply. Every step produces an immutable delta in the state DAG.
 - **External world**: anything that leaves the sandbox — a PR, a message, a database write, a payment. These cannot be undone by a snapshot, so they must pass through the effect broker: precise authorization bound to canonical arguments, commit-time revalidation, and a non-repudiable signed receipt.
+
+## Core objects
+
+| Object | Definition |
+| --- | --- |
+| `Episode` | One long-running task; the root of an execution history. |
+| `Step` | One decision-and-execution unit; produces a delta and a ledger entry. |
+| `Branch` | A speculative world branch that can be forked, diffed, merged, or discarded. |
+| `Principal` | An agent, sub-agent, or tool as a first-class identity with a trust level. |
+| `CapabilityLease` | Time-bound, budgeted, attenuable authority over constrained operations; delegation only ever attenuates. |
+| `Observation` | A structured observation returned to the agent, including machine-readable denials. |
+| `Effect` | A proposed change to the real world: `PendingEffect` carrying an `EffectContract`, resolving to a `Receipt`. |
+| `Receipt` | Signed, non-repudiable proof of a committed effect: who, what, canonical arguments hash, policy version, external response digest. |
+
+Effects are honestly classified by reversibility: `pure`, `local_reversible`, `remote_reversible`, `compensatable`, `irreversible`, `opaque_external` (unknown semantics; treated as irreversible and maximally restricted).
+
+## Architecture
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│              Agent / Harness / Human                    │
+│ objective · action · intent hint · approval             │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────┐
+│              Agent Execution Protocol                   │
+│ Episode · Step · Branch · Principal · Capability        │
+│ Observation · Effect · Receipt · ReplayClass            │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────┐
+│             Trusted Semantic Kernel                     │
+│                                                         │
+│ Identity & Policy      State DAG        Effect Broker   │
+│ Capability Compiler    Causal Ledger    Secret Broker   │
+│ Backend Router         Scheduler        Replay Engine   │
+└───────────────┬────────────────┬────────────────┬───────┘
+                │                │                │
+┌───────────────▼──────┐ ┌───────▼────────┐ ┌─────▼───────────┐
+│ Local OS Sandboxes   │ │ gVisor/microVM │ │ World Connectors│
+│ WASI / srt / nono    │ │ Kata / GUI VM  │ │ GitHub/DB/Cloud │
+└──────────────────────┘ └────────────────┘ └─────────────────┘
+```
+
+External effects follow a single lifecycle: **propose → canonicalize → prepare → approve → commit-time revalidation → commit → signed receipt**. Replay comes in three deliberately distinct modes — **audit** (play back recorded observations, never re-execute), **sandbox** (re-execute local code with recorded inputs substituted), and **live** (re-execute the same effect contracts against the current world; guarantees the contract, not the outcome). Backends declare per-layer `ReplayClass` guarantees rather than a vague "supports snapshot" flag.

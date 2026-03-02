@@ -30,3 +30,20 @@ AgentKernel is designed under the assumption that **guest workloads can be fully
 - Attacks requiring a compromised host or kernel control plane
 - Quality of agent/LLM decisions within an authorized envelope (a correctly authorized but unwise effect is not a kernel vulnerability)
 - Denial of service via legitimately budgeted resource use
+
+## Supported versions
+
+| Version | Supported |
+| --- | --- |
+| 0.6.x | Yes |
+| < 0.6 | No |
+
+## Reporting a vulnerability
+
+Please report vulnerabilities privately to **security@agentkernel.dev**. Do not open public issues for security problems.
+
+- We will acknowledge reports within 3 business days.
+- We follow a **90-day coordinated disclosure** window: we ask that you not publish details until a fix is released or 90 days have elapsed, whichever comes first. We will credit reporters unless they prefer otherwise.
+- There is **no bug bounty program** at this time.
+
+For the full threat model, see `docs/design/threat-model.md`.

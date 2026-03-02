@@ -68,3 +68,48 @@ Effects are honestly classified by reversibility: `pure`, `local_reversible`, `r
 ```
 
 External effects follow a single lifecycle: **propose → canonicalize → prepare → approve → commit-time revalidation → commit → signed receipt**. Replay comes in three deliberately distinct modes — **audit** (play back recorded observations, never re-execute), **sandbox** (re-execute local code with recorded inputs substituted), and **live** (re-execute the same effect contracts against the current world; guarantees the contract, not the outcome). Backends declare per-layer `ReplayClass` guarantees rather than a vague "supports snapshot" flag.
+
+## Invariants
+
+1. **No ambient authority.** Every action carries an explicit lease.
+2. **No invisible state transition.** Every step produces a delta and a ledger entry.
+3. **No irreversible effect before commit.** External effects go through the broker.
+4. **No denial without a machine-readable explanation.**
+
+## Quickstart
+
+```sh
+# Build the whole workspace
+cargo build --workspace
+
+# Run the end-to-end example: a coding agent that forks branches,
+# runs tests, and prepares a draft PR through the GitHub effect broker
+cargo run -p coding-agent-github
+```
+
+The `ui/` directory contains the timeline, branch graph, policy, and receipt views; it includes a demo mode that replays a recorded episode without a live kernel. See `ui/README.md`.
+
+## Repository layout
+
+```text
+agent-kernel/
+├── protocol/            # Agent Execution Protocol definitions (backend-neutral)
+├── kernel/
+│   ├── core/            # ak-core: semantic types, no I/O
+│   ├── identity/        # principals, trust levels, delegation
+│   ├── policy/          # deterministic policy engine, machine-readable denials
+│   ├── state_dag/       # versioned world-state DAG and adapters
+│   ├── effect_broker/   # external effect transactions and receipts
+│   ├── causal_ledger/   # intent → decision → effect causal chain
+│   ├── scheduler/       # step-level budgets, backend routing, prewarm
+│   └── api/             # kernel API surface
+├── backends/            # local, cube, forkd, gvisor, kubernetes
+├── connectors/          # github, http, mcp
+├── sdk/                 # python, typescript
+├── ui/                  # timeline, branch_graph, policy_view, receipt_view
+├── conformance/         # protocol conformance suite
+├── adversarial-bench/   # security/abuse scenario benchmark
+├── examples/
+│   └── coding-agent-github/
+└── docs/                # design, adr, devlog
+```

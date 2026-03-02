@@ -113,3 +113,19 @@ agent-kernel/
 │   └── coding-agent-github/
 └── docs/                # design, adr, devlog
 ```
+
+## Documentation
+
+- Design documents: `docs/design/`
+- Architecture decision records: `docs/adr/`
+- UI and demo mode: `ui/README.md`
+
+## Status
+
+Version 0.6 (protocol version "0.6"). Pre-1.0: APIs, the protocol, and on-disk formats are unstable and may change between minor releases.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute and [SECURITY.md](SECURITY.md) for the threat model and vulnerability disclosure process.

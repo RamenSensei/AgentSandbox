@@ -20,3 +20,95 @@ use std::path::{Path, PathBuf};
 pub struct Cas {
     root: PathBuf,
 }
+
+/// Extract the raw hex digest from a `sha256:<hex>` [`ContentHash`].
+pub(crate) fn hex_of(hash: &ContentHash) -> KernelResult<&str> {
+    hash.as_str()
+        .strip_prefix("sha256:")
+        .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| KernelError::Storage(format!("malformed content hash `{hash}`")))
+}
+
+impl Cas {
+    /// Open (creating if necessary) a CAS rooted at `root`.
+    pub fn open(root: impl Into<PathBuf>) -> KernelResult<Self> {
+        let root = root.into();
+        fs::create_dir_all(&root)?;
+        Ok(Self { root })
+    }
+
+    /// The root directory of this store.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn blob_path(&self, hash: &ContentHash) -> KernelResult<PathBuf> {
+        let hex = hex_of(hash)?;
+        Ok(self.root.join(&hex[..2]).join(hex))
+    }
+
+    /// Store raw bytes, returning their content hash. Idempotent.
+    #[tracing::instrument(level = "debug", skip_all, fields(len = bytes.len()))]
+    pub fn put(&self, bytes: &[u8]) -> KernelResult<ContentHash> {
+        let hash = hash_bytes(bytes);
+        let path = self.blob_path(&hash)?;
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // Write via a unique temp file then rename, so concurrent writers
+            // and crashes never leave a truncated blob at the final path.
+            let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+            fs::write(&tmp, bytes)?;
+            fs::rename(&tmp, &path)?;
+        }
+        Ok(hash)
+    }
+
+    /// Load the blob for `hash`.
+    #[tracing::instrument(level = "debug", skip(self), fields(hash = %hash))]
+    pub fn get(&self, hash: &ContentHash) -> KernelResult<Vec<u8>> {
+        let path = self.blob_path(hash)?;
+        fs::read(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                KernelError::NotFound { kind: "blob", id: hash.to_string() }
+            } else {
+                KernelError::Io(e)
+            }
+        })
+    }
+
+    /// Whether a blob exists in the store.
+    pub fn contains(&self, hash: &ContentHash) -> KernelResult<bool> {
+        Ok(self.blob_path(hash)?.exists())
+    }
+
+    /// Delete a blob (used by garbage collection). Missing blobs are ignored.
+    pub fn remove(&self, hash: &ContentHash) -> KernelResult<()> {
+        let path = self.blob_path(hash)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(KernelError::Io(e)),
+        }
+    }
+
+    /// Enumerate every blob currently stored.
+    pub fn list(&self) -> KernelResult<Vec<ContentHash>> {
+        let mut out = Vec::new();
+        for shard in fs::read_dir(&self.root)? {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path())? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.len() == 64 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+                    out.push(ContentHash(format!("sha256:{name}")));
+                }
+            }
+        }
+        Ok(out)
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "ak-state-dag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Branchable world-state DAG: content-addressed store, snapshots, branches, three-way merge, GC."
+
+[dependencies]
+ak-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

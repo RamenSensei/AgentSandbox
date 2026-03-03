@@ -112,3 +112,21 @@ impl Cas {
         Ok(out)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn roundtrip_and_idempotent_put() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        let h1 = cas.put(b"hello world").unwrap();
+        let h2 = cas.put(b"hello world").unwrap();
+        assert_eq!(h1, h2);
+        assert!(cas.contains(&h1).unwrap());
+        assert_eq!(cas.get(&h1).unwrap(), b"hello world");
+        assert_eq!(cas.list().unwrap(), vec![h1.clone()]);
+        cas.remove(&h1).unwrap();
+        assert!(!cas.contains(&h1).unwrap());
+        assert!(matches!(cas.get(&h1), Err(KernelError::NotFound { .. })));
+    }
+}

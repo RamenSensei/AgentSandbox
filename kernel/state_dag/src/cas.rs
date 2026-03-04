@@ -112,9 +112,11 @@ impl Cas {
         Ok(out)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn roundtrip_and_idempotent_put() {
         let dir = tempfile::tempdir().unwrap();
@@ -128,5 +130,13 @@ mod tests {
         cas.remove(&h1).unwrap();
         assert!(!cas.contains(&h1).unwrap());
         assert!(matches!(cas.get(&h1), Err(KernelError::NotFound { .. })));
+    }
+
+    #[test]
+    fn malformed_hash_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        assert!(cas.get(&ContentHash("md5:abcd".into())).is_err());
+        assert!(cas.get(&ContentHash("sha256:zz".into())).is_err());
     }
 }

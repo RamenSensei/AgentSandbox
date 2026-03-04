@@ -44,3 +44,33 @@ pub enum BranchStatus {
     /// The branch was merged into another branch.
     Merged,
 }
+
+impl BranchStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            BranchStatus::Active => "active",
+            BranchStatus::Discarded => "discarded",
+            BranchStatus::Merged => "merged",
+        }
+    }
+
+    fn parse(s: &str) -> KernelResult<Self> {
+        match s {
+            "active" => Ok(BranchStatus::Active),
+            "discarded" => Ok(BranchStatus::Discarded),
+            "merged" => Ok(BranchStatus::Merged),
+            other => Err(KernelError::Storage(format!("unknown branch status `{other}`"))),
+        }
+    }
+}
+
+/// A branch row: a movable head pointer over immutable states.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Branch {
+    pub id: BranchId,
+    pub episode: EpisodeId,
+    /// State this branch was forked from (the episode root for the initial branch).
+    pub base_state: StateId,
+    pub head: StateId,
+    pub status: BranchStatus,
+}

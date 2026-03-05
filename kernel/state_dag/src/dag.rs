@@ -74,3 +74,33 @@ pub struct Branch {
     pub head: StateId,
     pub status: BranchStatus,
 }
+
+/// Result of [`StateDag::branch_compare`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchComparison {
+    /// Lowest common ancestor of the two branch heads.
+    pub base: StateId,
+    /// Files changed on branch `a` since `base`.
+    pub changed_in_a: Vec<FileChange>,
+    /// Files changed on branch `b` since `base`.
+    pub changed_in_b: Vec<FileChange>,
+}
+
+/// Everything created by [`StateDag::create_episode`].
+#[derive(Debug, Clone)]
+pub struct EpisodeHandle {
+    pub episode: EpisodeId,
+    /// The initial (main) branch of the episode.
+    pub branch: BranchId,
+    /// The root state node.
+    pub root: StateNode,
+}
+
+/// Outcome of a garbage-collection pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GcReport {
+    /// CAS blobs deleted.
+    pub blobs_removed: usize,
+    /// State rows deleted (states reachable only from discarded branches).
+    pub states_removed: usize,
+}

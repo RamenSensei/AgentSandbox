@@ -597,3 +597,38 @@ impl StateDag {
         Ok(report)
     }
 }
+
+// ------------------------------------------------------------------- helpers
+
+fn sql_err(e: rusqlite::Error) -> KernelError {
+    KernelError::Storage(format!("sqlite: {e}"))
+}
+
+fn ensure_active(b: &Branch) -> KernelResult<()> {
+    match b.status {
+        BranchStatus::Active => Ok(()),
+        BranchStatus::Discarded | BranchStatus::Merged => {
+            Err(KernelError::BranchDiscarded { branch: b.id.to_string() })
+        }
+    }
+}
+
+fn insert_state(conn: &Connection, node: &StateNode) -> KernelResult<()> {
+    let json = serde_json::to_string(node)?;
+    conn.execute(
+        "INSERT INTO states (id, episode, branch, parent, merge_parent, workspace_root, node_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            node.id.as_str(),
+            node.episode.as_str(),
+            node.branch.as_str(),
+            node.parent.as_ref().map(|p| p.as_str()),
+            node.merge_parent.as_ref().map(|p| p.as_str()),
+            node.workspace_root.as_str(),
+            json,
+            node.created_at.to_rfc3339()
+        ],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}

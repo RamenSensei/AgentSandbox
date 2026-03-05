@@ -104,3 +104,32 @@ pub struct GcReport {
     /// State rows deleted (states reachable only from discarded branches).
     pub states_removed: usize,
 }
+
+const MIGRATIONS: &[(&str, &str)] = &[(
+    "0001_initial",
+    "CREATE TABLE episodes (
+         id TEXT PRIMARY KEY,
+         root_state TEXT NOT NULL,
+         created_at TEXT NOT NULL
+     );
+     CREATE TABLE states (
+         id TEXT PRIMARY KEY,
+         episode TEXT NOT NULL,
+         branch TEXT NOT NULL,
+         parent TEXT,
+         merge_parent TEXT,
+         workspace_root TEXT NOT NULL,
+         node_json TEXT NOT NULL,
+         created_at TEXT NOT NULL
+     );
+     CREATE INDEX idx_states_episode ON states(episode);
+     CREATE INDEX idx_states_branch ON states(branch);
+     CREATE TABLE branches (
+         id TEXT PRIMARY KEY,
+         episode TEXT NOT NULL,
+         base_state TEXT NOT NULL,
+         head TEXT NOT NULL,
+         status TEXT NOT NULL,
+         created_at TEXT NOT NULL
+     );",
+)];

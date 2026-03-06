@@ -632,3 +632,40 @@ fn insert_state(conn: &Connection, node: &StateNode) -> KernelResult<()> {
     .map_err(sql_err)?;
     Ok(())
 }
+
+fn load_state(conn: &Connection, id: &StateId) -> KernelResult<StateNode> {
+    let json: Option<String> = conn
+        .query_row("SELECT node_json FROM states WHERE id = ?1", [id.as_str()], |r| r.get(0))
+        .optional()
+        .map_err(sql_err)?;
+    let json = json.ok_or_else(|| KernelError::NotFound { kind: "state", id: id.to_string() })?;
+    serde_json::from_str(&json).map_err(KernelError::Serde)
+}
+
+fn load_branch(conn: &Connection, id: &BranchId) -> KernelResult<Branch> {
+    conn.query_row(
+        "SELECT id, episode, base_state, head, status FROM branches WHERE id = ?1",
+        [id.as_str()],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(sql_err)?
+    .ok_or_else(|| KernelError::NotFound { kind: "branch", id: id.to_string() })
+    .and_then(|(id, episode, base_state, head, status)| {
+        Ok(Branch {
+            id: BranchId(id),
+            episode: EpisodeId(episode),
+            base_state: StateId(base_state),
+            head: StateId(head),
+            status: BranchStatus::parse(&status)?,
+        })
+    })
+}

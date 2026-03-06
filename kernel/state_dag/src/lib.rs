@@ -84,4 +84,21 @@ mod tests {
         assert_eq!(fs::read_to_string(out.join("a.txt")).unwrap(), "v1");
         assert!(!out.join("b.txt").exists());
     }
+
+    #[test]
+    fn discarded_branch_rejects_appends_and_double_discard() {
+        let f = fixture();
+        let ep = f.dag.create_episode(&f.actor, None, ReplayClass::FilesystemOnly).unwrap();
+        let br = f.dag.fork(&ep.root.id).unwrap();
+        f.dag.discard_branch(&br.id).unwrap();
+        assert!(matches!(
+            f.dag.discard_branch(&br.id),
+            Err(KernelError::BranchDiscarded { .. })
+        ));
+        write(&f, "x.txt", "x");
+        assert!(matches!(
+            f.dag.snapshot_and_append(&br.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly),
+            Err(KernelError::BranchDiscarded { .. })
+        ));
+    }
 }

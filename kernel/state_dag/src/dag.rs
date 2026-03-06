@@ -669,3 +669,12 @@ fn load_branch(conn: &Connection, id: &BranchId) -> KernelResult<Branch> {
         })
     })
 }
+
+fn set_head(conn: &Connection, branch: &BranchId, head: &StateId) -> KernelResult<()> {
+    conn.execute(
+        "UPDATE branches SET head = ?1 WHERE id = ?2",
+        params![head.as_str(), branch.as_str()],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}

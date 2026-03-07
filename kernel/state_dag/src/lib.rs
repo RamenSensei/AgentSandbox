@@ -101,4 +101,52 @@ mod tests {
             Err(KernelError::BranchDiscarded { .. })
         ));
     }
+
+    #[test]
+    fn lca_branch_compare_and_clean_merge() {
+        let f = fixture();
+        write(&f, "base.txt", "base");
+        let ep = f
+            .dag
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .unwrap();
+
+        let br_a = f.dag.fork(&ep.root.id).unwrap();
+        let br_b = f.dag.fork(&ep.root.id).unwrap();
+
+        write(&f, "a-only.txt", "A");
+        let ha = f
+            .dag
+            .snapshot_and_append(&br_a.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .unwrap();
+
+        fs::remove_file(f.ws.join("a-only.txt")).unwrap();
+        write(&f, "b-only.txt", "B");
+        let hb = f
+            .dag
+            .snapshot_and_append(&br_b.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .unwrap();
+
+        assert_eq!(f.dag.lca(&ha.id, &hb.id).unwrap(), ep.root.id);
+
+        let cmp = f.dag.branch_compare(&br_a.id, &br_b.id).unwrap();
+        assert_eq!(cmp.base, ep.root.id);
+        assert_eq!(cmp.changed_in_a.len(), 1);
+        assert_eq!(cmp.changed_in_b.len(), 1);
+        assert!(matches!(&cmp.changed_in_a[0], FileChange::Added { path, .. } if path == "a-only.txt"));
+
+        let merged = f.dag.merge(&br_a.id, &br_b.id, &f.actor).unwrap();
+        assert_eq!(merged.parent.as_ref(), Some(&ha.id));
+        assert_eq!(merged.merge_parent.as_ref(), Some(&hb.id));
+        assert_eq!(f.dag.get_branch(&br_b.id).unwrap().status, BranchStatus::Merged);
+
+        let out = f._tmp.path().join("merged");
+        f.dag.materialize(&merged.id, &out).unwrap();
+        assert_eq!(fs::read_to_string(out.join("a-only.txt")).unwrap(), "A");
+        assert_eq!(fs::read_to_string(out.join("b-only.txt")).unwrap(), "B");
+        assert_eq!(fs::read_to_string(out.join("base.txt")).unwrap(), "base");
+
+        // LCA through the merge node still resolves.
+        assert_eq!(f.dag.lca(&merged.id, &hb.id).unwrap(), hb.id);
+    }
 }

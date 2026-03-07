@@ -21,6 +21,7 @@ pub mod snapshot;
 pub use cas::Cas;
 pub use dag::{Branch, BranchComparison, BranchStatus, EpisodeHandle, GcReport, StateDag};
 pub use snapshot::{diff_manifests, materialize, snapshot_dir, Manifest, ManifestEntry};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,9 +53,6 @@ mod tests {
         fs::write(p, content).unwrap();
     }
 
-
-
-    /// Build: root(base.txt) -> fork two branches, edit disjoint files, merge.
     #[test]
     fn episode_append_and_materialize() {
         let f = fixture();
@@ -102,6 +100,7 @@ mod tests {
         ));
     }
 
+    /// Build: root(base.txt) -> fork two branches, edit disjoint files, merge.
     #[test]
     fn lca_branch_compare_and_clean_merge() {
         let f = fixture();
@@ -180,5 +179,38 @@ mod tests {
         // Nothing written: heads unchanged, both branches still active.
         assert_eq!(f.dag.get_branch(&br_a.id).unwrap().head, ha.id);
         assert_eq!(f.dag.get_branch(&br_b.id).unwrap().status, BranchStatus::Active);
+    }
+
+    #[test]
+    fn gc_sweeps_discarded_branch_blobs_but_keeps_live_ones() {
+        let f = fixture();
+        write(&f, "keep.txt", "keep");
+        let ep = f
+            .dag
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .unwrap();
+        let br = f.dag.fork(&ep.root.id).unwrap();
+        write(&f, "doomed.txt", "unique-doomed-content");
+        let doomed = f
+            .dag
+            .snapshot_and_append(&br.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .unwrap();
+
+        // Nothing to sweep while the branch is alive.
+        assert_eq!(f.dag.gc().unwrap(), GcReport::default());
+
+        f.dag.discard_branch(&br.id).unwrap();
+        let report = f.dag.gc().unwrap();
+        assert_eq!(report.states_removed, 1);
+        // doomed blob + doomed manifest swept
+        assert_eq!(report.blobs_removed, 2);
+        assert!(matches!(
+            f.dag.get_state(&doomed.id),
+            Err(KernelError::NotFound { .. })
+        ));
+        // Live state still fully materializable.
+        let out = f._tmp.path().join("out");
+        f.dag.materialize(&ep.root.id, &out).unwrap();
+        assert_eq!(fs::read_to_string(out.join("keep.txt")).unwrap(), "keep");
     }
 }

@@ -149,4 +149,36 @@ mod tests {
         // LCA through the merge node still resolves.
         assert_eq!(f.dag.lca(&merged.id, &hb.id).unwrap(), hb.id);
     }
+
+    #[test]
+    fn conflicting_merge_reports_paths_and_writes_nothing() {
+        let f = fixture();
+        write(&f, "shared.txt", "base");
+        let ep = f
+            .dag
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .unwrap();
+        let br_a = f.dag.fork(&ep.root.id).unwrap();
+        let br_b = f.dag.fork(&ep.root.id).unwrap();
+
+        write(&f, "shared.txt", "edit-A");
+        let ha = f
+            .dag
+            .snapshot_and_append(&br_a.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .unwrap();
+        write(&f, "shared.txt", "edit-B");
+        f.dag
+            .snapshot_and_append(&br_b.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .unwrap();
+
+        match f.dag.merge(&br_a.id, &br_b.id, &f.actor) {
+            Err(KernelError::MergeConflict { paths }) => {
+                assert_eq!(paths, vec!["shared.txt".to_string()])
+            }
+            other => panic!("expected MergeConflict, got {other:?}"),
+        }
+        // Nothing written: heads unchanged, both branches still active.
+        assert_eq!(f.dag.get_branch(&br_a.id).unwrap().head, ha.id);
+        assert_eq!(f.dag.get_branch(&br_b.id).unwrap().status, BranchStatus::Active);
+    }
 }

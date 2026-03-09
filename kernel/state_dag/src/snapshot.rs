@@ -153,3 +153,34 @@ pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<FileChange> {
     }
     changes
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> (tempfile::TempDir, Cas) {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path().join("cas")).unwrap();
+        (dir, cas)
+    }
+    #[test]
+    fn snapshot_materialize_roundtrip() {
+        let (dir, cas) = setup();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::write(ws.join("a.txt"), b"alpha").unwrap();
+        fs::write(ws.join("sub/b.txt"), b"beta").unwrap();
+
+        let (root, manifest) = snapshot_dir(&cas, &ws).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.files.contains_key("sub/b.txt"));
+
+        let out = dir.path().join("out");
+        materialize(&cas, &root, &out).unwrap();
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"alpha");
+        assert_eq!(fs::read(out.join("sub/b.txt")).unwrap(), b"beta");
+
+        // Re-snapshotting the materialized tree yields the identical root.
+        let (root2, _) = snapshot_dir(&cas, &out).unwrap();
+        assert_eq!(root, root2);
+    }
+}

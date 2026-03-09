@@ -99,3 +99,31 @@ fn walk(cas: &Cas, base: &Path, dir: &Path, manifest: &mut Manifest) -> KernelRe
     }
     Ok(())
 }
+
+/// Materialize the workspace identified by `workspace_root` into `target`,
+/// replacing any files already present at manifest paths. `target` is
+/// created if missing; files in `target` that are *not* in the manifest are
+/// removed so the result exactly equals the snapshot.
+#[tracing::instrument(level = "info", skip(cas), fields(root = %workspace_root, target = %target.display()))]
+pub fn materialize(cas: &Cas, workspace_root: &ContentHash, target: &Path) -> KernelResult<()> {
+    let manifest = Manifest::load(cas, workspace_root)?;
+    if target.exists() {
+        // Clear stale content so materialization is exact, not additive.
+        fs::remove_dir_all(target)?;
+    }
+    fs::create_dir_all(target)?;
+    for (path, entry) in &manifest.files {
+        let dest = target.join(path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = cas.get(&entry.blob)?;
+        fs::write(&dest, bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))?;
+        }
+    }
+    Ok(())
+}

@@ -23,3 +23,28 @@ pub struct ManifestEntry {
     /// Unix permission bits (0o644 on platforms without a mode).
     pub mode: u32,
 }
+
+/// A full, sorted `path → entry` listing of a workspace tree.
+///
+/// Paths are workspace-relative and use `/` separators; the [`BTreeMap`]
+/// keeps them sorted so the canonical encoding (and thus the merkle root)
+/// is deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Manifest {
+    pub files: BTreeMap<String, ManifestEntry>,
+}
+
+impl Manifest {
+    /// Store this manifest in the CAS and return its content hash — the
+    /// `workspace_root` for a state node with this tree.
+    pub fn store(&self, cas: &Cas) -> KernelResult<ContentHash> {
+        cas.put(ak_core::hash::canonical_json(self).as_bytes())
+    }
+
+    /// Load a manifest previously stored via [`Manifest::store`].
+    pub fn load(cas: &Cas, workspace_root: &ContentHash) -> KernelResult<Self> {
+        let bytes = cas.get(workspace_root)?;
+        serde_json::from_slice(&bytes).map_err(KernelError::Serde)
+    }
+}

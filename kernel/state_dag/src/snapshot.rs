@@ -73,3 +73,29 @@ pub fn snapshot_dir(cas: &Cas, dir: &Path) -> KernelResult<(ContentHash, Manifes
     tracing::debug!(files = manifest.files.len(), root = %root, "snapshot complete");
     Ok((root, manifest))
 }
+
+fn walk(cas: &Cas, base: &Path, dir: &Path, manifest: &mut Manifest) -> KernelResult<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            walk(cas, base, &path, manifest)?;
+        } else if ft.is_file() {
+            let bytes = fs::read(&path)?;
+            let blob = cas.put(&bytes)?;
+            let rel = path
+                .strip_prefix(base)
+                .map_err(|e| KernelError::Storage(format!("path outside snapshot root: {e}")))?;
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let mode = file_mode(&entry.metadata()?);
+            manifest.files.insert(rel, ManifestEntry { blob, mode });
+        }
+        // symlinks / other node types are intentionally skipped
+    }
+    Ok(())
+}

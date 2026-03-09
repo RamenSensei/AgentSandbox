@@ -183,4 +183,20 @@ mod tests {
         let (root2, _) = snapshot_dir(&cas, &out).unwrap();
         assert_eq!(root, root2);
     }
+
+    #[test]
+    fn materialize_removes_stale_files() {
+        let (dir, cas) = setup();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("keep.txt"), b"k").unwrap();
+        let (root, _) = snapshot_dir(&cas, &ws).unwrap();
+
+        let out = dir.path().join("out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("stale.txt"), b"s").unwrap();
+        materialize(&cas, &root, &out).unwrap();
+        assert!(out.join("keep.txt").exists());
+        assert!(!out.join("stale.txt").exists());
+    }
 }

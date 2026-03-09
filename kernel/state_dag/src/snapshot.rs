@@ -127,3 +127,29 @@ pub fn materialize(cas: &Cas, workspace_root: &ContentHash, target: &Path) -> Ke
     }
     Ok(())
 }
+
+/// Compute the file-level delta from `old` to `new`.
+pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<FileChange> {
+    let mut changes = Vec::new();
+    for (path, e) in &new.files {
+        match old.files.get(path) {
+            None => changes.push(FileChange::Added {
+                path: path.clone(),
+                blob: e.blob.clone(),
+                mode: e.mode,
+            }),
+            Some(o) if o.blob != e.blob => changes.push(FileChange::Modified {
+                path: path.clone(),
+                old_blob: o.blob.clone(),
+                new_blob: e.blob.clone(),
+            }),
+            Some(_) => {}
+        }
+    }
+    for (path, o) in &old.files {
+        if !new.files.contains_key(path) {
+            changes.push(FileChange::Deleted { path: path.clone(), old_blob: o.blob.clone() });
+        }
+    }
+    changes
+}

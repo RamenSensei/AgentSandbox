@@ -153,6 +153,7 @@ pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<FileChange> {
     }
     changes
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +163,7 @@ mod tests {
         let cas = Cas::open(dir.path().join("cas")).unwrap();
         (dir, cas)
     }
+
     #[test]
     fn snapshot_materialize_roundtrip() {
         let (dir, cas) = setup();
@@ -198,5 +200,28 @@ mod tests {
         materialize(&cas, &root, &out).unwrap();
         assert!(out.join("keep.txt").exists());
         assert!(!out.join("stale.txt").exists());
+    }
+
+    #[test]
+    fn diff_detects_add_modify_delete() {
+        let (dir, cas) = setup();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("a.txt"), b"one").unwrap();
+        fs::write(ws.join("b.txt"), b"two").unwrap();
+        let (_, m1) = snapshot_dir(&cas, &ws).unwrap();
+
+        fs::write(ws.join("a.txt"), b"one-changed").unwrap();
+        fs::remove_file(ws.join("b.txt")).unwrap();
+        fs::write(ws.join("c.txt"), b"three").unwrap();
+        let (_, m2) = snapshot_dir(&cas, &ws).unwrap();
+
+        let changes = diff_manifests(&m1, &m2);
+        assert_eq!(changes.len(), 3);
+        assert!(changes.iter().any(|c| matches!(c, FileChange::Modified { path, .. } if path == "a.txt")));
+        assert!(changes.iter().any(|c| matches!(c, FileChange::Deleted { path, .. } if path == "b.txt")));
+        assert!(changes.iter().any(|c| matches!(c, FileChange::Added { path, .. } if path == "c.txt")));
+
+        assert!(diff_manifests(&m2, &m2).is_empty());
     }
 }

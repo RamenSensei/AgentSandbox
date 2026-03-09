@@ -48,3 +48,28 @@ impl Manifest {
         serde_json::from_slice(&bytes).map_err(KernelError::Serde)
     }
 }
+
+fn file_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0o644
+    }
+}
+
+/// Snapshot `dir` into the CAS, returning the workspace root hash and the
+/// manifest. Symlinks and empty directories are ignored (artifact-level
+/// snapshot only; process state is a backend concern).
+#[tracing::instrument(level = "info", skip(cas), fields(dir = %dir.display()))]
+pub fn snapshot_dir(cas: &Cas, dir: &Path) -> KernelResult<(ContentHash, Manifest)> {
+    let mut manifest = Manifest::default();
+    walk(cas, dir, dir, &mut manifest)?;
+    let root = manifest.store(cas)?;
+    tracing::debug!(files = manifest.files.len(), root = %root, "snapshot complete");
+    Ok((root, manifest))
+}

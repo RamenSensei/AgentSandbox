@@ -36,3 +36,37 @@ Alternatives considered:
   queryable with plain SQL, battle-tested WAL mode giving concurrent readers with
   a single writer — which matches the kernel's design of a single serialized
   commit path plus many read-only ledger queries.
+
+## Decision
+
+Single-node metadata is stored in SQLite, accessed through `rusqlite` with the
+`bundled` feature (pinned SQLite version, no system dependency), in WAL mode
+with `synchronous=NORMAL` and foreign keys enforced. All kernel writes go through
+one writer task; effect phase transitions, lease mutations and ledger appends
+that belong to one step commit in a single SQLite transaction.
+
+PostgreSQL is reserved for cluster mode behind the same storage trait; no SQL
+in kernel logic may use SQLite-only features without a Postgres equivalent noted
+in the schema module.
+
+## Consequences
+
+Positive:
+
+- `agentkernel serve` works with zero setup; tests run against a temp file or
+  `:memory:`; a whole episode's audit trail is one copyable file.
+- WAL gives cheap concurrent audit/ledger reads while a commit is in flight.
+- Bundled build pins the exact SQLite version, so replay of ledger queries is
+  reproducible across hosts.
+
+Negative:
+
+- Single-writer throughput caps commit rate; acceptable because external effect
+  commits are deliberately rare and serialized anyway.
+- Two SQL dialects to keep compatible once cluster mode lands.
+
+Follow-ups:
+
+- Define the storage trait so the Postgres implementation is additive, not a rewrite.
+- Add a ledger-integrity check (`PRAGMA integrity_check` plus receipt hash chain
+  verification) to `agentkernel doctor`.

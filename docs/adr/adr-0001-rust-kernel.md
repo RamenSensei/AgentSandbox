@@ -37,3 +37,35 @@ Alternatives considered:
   need already mature: `tokio` for the async control plane, `axum` for the protocol
   surface, `rusqlite` for embedded metadata (see ADR-0002), `ed25519-dalek` for
   Receipt signing, `serde` for canonical, deterministic serialization.
+
+## Decision
+
+The kernel and control plane (`kernel/`), including policy evaluation, the
+effect broker, the state DAG, the causal ledger and the scheduler, are written
+in Rust. The `ak-core` crate defines the semantic vocabulary (Episode, Step,
+Branch, Principal, CapabilityLease, Observation, Effect, Receipt) with no I/O.
+SDKs remain Python and TypeScript; backends and connectors may bind other
+languages, but any code that evaluates leases, signs Receipts or gates commits
+is Rust and lives inside the kernel workspace.
+
+## Consequences
+
+Positive:
+
+- Whole-class elimination of memory-unsafety on the trust boundary.
+- Deterministic lease checking and canonical hashing are straightforward to keep
+  stable across platforms; `serde` + `IndexMap` give reproducible field ordering.
+- One binary, no runtime dependency, easy single-node install.
+
+Negative:
+
+- Slower contribution ramp for developers coming from the Python agent ecosystem;
+  the SDK boundary must carry more of the DX burden.
+- Compile times grow with the workspace; CI must cache aggressively.
+
+Follow-ups:
+
+- `#![forbid(unsafe_code)]` in `ak-core` and policy crates; `unsafe` allowed only
+  in backend FFI crates with mandatory review.
+- Fuzz the lease `check()`/`narrows()` and canonical-hash paths (ADR-0007 depends
+  on hash stability).

@@ -43,3 +43,31 @@ Normative properties:
   (`PreparedEffect.preview`), receipts, or error messages. The
   `external_response_digest` in `ReceiptBody` is a hash, not the raw response,
   precisely so receipts cannot leak embedded tokens.
+
+## 3. Tools that genuinely need network protocols
+
+Some guest tools legitimately speak a network protocol themselves (a package
+manager, `git` over HTTPS, a database client). For these, the broker MUST use
+one of the following techniques rather than handing over the real credential,
+listed roughly by preference:
+
+1. **Short-lived single-use tokens.** Minted per operation, bound to one
+   target, expiring in minutes, usable once. Theft yields a token that is
+   already dead or dying.
+2. **Scoped credentials.** Provider-issued credentials narrowed to the exact
+   resource and verb set the lease permits (e.g. a GitHub installation token
+   scoped to one repository, read-only).
+3. **Outbound-proxy dynamic injection.** The guest holds a placeholder; the
+   egress proxy — outside the guest — rewrites the `Authorization` header for
+   allow-listed destinations only. The real value never exists in guest
+   memory.
+4. **Token exchange.** The guest presents a broker-issued assertion; the
+   broker exchanges it (RFC 8693-style) for a downstream token that never
+   transits the guest.
+5. **mTLS workload identity.** The proxy terminates and re-originates TLS
+   with a workload certificate held host-side; the guest authenticates to the
+   proxy, never to the destination.
+
+In every variant the guest-visible artifact is either a placeholder or a
+credential whose blast radius is one operation on one resource for a few
+minutes.

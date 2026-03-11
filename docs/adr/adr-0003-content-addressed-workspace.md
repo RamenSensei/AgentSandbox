@@ -32,3 +32,37 @@ Alternatives considered: overlayfs layers per branch (fast fork, but diff is
 still a tree walk, and layer stacks leak host kernel specifics into replay);
 AgentFS-style mediated FUSE (good audit trail, but a per-syscall hot path and
 still no O(1) comparison). Both rejected as the primary store.
+
+## Decision
+
+The workspace is copy-in and content-addressed. On episode start, input files
+are copied into a CAS (blobs keyed by `ContentHash`); the guest sees a
+materialized view, never the host tree. Each `StateNode` records a Merkle root
+(`workspace_root`) over the workspace tree. Branch fork copies a root pointer;
+branch diff is a Merkle tree comparison; rollback is re-materialization from a
+prior root; two branches are identical iff their roots are equal — an O(1)
+comparison. Bind mounts, where a backend uses them internally for
+materialization, are treated as a transport, never as an authorization or
+integrity mechanism.
+
+## Consequences
+
+Positive:
+
+- Cheap fork/diff/rollback makes N-way branch search practical; identical
+  subtrees deduplicate storage across branches.
+- `workspace_root` in every StateNode makes filesystem replay (`ReplayClass::
+  FilesystemOnly` and above) verifiable, not asserted.
+- Guest compromise cannot touch host files that were never copied in.
+
+Negative:
+
+- Copy-in cost on episode start for large inputs; mitigated by CAS dedup across
+  episodes but still a real cold-start tax.
+- Files changed outside a Step (e.g. background process writes) must be swept
+  into the next delta; the materializer needs a change-detection pass.
+
+Follow-ups:
+
+- Benchmark materialization strategies (reflink where supported, hardlink CAS).
+- Define large-blob chunking so a 2 GB artifact does not become one hash unit.

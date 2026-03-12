@@ -101,3 +101,42 @@ These are ambient authority in its purest form; each violates invariant 1
 directly. Backends MUST NOT mount, forward, or route any of them by default,
 and the kernel MUST refuse a backend configuration that requests them without
 an explicit, audited, `Elevated`-trust policy exception.
+
+## 6. Exfiltration detection and structured denial
+
+Credential misuse is expected adversarial behavior (malicious dependencies,
+prompt-injected agents) and is handled as detection plus machine-readable
+denial, not silent drops:
+
+- The egress proxy scans outbound traffic for placeholder values, real
+  credential fingerprints, and high-entropy secrets; matches block the flow
+  and raise a ledger event attributing the attempt to the acting
+  `PrincipalId` and branch.
+- Attempts to use a credential outside its typed connector are denied with a
+  structured `Denial`, e.g.:
+
+```json
+{
+  "code": "CAPABILITY_DENIED",
+  "attempted_operation": "net.raw_socket",
+  "reason": "credential may only be used by the typed GitHub connector",
+  "safe_alternatives": ["github.create_pull_request"],
+  "requestable_scopes": [
+    { "operation": "net.http_read",
+      "constraints": { "domain": "api.github.com" },
+      "requires_human": false }
+  ],
+  "escalation_allowed": true
+}
+```
+
+A benign agent reads this and switches to the typed connector without human
+interruption (this exact recovery is step 6–8 of the reference demo in
+`examples/coding-agent-github`). A malicious principal learns nothing useful:
+low-trust callers receive the `redact_for`-reduced form (see
+`threat-model.md` §8), and repeated misuse SHOULD demote trust and revoke
+leases.
+
+- **Secret exfiltration block rate** and **secrets-in-guest count** are
+  first-class security metrics; `adversarial-bench/` includes the
+  "malicious dependency reads credentials" scenario as a standing regression.

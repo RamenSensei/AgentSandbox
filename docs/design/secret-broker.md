@@ -71,3 +71,33 @@ listed roughly by preference:
 In every variant the guest-visible artifact is either a placeholder or a
 credential whose blast radius is one operation on one resource for a few
 minutes.
+
+## 4. Placeholder credentials
+
+Guests that expect `GITHUB_TOKEN`-shaped environment variables MAY be given
+syntactically-valid placeholders (e.g. `akp_placeholder_<nonce>`), so tooling
+does not crash on absence. Placeholders MUST be:
+
+- cryptographically unrelated to any real credential;
+- unique per guest, so their appearance in egress traffic identifies the
+  exfiltrating branch and principal (§6);
+- rejected by the egress proxy everywhere except injection points.
+
+## 5. Forbidden ambient channels
+
+No configuration may expose these to a guest; conformance and
+`adversarial-bench/` test each one:
+
+```text
+Docker socket                    (host takeover)
+host home directory              (~/.ssh, ~/.aws, ~/.config tokens)
+SSH agent socket                 (signing oracle)
+cloud metadata endpoint          (169.254.169.254 → instance credentials)
+organization-wide tokens         (blast radius = whole org)
+writable host package cache      (cache poisoning across tenants)
+```
+
+These are ambient authority in its purest form; each violates invariant 1
+directly. Backends MUST NOT mount, forward, or route any of them by default,
+and the kernel MUST refuse a backend configuration that requests them without
+an explicit, audited, `Elevated`-trust policy exception.

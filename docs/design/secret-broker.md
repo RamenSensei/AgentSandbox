@@ -140,3 +140,21 @@ leases.
 - **Secret exfiltration block rate** and **secrets-in-guest count** are
   first-class security metrics; `adversarial-bench/` includes the
   "malicious dependency reads credentials" scenario as a standing regression.
+
+## 7. Connectors own credentials
+
+Credential lifecycle is a connector concern, mediated by the broker:
+
+- Each connector registers which credentials it needs, for which operations,
+  at which scopes; the broker stores them (or references to an external
+  secret manager) outside any guest-reachable path.
+- Rotation, expiry, and revocation happen broker-side and are invisible to
+  agents; a rotated credential never invalidates an approved
+  `EffectContract`, because contracts reference operations, not credentials.
+- A connector's credential MUST NOT be usable by another connector, by
+  `mcp.invoke` passthrough, or by generic `connectors/http` traffic. The
+  binding is connector + operation + lease, checked at effect time.
+
+This inverts the traditional model: instead of asking "how do we protect the
+token inside the sandbox?", AgentKernel ensures there is nothing inside the
+sandbox to protect.

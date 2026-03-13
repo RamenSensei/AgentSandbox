@@ -99,3 +99,34 @@ without re-reading parents. `StateDelta::is_empty()` identifies steps that
 changed nothing; the DAG MAY collapse empty-delta steps into ledger-only
 entries instead of full nodes (a checkpoint policy — most agent turns contain
 no state worth snapshotting, so per-turn full snapshots are wasteful).
+
+### 3.3 Content-addressed workspace
+
+The workspace adapter MUST store file contents in a content-addressed store
+(CAS) keyed by `ContentHash`, and MUST summarize each node's tree as a Merkle
+root in `workspace_root`. Consequences:
+
+- Two branches with identical trees share all blobs and have equal
+  `workspace_root`; equality of roots is a constant-time branch comparison.
+- Fork is O(1) metadata; materialization is lazy.
+- `branch.diff` between any two nodes reduces to a Merkle tree walk.
+
+## 4. Fork, diff, rollback, discard
+
+- **`branch.fork(from: StateId) -> BranchId`** creates a new branch whose
+  first node has `parent = from`. The kernel asks the selected `Backend` to
+  `fork(&from, &to_branch)`; backends with native CoW (forkd-class) return
+  `Ok(true)`, others return `Ok(false)` and the kernel re-materializes the
+  workspace from the CAS. Fork MUST NOT copy capability leases: leases are
+  branch-bound (`bound_branch`) and authority does not follow the agent across
+  speculative branches unless explicitly rebound.
+- **`branch.diff(a, b)`** returns the typed delta between two nodes per
+  adapter (files as `FileChange` lists, plus process/session/effect diffs).
+- **Rollback** is repointing a branch head to an ancestor node and resuming
+  execution from there. Nothing is destroyed; the abandoned suffix remains in
+  the ledger.
+- **`branch.discard(branch)`** marks a branch dead and calls
+  `Backend::discard` to release backend-side resources. Discard MUST revoke
+  all leases bound to the branch and MUST abort all its
+  `PendingEffect`s that have not been committed. Committed receipts are
+  never discarded — they are facts about the external world.

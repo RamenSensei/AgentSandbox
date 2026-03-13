@@ -35,3 +35,34 @@ Each adapter declares what it can faithfully capture; the composite fidelity
 of a node is summarized by its `ReplayClass` (see `replay.md`). An adapter
 MUST NOT claim fidelity it cannot restore — e.g. a backend without process
 checkpointing MUST NOT report `ProcessAndFilesystem`.
+
+## 3. Node and delta semantics
+
+### 3.1 StateNode
+
+A node is immutable and content-addressed (`StateId`, prefix `st-`):
+
+```rust
+pub struct StateNode {
+    pub id: StateId,
+    pub episode: EpisodeId,
+    pub branch: BranchId,
+    pub parent: Option<StateId>,        // None only for the episode root
+    pub produced_by: Option<StepId>,    // None for roots and merge nodes
+    pub merge_parent: Option<StateId>,  // second parent, merge nodes only
+    pub actor: PrincipalId,
+    pub delta: StateDelta,
+    pub workspace_root: ContentHash,    // Merkle root of the workspace tree
+    pub replay_class: ReplayClass,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+Rules:
+
+- Every node except the episode root MUST have a `parent`. A node with a
+  `merge_parent` is a merge node and MUST have `produced_by: None`.
+- `actor` records which `Principal` produced the transition; a delta with no
+  attributable actor MUST NOT be admitted.
+- Nodes are append-only. Rollback and discard never mutate or delete nodes
+  (garbage collection of unreachable nodes is a storage concern, §7).

@@ -66,3 +66,36 @@ Rules:
   attributable actor MUST NOT be admitted.
 - Nodes are append-only. Rollback and discard never mutate or delete nodes
   (garbage collection of unreachable nodes is a storage concern, §7).
+
+### 3.2 StateDelta and FileChange
+
+The delta spans all adapters:
+
+```rust
+pub struct StateDelta {
+    pub files: Vec<FileChange>,
+    pub processes_started: Vec<String>,   // command-line digests, still running
+    pub processes_exited: Vec<String>,
+    pub tool_sessions: Vec<String>,       // sessions opened or mutated
+    pub policy_epoch: u64,                // bumps when policy changed
+    pub effects_proposed: Vec<EffectId>,
+    pub effects_committed: Vec<ReceiptId>,
+}
+```
+
+File changes are typed, not textual:
+
+```rust
+pub enum FileChange {
+    Added    { path: String, blob: ContentHash, mode: u32 },
+    Modified { path: String, old_blob: ContentHash, new_blob: ContentHash },
+    Deleted  { path: String, old_blob: ContentHash },
+}
+```
+
+`Modified` and `Deleted` carry `old_blob` so that a delta is invertible for
+files and so that three-way merge (§6) can detect concurrent modification
+without re-reading parents. `StateDelta::is_empty()` identifies steps that
+changed nothing; the DAG MAY collapse empty-delta steps into ledger-only
+entries instead of full nodes (a checkpoint policy — most agent turns contain
+no state worth snapshotting, so per-turn full snapshots are wasteful).

@@ -130,3 +130,41 @@ root in `workspace_root`. Consequences:
   all leases bound to the branch and MUST abort all its
   `PendingEffect`s that have not been committed. Committed receipts are
   never discarded — they are facts about the external world.
+
+## 5. Branch fan-out
+
+Fork/search is a first-class agent tool. An agent MAY:
+
+```text
+fork 3 branches from one checkpoint
+attempt a different fix in each
+run tests in parallel
+compare correctness, performance, complexity, risk (branch.compare)
+merge the best branch; discard the rest
+```
+
+Fan-out is budgeted: the scheduler enforces a branch fan-out budget per
+episode (see `scheduling.md` §6), and each child branch runs under its own
+attenuated leases and its own `ResourceBudget`.
+
+## 6. Merge semantics: artifact-merge-only
+
+Branch merge is not just Git merge. The normative rule is:
+
+> **Merge artifacts and verified local state. Never merge processes or
+> authority.**
+
+Per adapter:
+
+| Layer | Merge behavior |
+|---|---|
+| Workspace files | Three-way merge against the nearest common ancestor's tree, using `old_blob`/`new_blob`. Conflicts are surfaced to the agent as structured observations, never auto-resolved by the model without a recorded decision. |
+| Processes | MUST NOT be merged. Process memory from two branches has no defined union; processes are restarted on the merge result. |
+| Browser sessions | MUST NOT be merged. |
+| Capabilities | MUST NOT be merged. Leases are not unioned across branches; the merged branch starts with explicitly (re)issued or rebound leases. |
+| External effects | MUST NOT be duplicated or unioned. Pending effects of the losing branch are aborted; receipts from either branch remain immutable ledger facts referenced by, not copied into, the merge. |
+| Observations | Carried with freshness metadata; stale external reads MAY be flagged for re-validation. |
+
+A merge produces a merge node with `parent` = the surviving branch head,
+`merge_parent` = the merged-in head, and `produced_by: None`. The merge
+node's `workspace_root` is the merged tree's Merkle root.

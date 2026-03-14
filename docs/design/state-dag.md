@@ -168,3 +168,38 @@ Per adapter:
 A merge produces a merge node with `parent` = the surviving branch head,
 `merge_parent` = the merged-in head, and `produced_by: None`. The merge
 node's `workspace_root` is the merged tree's Merkle root.
+
+## 7. Storage amplification
+
+Branch fan-out multiplies state. Mitigations, in order of importance:
+
+1. Content addressing: unchanged blobs are shared across all branches;
+   amplification is proportional to *changed* bytes, not tree size.
+2. Empty-delta collapse (§3.2): skip node creation for no-op steps.
+3. Semantic checkpoint policy: full adapter capture only at
+   scheduler-designated checkpoints; intermediate steps keep deltas only.
+4. GC of nodes unreachable from any live branch head, pinned checkpoint, or
+   receipt reference. Ledger entries are never GC'd.
+
+**Branch storage amplification** (bytes stored / bytes of a single-branch
+baseline) is a tracked metric with targets in `metrics.md`.
+
+## 8. Deliberate MVP exclusions
+
+The v0.6 DAG deliberately does not attempt arbitrary process-memory
+checkpointing (CRIU-class capture of sockets, GPU state, FUSE mounts,
+kernel-version-sensitive state, multi-process browsers, Unix domain sockets,
+external service sessions). Instead the MVP guarantees semantic correctness
+first:
+
+- content-addressed workspace;
+- file and tool-call logs;
+- pinned images and dependencies;
+- process restart (not restore) on rollback;
+- recorded model responses;
+- observation receipts for external reads.
+
+Backends that do support process snapshotting declare it via
+`ReplayClass::ProcessAndFilesystem`; the DAG accepts higher-fidelity nodes
+without requiring them. This is why `ReplayClass` exists: honest per-node
+guarantees instead of a vague "supports snapshot" flag.

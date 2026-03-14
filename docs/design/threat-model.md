@@ -50,3 +50,29 @@ falsified causal record.
   (content-addressed, immutable).
 - **Model ↔ policy**: model output crosses into the kernel only as structured
   requests, never as decisions (§5.6).
+
+## 5. Non-negotiables
+
+1. **No raw credentials in guests.** Ever. See `secret-broker.md`. Even a
+   fully compromised guest sees placeholders, single-use tokens, results, and
+   receipts only.
+2. **No ambient authority.** No default access to the Docker socket, host
+   home directory, SSH agent socket, cloud metadata endpoint, org-wide
+   tokens, or writable host package caches.
+3. **Bind mounts are not boundaries.** A "read-only" shared host mount has
+   been bypassed in real systems and MUST NOT be treated as a security
+   boundary. Prefer copy-in, content-addressed storage, or a mediated
+   filesystem, and place true read-only enforcement at a lower layer.
+4. **No default inheritance for children.** `Principal::spawn_child` yields
+   trust capped at `TrustLevel::Limited` and zero leases; authority arrives
+   only through `CapabilityLease::attenuate`, which provably narrows.
+5. **eBPF is observation, not isolation.** eBPF is appropriate for
+   telemetry, accounting, event capture, and supplementary enforcement; it
+   MUST NOT be the sole isolation layer for multi-tenant workloads — that
+   remains microVMs, application kernels, or verified OS boundaries.
+6. **The LLM never decides policy.** The model MAY explain intent, request
+   capabilities, recommend policy, and generate rationales. It MUST NOT issue
+   capabilities, judge itself harmless, self-clear a denial, bypass
+   deterministic parameter validation, or decide that an effect is
+   authorized. Authorization is the deterministic lease check plus the
+   effect-broker pipeline, always.

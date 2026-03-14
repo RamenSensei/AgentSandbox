@@ -23,3 +23,30 @@ falsified causal record.
    system's value collapses if the record can be forged or truncated.
 5. **Cross-branch / cross-tenant data** — one branch's or tenant's workspace,
    observations, and secrets from another's reach.
+
+## 3. Adversaries
+
+| Adversary | Position | Goal |
+|---|---|---|
+| Compromised guest | Arbitrary code inside a backend | Escape; steal credentials; reach the host |
+| Malicious dependency | Supply chain, runs inside guest with the agent's task | Read tokens; exfiltrate via egress |
+| Prompt-injected agent | The agent model itself, steered by hostile content | Misuse *legitimately held* leases; request escalation; leak data |
+| Malicious skill / MCP server | Installed tool with its own code and network behavior | Poisoned tool results; harvest inputs; pivot |
+| Escalating sub-agent | Spawned principal | Regain authority its parent attenuated away |
+| Replaying/duplicating attacker | Network or harness position | Re-submit approved effects; double-commit; exploit stale approvals |
+
+## 4. Trust boundaries
+
+- **Guest ↔ kernel**: the strongest boundary (microVM, gVisor, or OS sandbox
+  per `BackendProfile.isolation_strength`). Everything guest-side is
+  untrusted, including the agent's own outputs.
+- **Kernel ↔ connectors**: connectors are trusted code holding credentials;
+  they are part of the TCB and reviewed as such.
+- **Principal ↔ principal**: every agent, sub-agent, and tool is a distinct
+  `Principal` on its own branch; the boundary is the lease system, not shared
+  process context.
+- **Branch ↔ branch / tenant ↔ tenant**: no shared writable state; sharing
+  happens only through provenance-carrying artifacts and the CAS
+  (content-addressed, immutable).
+- **Model ↔ policy**: model output crosses into the kernel only as structured
+  requests, never as decisions (§5.6).

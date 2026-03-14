@@ -76,3 +76,43 @@ falsified causal record.
    deterministic parameter validation, or decide that an effect is
    authorized. Authorization is the deterministic lease check plus the
    effect-broker pipeline, always.
+
+## 6. Mitigations mapped to adversarial-bench scenarios
+
+Each row is a standing scenario in `adversarial-bench/`; a release MUST pass
+all of them.
+
+| Scenario | Primary mitigation |
+|---|---|
+| Malicious dependency reads credentials | No raw credentials in guest (Secret Broker); unique placeholders identify the exfiltrating branch |
+| Browser prompt injection | Injected instructions can only produce *requests*; leases and effect approval still gate every external action; suspicious escalation requests are denied with redacted detail |
+| MCP tool poisoning | Quarantine-and-promotion pipeline (§7); quarantined servers run as `Quarantined` principals with minimal leases and redacted denials |
+| SSRF / metadata endpoint | Egress proxy allow-listing; metadata endpoint is a forbidden ambient channel; `connectors/http` classifies unvouched requests `OpaqueExternal` |
+| Child-agent escalation | `spawn_child` trust cap; `attenuate` rejects any widening (`ConstraintWidened`, `UsesExceedParent`, `ExpiryExceedsParent`, `BudgetExceedsParent`) |
+| Cross-branch data leakage | Branch-bound leases (`bound_branch`), per-branch workspaces, immutable CAS, artifact-only sharing |
+| Read-only mount bypass | Non-negotiable 3: copy-in / CAS materialization instead of shared host mounts |
+| Stale-approval commit | Commit-time revalidation: contract hash, preconditions, lease validity, policy epoch (`StaleAuthorization`, `PreconditionFailed` denials) |
+| Duplicate retry double-commit | `idempotency_key` dedup at commit; retries return the existing `Receipt` (`DuplicateCommit`) |
+| Inconsistent filesystem/process snapshot | Honest `ReplayClass` declarations; the kernel never claims fidelity a backend did not declare |
+| Live replay after world change | Live replay guarantees the contract, not the outcome; changed preconditions abort before commit |
+
+## 7. Skill / MCP quarantine-and-promotion
+
+Autonomous skill installation is a large capability gain and a top-tier risk
+entry point. Unknown skills and MCP servers MUST NOT receive the primary agent's
+filesystem, network, or secret access. The pipeline:
+
+```text
+download skill
+  → install in a quarantine branch (Quarantined principal, minimal leases)
+  → static analysis
+  → dynamic run; observe requested capabilities
+  → generate a capability manifest
+  → test against the manifest
+  → pin digest / sign
+  → promote to semi-trusted or trusted
+```
+
+Promotion raises `TrustLevel` and permits broader (still attenuated) leases;
+any post-promotion behavior outside the manifest SHOULD demote the skill back
+to quarantine and revoke its leases.

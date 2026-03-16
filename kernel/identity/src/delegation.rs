@@ -148,3 +148,67 @@ impl DelegationService {
         &self.leases
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ak_core::capability::Operation;
+    use ak_core::principal::{Principal, PrincipalKind};
+    use chrono::Duration;
+    use serde_json::json;
+
+    fn setup() -> (DelegationService, Principal, Principal, CapabilityLease, DateTime<Utc>) {
+        let db = IdentityDb::open_in_memory().expect("db");
+        let svc = DelegationService::new(db);
+        let now = Utc::now();
+        let root = Principal::new_agent("root");
+        let child = root.spawn_child(PrincipalKind::SubAgent, "worker");
+        svc.registry().register(&root).unwrap();
+        svc.registry().register(&child).unwrap();
+        let mut constraints = IndexMap::new();
+        constraints.insert("path".into(), Constraint::Prefix { prefix: "src/".into() });
+        let lease = CapabilityLease {
+            id: LeaseId::generate(),
+            principal: root.id.clone(),
+            operation: Operation::new("fs.write"),
+            constraints,
+            remaining_uses: 5,
+            issued_at: now,
+            expires_at: now + Duration::hours(1),
+            bound_branch: None,
+            budget: ResourceBudget::step_default(),
+            parent_lease: None,
+            preconditions: IndexMap::new(),
+            revoked: false,
+        };
+        svc.leases().issue(&lease).unwrap();
+        (svc, root, child, lease, now)
+    }
+    #[test]
+    fn delegation_to_descendant_succeeds_and_is_audited() {
+        let (svc, root, child, lease, now) = setup();
+        let mut narrowed = lease.constraints.clone();
+        narrowed.insert("path".into(), Constraint::Prefix { prefix: "src/gen/".into() });
+        let child_lease = svc
+            .delegate(
+                &root.id,
+                &lease.id,
+                &child.id,
+                narrowed,
+                2,
+                now + Duration::minutes(5),
+                ResourceBudget::zero(),
+                now,
+            )
+            .unwrap();
+        assert_eq!(child_lease.principal, child.id);
+        assert_eq!(child_lease.parent_lease.as_ref(), Some(&lease.id));
+        // Persisted and auditable.
+        assert_eq!(svc.leases().get(&child_lease.id).unwrap(), child_lease);
+        let log = svc.audit_log().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].delegatee, child.id);
+        // Revoking the parent kills the delegated lease too.
+        let revoked = svc.leases().revoke_cascading(&lease.id).unwrap();
+        assert_eq!(revoked.len(), 2);
+    }
+}

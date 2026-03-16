@@ -116,3 +116,28 @@ download skill
 Promotion raises `TrustLevel` and permits broader (still attenuated) leases;
 any post-promotion behavior outside the manifest SHOULD demote the skill back
 to quarantine and revoke its leases.
+
+## 8. Denial explanations vs. policy-map leakage
+
+Invariant 4 (machine-readable denials) is in tension with information
+discipline: explanations must help a benign agent self-repair, but MUST NOT
+leak sensitive host paths, hidden policy details, or a map of the defenses.
+Resolution: explanation granularity scales with `TrustLevel`, never
+enforcement.
+
+`Denial::redact_for(trust)` implements this. For `trust >=
+TrustLevel::Limited` the full denial is returned. Below `Limited`
+(`Untrusted`, `Quarantined`):
+
+- `code` and `attempted_operation` are kept;
+- `reason` is replaced with `"operation not permitted for this principal"`;
+- `safe_alternatives` are kept (they only reveal what the caller may already
+  do);
+- `requestable_scopes` is emptied (no sketching the policy surface);
+- `escalation_allowed` is forced `false`.
+
+Thus a quarantined skill probing the policy learns only that it was denied
+and which typed operations it already holds — while the primary agent gets
+`reason`, `requestable_scopes`, and `escalation_allowed` sufficient for
+autonomous recovery. Denial contents, like everything else, are ledger
+entries: probing patterns are visible to detection.

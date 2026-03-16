@@ -141,3 +141,11 @@ and which typed operations it already holds — while the primary agent gets
 `reason`, `requestable_scopes`, and `escalation_allowed` sufficient for
 autonomous recovery. Denial contents, like everything else, are ledger
 entries: probing patterns are visible to detection.
+
+## 9. Residual risks
+
+Stated, not hidden: connector bugs are TCB bugs; a malicious *approved*
+contract executes (approval quality is a human/policy problem the kernel can
+only make legible); side channels between co-resident guests are bounded by
+the chosen backend's isolation class; and denial-of-service within a granted
+budget is possible by construction — budgets bound it, they do not prevent it.

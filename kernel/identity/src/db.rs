@@ -42,3 +42,29 @@ CREATE TABLE IF NOT EXISTS delegations (
     delegated_at  TEXT NOT NULL
 );
 "#;
+
+impl IdentityDb {
+    /// Open (or create) an on-disk identity database at `path`.
+    pub fn open(path: impl AsRef<Path>) -> IdentityResult<Self> {
+        Self::from_connection(Connection::open(path)?)
+    }
+
+    /// Open a fresh in-memory database (used for tests and ephemeral kernels).
+    pub fn open_in_memory() -> IdentityResult<Self> {
+        Self::from_connection(Connection::open_in_memory()?)
+    }
+
+    fn from_connection(conn: Connection) -> IdentityResult<Self> {
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+    }
+
+    /// Lock the underlying connection. Poisoned locks are recovered: the
+    /// database itself is the source of truth, not in-process state.
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
+        match self.conn.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}

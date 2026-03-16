@@ -2,11 +2,12 @@
 resolver = "2"
 members = [
     "kernel/core",
+    "kernel/identity",
     "kernel/state_dag",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/agent-kernel/agent-kernel"
@@ -14,6 +15,7 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 ak-core = { path = "kernel/core" }
+ak-identity = { path = "kernel/identity" }
 ak-state-dag = { path = "kernel/state_dag" }
 
 serde = { version = "1", features = ["derive"] }

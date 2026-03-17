@@ -148,6 +148,7 @@ impl DelegationService {
         &self.leases
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +184,7 @@ mod tests {
         svc.leases().issue(&lease).unwrap();
         (svc, root, child, lease, now)
     }
+
     #[test]
     fn delegation_to_descendant_succeeds_and_is_audited() {
         let (svc, root, child, lease, now) = setup();
@@ -268,5 +270,23 @@ mod tests {
         // Nothing recorded on failure.
         assert!(svc.audit_log().unwrap().is_empty());
         let _ = json!({});
+    }
+
+    #[test]
+    fn lease_not_held_by_delegator_fails() {
+        let (svc, _root, child, lease, now) = setup();
+        let err = svc
+            .delegate(
+                &child.id,
+                &lease.id,
+                &child.id,
+                lease.constraints.clone(),
+                1,
+                now + Duration::minutes(5),
+                ResourceBudget::zero(),
+                now,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::DelegationRejected(_)));
     }
 }

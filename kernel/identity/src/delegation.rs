@@ -246,4 +246,27 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, IdentityError::DelegationRejected(_)));
     }
+
+    #[test]
+    fn delegation_with_widened_constraints_fails() {
+        let (svc, root, child, lease, now) = setup();
+        let mut widened = lease.constraints.clone();
+        widened.insert("path".into(), Constraint::Prefix { prefix: "".into() });
+        let err = svc
+            .delegate(
+                &root.id,
+                &lease.id,
+                &child.id,
+                widened,
+                1,
+                now + Duration::minutes(5),
+                ResourceBudget::zero(),
+                now,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::Attenuation(_)));
+        // Nothing recorded on failure.
+        assert!(svc.audit_log().unwrap().is_empty());
+        let _ = json!({});
+    }
 }

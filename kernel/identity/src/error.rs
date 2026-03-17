@@ -53,3 +53,18 @@ pub enum IdentityError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+impl From<IdentityError> for KernelError {
+    fn from(e: IdentityError) -> Self {
+        match e {
+            IdentityError::UnknownPrincipal(id) => {
+                KernelError::NotFound { kind: "principal", id }
+            }
+            IdentityError::UnknownLease(id) => KernelError::NotFound { kind: "lease", id },
+            IdentityError::Storage(err) => KernelError::Storage(err.to_string()),
+            IdentityError::Serde(err) => KernelError::Serde(err),
+            IdentityError::Io(err) => KernelError::Io(err),
+            other => KernelError::Other(other.to_string()),
+        }
+    }
+}

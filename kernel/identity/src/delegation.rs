@@ -211,4 +211,39 @@ mod tests {
         let revoked = svc.leases().revoke_cascading(&lease.id).unwrap();
         assert_eq!(revoked.len(), 2);
     }
+
+    #[test]
+    fn delegation_to_stranger_or_unregistered_fails() {
+        let (svc, root, _child, lease, now) = setup();
+        let stranger = Principal::new_agent("stranger");
+        svc.registry().register(&stranger).unwrap();
+        let err = svc
+            .delegate(
+                &root.id,
+                &lease.id,
+                &stranger.id,
+                lease.constraints.clone(),
+                1,
+                now + Duration::minutes(5),
+                ResourceBudget::zero(),
+                now,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::DelegationRejected(_)));
+
+        let ghost = PrincipalId("pr-ghost".into());
+        let err = svc
+            .delegate(
+                &root.id,
+                &lease.id,
+                &ghost,
+                lease.constraints.clone(),
+                1,
+                now + Duration::minutes(5),
+                ResourceBudget::zero(),
+                now,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::DelegationRejected(_)));
+    }
 }

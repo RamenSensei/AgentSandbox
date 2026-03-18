@@ -100,3 +100,18 @@ impl KernelKeypair {
         Ok(public_key.verify(payload.as_bytes(), &sig).is_ok())
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn sign_verify_roundtrip_over_canonical_json() {
+        let kp = KernelKeypair::generate();
+        // Key order must not matter: both encode to the same canonical JSON.
+        let a = json!({"x": 1, "y": {"b": 2, "a": 3}});
+        let b = json!({"y": {"a": 3, "b": 2}, "x": 1});
+        let sig = kp.sign_canonical(&a);
+        assert!(KernelKeypair::verify_canonical(&kp.public_key(), &b, &sig).unwrap());
+        assert!(!KernelKeypair::verify_canonical(&kp.public_key(), &json!({"x": 2}), &sig).unwrap());
+    }
+}

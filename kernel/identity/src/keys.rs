@@ -114,4 +114,13 @@ mod tests {
         assert!(KernelKeypair::verify_canonical(&kp.public_key(), &b, &sig).unwrap());
         assert!(!KernelKeypair::verify_canonical(&kp.public_key(), &json!({"x": 2}), &sig).unwrap());
     }
+
+    #[test]
+    fn key_id_is_sha256_of_public_key() {
+        let kp = KernelKeypair::generate();
+        let id = kp.key_id();
+        assert!(id.starts_with("ed25519:"));
+        assert_eq!(id.len(), "ed25519:".len() + 64);
+        assert_eq!(id, kp.key_id());
+    }
 }

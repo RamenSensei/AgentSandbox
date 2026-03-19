@@ -123,4 +123,22 @@ mod tests {
         assert_eq!(id.len(), "ed25519:".len() + 64);
         assert_eq!(id, kp.key_id());
     }
+
+    #[test]
+    fn save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.key");
+        let kp = KernelKeypair::generate();
+        kp.save(&path).unwrap();
+        let loaded = KernelKeypair::load(&path).unwrap();
+        assert_eq!(kp.key_id(), loaded.key_id());
+        // load_or_generate keeps an existing key…
+        let again = KernelKeypair::load_or_generate(&path).unwrap();
+        assert_eq!(again.key_id(), kp.key_id());
+        // …and creates one when missing.
+        let fresh_path = dir.path().join("fresh.key");
+        let fresh = KernelKeypair::load_or_generate(&fresh_path).unwrap();
+        assert!(fresh_path.exists());
+        assert_ne!(fresh.key_id(), kp.key_id());
+    }
 }

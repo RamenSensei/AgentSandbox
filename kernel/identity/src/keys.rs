@@ -100,10 +100,12 @@ impl KernelKeypair {
         Ok(public_key.verify(payload.as_bytes(), &sig).is_ok())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
     #[test]
     fn sign_verify_roundtrip_over_canonical_json() {
         let kp = KernelKeypair::generate();
@@ -140,5 +142,15 @@ mod tests {
         let fresh = KernelKeypair::load_or_generate(&fresh_path).unwrap();
         assert!(fresh_path.exists());
         assert_ne!(fresh.key_id(), kp.key_id());
+    }
+
+    #[test]
+    fn bad_key_files_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.key");
+        std::fs::write(&path, "not-hex!").unwrap();
+        assert!(matches!(KernelKeypair::load(&path), Err(IdentityError::Key(_))));
+        std::fs::write(&path, hex::encode([0u8; 16])).unwrap();
+        assert!(matches!(KernelKeypair::load(&path), Err(IdentityError::Key(_))));
     }
 }

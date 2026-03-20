@@ -213,4 +213,25 @@ mod tests {
             Err(IdentityError::UnknownLease(_))
         ));
     }
+
+    #[test]
+    fn cascading_revocation_is_transitive() {
+        let s = store();
+        let now = Utc::now();
+        let root = lease("a", None, now);
+        let child = lease("b", Some(&root.id), now);
+        let grandchild = lease("c", Some(&child.id), now);
+        let unrelated = lease("d", None, now);
+        for l in [&root, &child, &grandchild, &unrelated] {
+            s.issue(l).unwrap();
+        }
+        let revoked = s.revoke_cascading(&root.id).unwrap();
+        assert_eq!(revoked.len(), 3);
+        assert!(s.get(&root.id).unwrap().revoked);
+        assert!(s.get(&child.id).unwrap().revoked);
+        assert!(s.get(&grandchild.id).unwrap().revoked);
+        assert!(!s.get(&unrelated.id).unwrap().revoked);
+        // Idempotent: revoking again revokes nothing new below the root.
+        assert_eq!(s.revoke_cascading(&child.id).unwrap().len(), 0);
+    }
 }

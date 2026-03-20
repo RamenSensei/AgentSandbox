@@ -234,4 +234,26 @@ mod tests {
         // Idempotent: revoking again revokes nothing new below the root.
         assert_eq!(s.revoke_cascading(&child.id).unwrap().len(), 0);
     }
+
+    #[test]
+    fn consume_use_counts_down_and_refuses_dead_leases() {
+        let s = store();
+        let now = Utc::now();
+        let mut l = lease("a", None, now);
+        l.remaining_uses = 2;
+        s.issue(&l).unwrap();
+        assert_eq!(s.consume_use(&l.id, now).unwrap().remaining_uses, 1);
+        assert_eq!(s.consume_use(&l.id, now).unwrap().remaining_uses, 0);
+        assert!(matches!(
+            s.consume_use(&l.id, now),
+            Err(IdentityError::LeaseUnusable { .. })
+        ));
+        // Expired lease also refuses.
+        let l2 = lease("a", None, now);
+        s.issue(&l2).unwrap();
+        assert!(matches!(
+            s.consume_use(&l2.id, now + Duration::hours(1)),
+            Err(IdentityError::LeaseUnusable { .. })
+        ));
+    }
 }

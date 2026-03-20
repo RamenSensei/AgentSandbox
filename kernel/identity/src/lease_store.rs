@@ -171,3 +171,46 @@ impl LeaseStore {
         Ok(candidates)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ak_core::budget::ResourceBudget;
+    use ak_core::capability::Operation;
+    use chrono::Duration;
+    use indexmap::IndexMap;
+
+    fn lease(principal: &str, parent: Option<&LeaseId>, now: DateTime<Utc>) -> CapabilityLease {
+        CapabilityLease {
+            id: LeaseId::generate(),
+            principal: PrincipalId(format!("pr-{principal}")),
+            operation: Operation::new("fs.read"),
+            constraints: IndexMap::new(),
+            remaining_uses: 3,
+            issued_at: now,
+            expires_at: now + Duration::minutes(10),
+            bound_branch: None,
+            budget: ResourceBudget::step_default(),
+            parent_lease: parent.cloned(),
+            preconditions: IndexMap::new(),
+            revoked: false,
+        }
+    }
+
+    fn store() -> LeaseStore {
+        LeaseStore::new(IdentityDb::open_in_memory().expect("db"))
+    }
+    #[test]
+    fn issue_get_and_list() {
+        let s = store();
+        let now = Utc::now();
+        let l = lease("a", None, now);
+        s.issue(&l).unwrap();
+        assert_eq!(s.get(&l.id).unwrap(), l);
+        assert_eq!(s.list_for_principal(&l.principal).unwrap(), vec![l.clone()]);
+        assert_eq!(s.active_for_principal(&l.principal, now).unwrap().len(), 1);
+        assert!(matches!(
+            s.get(&LeaseId("lease-missing".into())),
+            Err(IdentityError::UnknownLease(_))
+        ));
+    }
+}

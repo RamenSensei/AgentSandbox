@@ -171,6 +171,7 @@ impl LeaseStore {
         Ok(candidates)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +200,7 @@ mod tests {
     fn store() -> LeaseStore {
         LeaseStore::new(IdentityDb::open_in_memory().expect("db"))
     }
+
     #[test]
     fn issue_get_and_list() {
         let s = store();
@@ -255,5 +257,20 @@ mod tests {
             s.consume_use(&l2.id, now + Duration::hours(1)),
             Err(IdentityError::LeaseUnusable { .. })
         ));
+    }
+
+    #[test]
+    fn sweep_marks_only_expired() {
+        let s = store();
+        let now = Utc::now();
+        let fresh = lease("a", None, now);
+        let mut stale = lease("a", None, now - Duration::hours(1));
+        stale.expires_at = now - Duration::minutes(30);
+        s.issue(&fresh).unwrap();
+        s.issue(&stale).unwrap();
+        let swept = s.sweep_expired(now).unwrap();
+        assert_eq!(swept, vec![stale.id.clone()]);
+        assert!(s.get(&stale.id).unwrap().revoked);
+        assert!(!s.get(&fresh.id).unwrap().revoked);
     }
 }

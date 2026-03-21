@@ -154,3 +154,33 @@ impl PrincipalRegistry {
         Ok(out)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ak_core::principal::PrincipalKind;
+
+    fn registry() -> PrincipalRegistry {
+        PrincipalRegistry::new(IdentityDb::open_in_memory().expect("db"))
+    }
+    #[test]
+    fn register_lookup_and_lineage() {
+        let reg = registry();
+        let root = Principal::new_agent("root");
+        let child = root.spawn_child(PrincipalKind::SubAgent, "worker");
+        let grandchild = child.spawn_child(PrincipalKind::Tool, "grep-tool");
+        reg.register(&root).unwrap();
+        reg.register(&child).unwrap();
+        reg.register(&grandchild).unwrap();
+
+        assert_eq!(reg.get(&root.id).unwrap(), root);
+        assert_eq!(reg.children(&root.id).unwrap(), vec![child.clone()]);
+        let lineage = reg.lineage(&grandchild.id).unwrap();
+        assert_eq!(lineage.len(), 2);
+        assert_eq!(lineage[0].id, child.id);
+        assert_eq!(lineage[1].id, root.id);
+        assert!(reg.is_self_or_descendant(&grandchild.id, &root.id).unwrap());
+        assert!(reg.is_self_or_descendant(&root.id, &root.id).unwrap());
+        assert!(!reg.is_self_or_descendant(&root.id, &child.id).unwrap());
+        assert_eq!(reg.list().unwrap().len(), 3);
+    }
+}

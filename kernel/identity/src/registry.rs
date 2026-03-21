@@ -183,4 +183,20 @@ mod tests {
         assert!(!reg.is_self_or_descendant(&root.id, &child.id).unwrap());
         assert_eq!(reg.list().unwrap().len(), 3);
     }
+
+    #[test]
+    fn duplicate_and_orphan_registration_fail() {
+        let reg = registry();
+        let root = Principal::new_agent("root");
+        reg.register(&root).unwrap();
+        assert!(matches!(
+            reg.register(&root),
+            Err(IdentityError::DuplicatePrincipal(_))
+        ));
+        let orphan = root.spawn_child(PrincipalKind::SubAgent, "orphan");
+        let unregistered = Principal::new_agent("ghost");
+        let mut bad = orphan;
+        bad.parent = Some(unregistered.id);
+        assert!(matches!(reg.register(&bad), Err(IdentityError::UnknownParent(_))));
+    }
 }

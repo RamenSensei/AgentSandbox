@@ -199,4 +199,13 @@ mod tests {
         bad.parent = Some(unregistered.id);
         assert!(matches!(reg.register(&bad), Err(IdentityError::UnknownParent(_))));
     }
+
+    #[test]
+    fn trust_updates_persist() {
+        let reg = registry();
+        let root = Principal::new_agent("root");
+        reg.register(&root).unwrap();
+        reg.set_trust(&root.id, TrustLevel::Quarantined).unwrap();
+        assert_eq!(reg.get(&root.id).unwrap().trust, TrustLevel::Quarantined);
+    }
 }

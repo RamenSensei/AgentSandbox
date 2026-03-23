@@ -90,3 +90,28 @@ impl EventKind {
         Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
 }
+
+/// The hash-covered body of a ledger event. [`LedgerEvent::event_hash`] is
+/// `hash_canonical` of this structure, and each body embeds the previous
+/// event's hash — mutating any persisted row breaks the chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventBody {
+    /// Monotonic sequence number assigned by the ledger (1-based).
+    pub seq: i64,
+    pub kind: EventKind,
+    pub episode: EpisodeId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<BranchId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepId>,
+    pub principal: PrincipalId,
+    pub timestamp: DateTime<Utc>,
+    /// Arbitrary structured payload (see [`EventKind`] conventions).
+    pub payload: serde_json::Value,
+    /// Attribution links: `seq`s of the events that caused this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caused_by: Vec<i64>,
+    /// Hash of the previous event in the ledger; `None` for the first event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_event_hash: Option<ContentHash>,
+}

@@ -154,6 +154,7 @@ impl PrincipalRegistry {
         Ok(out)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +163,7 @@ mod tests {
     fn registry() -> PrincipalRegistry {
         PrincipalRegistry::new(IdentityDb::open_in_memory().expect("db"))
     }
+
     #[test]
     fn register_lookup_and_lineage() {
         let reg = registry();
@@ -207,5 +209,18 @@ mod tests {
         reg.register(&root).unwrap();
         reg.set_trust(&root.id, TrustLevel::Quarantined).unwrap();
         assert_eq!(reg.get(&root.id).unwrap().trust, TrustLevel::Quarantined);
+    }
+
+    #[test]
+    fn persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.db");
+        let root = Principal::new_agent("root");
+        {
+            let reg = PrincipalRegistry::new(IdentityDb::open(&path).unwrap());
+            reg.register(&root).unwrap();
+        }
+        let reg = PrincipalRegistry::new(IdentityDb::open(&path).unwrap());
+        assert_eq!(reg.get(&root.id).unwrap(), root);
     }
 }

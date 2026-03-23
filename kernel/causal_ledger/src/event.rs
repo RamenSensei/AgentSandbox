@@ -138,3 +138,17 @@ impl std::ops::Deref for LedgerEvent {
         &self.body
     }
 }
+
+/// Input to [`crate::Ledger::append`]: everything the caller provides;
+/// `seq`, `timestamp`, chain hashes are assigned by the ledger.
+#[derive(Debug, Clone)]
+pub struct NewEvent {
+    pub kind: EventKind,
+    pub episode: EpisodeId,
+    pub branch: Option<BranchId>,
+    pub step: Option<StepId>,
+    pub principal: PrincipalId,
+    pub payload: serde_json::Value,
+    /// Sequence numbers of causally prior events.
+    pub caused_by: Vec<i64>,
+}

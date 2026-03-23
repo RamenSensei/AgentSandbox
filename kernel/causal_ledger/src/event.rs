@@ -115,3 +115,26 @@ pub struct EventBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_event_hash: Option<ContentHash>,
 }
+
+impl EventBody {
+    /// Canonical content hash of this body.
+    pub fn compute_hash(&self) -> ContentHash {
+        hash_canonical(self)
+    }
+}
+
+/// A fully persisted, hash-chained ledger event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LedgerEvent {
+    #[serde(flatten)]
+    pub body: EventBody,
+    /// `hash_canonical(body)`.
+    pub event_hash: ContentHash,
+}
+
+impl std::ops::Deref for LedgerEvent {
+    type Target = EventBody;
+    fn deref(&self) -> &EventBody {
+        &self.body
+    }
+}

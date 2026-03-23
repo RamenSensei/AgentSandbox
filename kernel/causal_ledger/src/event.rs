@@ -152,3 +152,17 @@ pub struct NewEvent {
     /// Sequence numbers of causally prior events.
     pub caused_by: Vec<i64>,
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn kind_wire_strings_round_trip() {
+        for k in EventKind::ALL {
+            assert_eq!(EventKind::parse(k.as_str()), Some(k));
+            // serde and as_str agree
+            let json = serde_json::to_string(&k).unwrap();
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+        }
+        assert_eq!(EventKind::parse("nope"), None);
+    }
+}

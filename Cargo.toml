@@ -4,6 +4,7 @@ members = [
     "kernel/core",
     "kernel/identity",
     "kernel/state_dag",
+    "kernel/causal_ledger",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ rust-version = "1.80"
 ak-core = { path = "kernel/core" }
 ak-identity = { path = "kernel/identity" }
 ak-state-dag = { path = "kernel/state_dag" }
+ak-causal-ledger = { path = "kernel/causal_ledger" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

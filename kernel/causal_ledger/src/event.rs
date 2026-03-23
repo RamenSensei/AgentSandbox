@@ -43,3 +43,50 @@ pub enum EventKind {
     /// A machine-readable denial was issued.
     DenialIssued,
 }
+
+impl EventKind {
+    /// Stable wire string (snake_case, matching serde).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventKind::Objective => "objective",
+            EventKind::ModelResponse => "model_response",
+            EventKind::DeclaredIntent => "declared_intent",
+            EventKind::CapabilityRequest => "capability_request",
+            EventKind::PolicyDecision => "policy_decision",
+            EventKind::ToolInvocation => "tool_invocation",
+            EventKind::OsEvent => "os_event",
+            EventKind::StateDeltaRecorded => "state_delta_recorded",
+            EventKind::ObservationEmitted => "observation_emitted",
+            EventKind::EffectProposed => "effect_proposed",
+            EventKind::EffectPrepared => "effect_prepared",
+            EventKind::EffectApproved => "effect_approved",
+            EventKind::EffectCommitted => "effect_committed",
+            EventKind::EffectAborted => "effect_aborted",
+            EventKind::DenialIssued => "denial_issued",
+        }
+    }
+
+    /// All kinds, in causal order.
+    pub const ALL: [EventKind; 15] = [
+        EventKind::Objective,
+        EventKind::ModelResponse,
+        EventKind::DeclaredIntent,
+        EventKind::CapabilityRequest,
+        EventKind::PolicyDecision,
+        EventKind::ToolInvocation,
+        EventKind::OsEvent,
+        EventKind::StateDeltaRecorded,
+        EventKind::ObservationEmitted,
+        EventKind::EffectProposed,
+        EventKind::EffectPrepared,
+        EventKind::EffectApproved,
+        EventKind::EffectCommitted,
+        EventKind::EffectAborted,
+        EventKind::DenialIssued,
+    ];
+
+    /// Parse the wire string.
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}

@@ -43,3 +43,31 @@ const MIGRATIONS: &[(&str, &str)] = &[(
          stored_at TEXT NOT NULL
      );",
 )];
+
+/// Filters for [`Ledger::query`] (`trace.query`). All fields are optional
+/// and AND-combined.
+#[derive(Debug, Clone, Default)]
+pub struct TraceQuery {
+    pub episode: Option<EpisodeId>,
+    pub branch: Option<BranchId>,
+    /// Restrict to events produced by a specific step.
+    pub step: Option<StepId>,
+    /// Inclusive ledger-sequence range — the total order over steps.
+    pub seq_range: Option<(i64, i64)>,
+    pub principal: Option<PrincipalId>,
+    /// Empty = all kinds.
+    pub kinds: Vec<EventKind>,
+    /// Inclusive UTC time range.
+    pub time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    /// Maximum number of events returned (default: unlimited).
+    pub limit: Option<usize>,
+}
+
+/// The append-only, tamper-evident causal ledger.
+///
+/// Every appended event embeds the previous event's content hash, so any
+/// mutation of a persisted row is detected by [`Ledger::verify_chain`].
+/// Thread-safe; share via [`Arc`] and hand [`EventWriter`]s to per-step code.
+pub struct Ledger {
+    conn: Mutex<Connection>,
+}

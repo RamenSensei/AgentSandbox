@@ -498,3 +498,44 @@ impl EventWriter {
         &self.ledger
     }
 }
+
+// ------------------------------------------------------------------- helpers
+
+fn sql_err(e: rusqlite::Error) -> KernelError {
+    KernelError::Storage(format!("sqlite: {e}"))
+}
+
+/// Map an events row (SELECT *) to a [`LedgerEvent`]. Returns a nested
+/// result so serde errors surface as [`KernelError`] rather than panics.
+fn row_to_event(row: &Row<'_>) -> rusqlite::Result<KernelResult<LedgerEvent>> {
+    let seq: i64 = row.get("seq")?;
+    let kind: String = row.get("kind")?;
+    let episode: String = row.get("episode")?;
+    let branch: Option<String> = row.get("branch")?;
+    let step: Option<String> = row.get("step")?;
+    let principal: String = row.get("principal")?;
+    let timestamp: String = row.get("timestamp")?;
+    let payload: String = row.get("payload")?;
+    let caused_by: String = row.get("caused_by")?;
+    let prev: Option<String> = row.get("prev_event_hash")?;
+    let event_hash: String = row.get("event_hash")?;
+    Ok((|| {
+        let kind = EventKind::parse(&kind)
+            .ok_or_else(|| KernelError::Storage(format!("unknown event kind `{kind}`")))?;
+        Ok(LedgerEvent {
+            body: EventBody {
+                seq,
+                kind,
+                episode: EpisodeId(episode),
+                branch: branch.map(BranchId),
+                step: step.map(StepId),
+                principal: PrincipalId(principal),
+                timestamp: serde_json::from_str(&timestamp)?,
+                payload: serde_json::from_str(&payload)?,
+                caused_by: serde_json::from_str(&caused_by)?,
+                prev_event_hash: prev.map(ContentHash),
+            },
+            event_hash: ContentHash(event_hash),
+        })
+    })())
+}

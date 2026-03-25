@@ -539,3 +539,15 @@ fn row_to_event(row: &Row<'_>) -> rusqlite::Result<KernelResult<LedgerEvent>> {
         })
     })())
 }
+
+fn receipt_by_key(conn: &Connection, key: &str) -> KernelResult<Option<Receipt>> {
+    conn.query_row(
+        "SELECT receipt_json FROM receipts WHERE idempotency_key = ?1",
+        [key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(sql_err)?
+    .map(|json| serde_json::from_str(&json).map_err(KernelError::Serde))
+    .transpose()
+}

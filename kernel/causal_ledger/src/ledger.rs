@@ -457,3 +457,44 @@ impl Ledger {
             .ok_or_else(|| KernelError::NotFound { kind: "receipt", id: id.to_string() })
     }
 }
+
+/// A per-step handle the kernel uses to record events with fixed
+/// episode/branch/step/principal attribution.
+#[derive(Clone)]
+pub struct EventWriter {
+    ledger: Arc<Ledger>,
+    episode: EpisodeId,
+    branch: Option<BranchId>,
+    step: Option<StepId>,
+    principal: PrincipalId,
+}
+
+impl EventWriter {
+    /// Record an event with this writer's attribution and no causal parents.
+    pub fn record(&self, kind: EventKind, payload: serde_json::Value) -> KernelResult<LedgerEvent> {
+        self.record_caused_by(kind, payload, Vec::new())
+    }
+
+    /// Record an event citing the sequence numbers of its causal parents.
+    pub fn record_caused_by(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+        caused_by: Vec<i64>,
+    ) -> KernelResult<LedgerEvent> {
+        self.ledger.append(NewEvent {
+            kind,
+            episode: self.episode.clone(),
+            branch: self.branch.clone(),
+            step: self.step.clone(),
+            principal: self.principal.clone(),
+            payload,
+            caused_by,
+        })
+    }
+
+    /// The underlying ledger (for `trace.fetch` / queries).
+    pub fn ledger(&self) -> &Arc<Ledger> {
+        &self.ledger
+    }
+}

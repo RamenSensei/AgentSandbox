@@ -121,4 +121,18 @@ mod tests {
         let ledger = Ledger::open(&path).unwrap();
         assert!(ledger.verify_chain().is_err());
     }
+
+    #[test]
+    fn raw_blob_store_and_fetch() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let h = ledger.store_raw(b"very long stdout ...").unwrap();
+        assert_eq!(h, hash_bytes(b"very long stdout ..."));
+        // idempotent
+        assert_eq!(ledger.store_raw(b"very long stdout ...").unwrap(), h);
+        assert_eq!(ledger.fetch_raw(&h).unwrap(), b"very long stdout ...");
+        assert!(matches!(
+            ledger.fetch_raw(&hash_bytes(b"missing")),
+            Err(KernelError::NotFound { .. })
+        ));
+    }
 }

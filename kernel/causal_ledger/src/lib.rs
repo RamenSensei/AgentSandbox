@@ -182,4 +182,33 @@ mod tests {
             .unwrap();
         assert!(empty.is_empty());
     }
+
+    #[test]
+    fn causal_query_path_modifications() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let ep = EpisodeId::generate();
+        let delta = ak_core::StateDelta {
+            files: vec![ak_core::state::FileChange::Added {
+                path: "src/main.rs".into(),
+                blob: hash_bytes(b"fn main() {}"),
+                mode: 0o644,
+            }],
+            ..Default::default()
+        };
+        ledger
+            .append(ev(
+                EventKind::StateDeltaRecorded,
+                &ep,
+                json!({"state_id": "st-1", "delta": delta}),
+            ))
+            .unwrap();
+        ledger
+            .append(ev(EventKind::StateDeltaRecorded, &ep, json!({"state_id": "st-2", "delta": ak_core::StateDelta::default()})))
+            .unwrap();
+
+        let hits = ledger.events_modifying_path("src/main.rs").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, 1);
+        assert!(ledger.events_modifying_path("nope.rs").unwrap().is_empty());
+    }
 }

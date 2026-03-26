@@ -85,4 +85,40 @@ mod tests {
         assert_eq!(ledger.verify_chain().unwrap(), 2);
         assert_eq!(ledger.get(2).unwrap(), e2);
     }
+
+    #[test]
+    fn tampering_with_a_row_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let ledger = Ledger::open(&path).unwrap();
+        let ep = EpisodeId::generate();
+        ledger.append(ev(EventKind::Objective, &ep, json!({"goal": "honest"}))).unwrap();
+        ledger.append(ev(EventKind::ToolInvocation, &ep, json!({"tool": "bash"}))).unwrap();
+        assert_eq!(ledger.verify_chain().unwrap(), 2);
+        drop(ledger);
+
+        // Attacker edits the payload of event 1 directly in SQLite.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET payload = ? WHERE seq = 1",
+            [serde_json::to_string(&json!({"goal": "evil"})).unwrap()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let ledger = Ledger::open(&path).unwrap();
+        let err = ledger.verify_chain().unwrap_err();
+        assert!(err.to_string().contains("seq 1"), "got: {err}");
+
+        // Deleting an interior event also breaks the prev-hash chain.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE events SET payload = ? WHERE seq = 1", [
+            serde_json::to_string(&json!({"goal": "honest"})).unwrap(),
+        ])
+        .unwrap();
+        conn.execute("DELETE FROM events WHERE seq = 1", []).unwrap();
+        drop(conn);
+        let ledger = Ledger::open(&path).unwrap();
+        assert!(ledger.verify_chain().is_err());
+    }
 }

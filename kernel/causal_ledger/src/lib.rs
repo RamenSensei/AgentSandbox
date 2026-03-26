@@ -135,4 +135,51 @@ mod tests {
             Err(KernelError::NotFound { .. })
         ));
     }
+
+    #[test]
+    fn query_filters_by_episode_kind_principal_seq_and_limit() {
+        let ledger = Arc::new(Ledger::open_in_memory().unwrap());
+        let ep1 = EpisodeId::generate();
+        let ep2 = EpisodeId::generate();
+        let alice = PrincipalId::generate();
+        let branch = BranchId::generate();
+        let step = StepId::generate();
+
+        let w = ledger.writer(ep1.clone(), Some(branch.clone()), Some(step.clone()), alice.clone());
+        w.record(EventKind::Objective, json!({"n": 1})).unwrap();
+        w.record(EventKind::ToolInvocation, json!({"n": 2})).unwrap();
+        w.record(EventKind::ToolInvocation, json!({"n": 3})).unwrap();
+        ledger.append(ev(EventKind::ToolInvocation, &ep2, json!({"n": 4}))).unwrap();
+
+        let by_ep = ledger
+            .query(&TraceQuery { episode: Some(ep1.clone()), ..Default::default() })
+            .unwrap();
+        assert_eq!(by_ep.len(), 3);
+        assert!(by_ep.iter().all(|e| e.branch.as_ref() == Some(&branch)));
+        assert!(by_ep.iter().all(|e| e.step.as_ref() == Some(&step)));
+
+        let tools_for_alice = ledger
+            .query(&TraceQuery {
+                kinds: vec![EventKind::ToolInvocation],
+                principal: Some(alice.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(tools_for_alice.len(), 2);
+
+        let ranged = ledger
+            .query(&TraceQuery { seq_range: Some((2, 4)), limit: Some(2), ..Default::default() })
+            .unwrap();
+        assert_eq!(ranged.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
+
+        // Time range: everything happened "now"; a past-only window is empty.
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        let empty = ledger
+            .query(&TraceQuery {
+                time_range: Some((past - chrono::Duration::hours(1), past)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(empty.is_empty());
+    }
 }

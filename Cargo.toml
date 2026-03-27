@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "kernel/core",
     "kernel/identity",
+    "kernel/policy",
     "kernel/state_dag",
     "kernel/causal_ledger",
 ]
@@ -17,6 +18,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 ak-core = { path = "kernel/core" }
 ak-identity = { path = "kernel/identity" }
+ak-policy = { path = "kernel/policy" }
 ak-state-dag = { path = "kernel/state_dag" }
 ak-causal-ledger = { path = "kernel/causal_ledger" }
 

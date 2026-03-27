@@ -22,6 +22,7 @@ pub mod ledger;
 
 pub use event::{EventBody, EventKind, LedgerEvent, NewEvent};
 pub use ledger::{EventWriter, Ledger, TraceQuery};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,33 +45,6 @@ mod tests {
         }
     }
 
-
-
-
-
-
-
-
-    fn receipt(key_hint: &str) -> Receipt {
-        Receipt {
-            id: ReceiptId::generate(),
-            body: ReceiptBody {
-                effect: EffectId::generate(),
-                who: PrincipalId::generate(),
-                operation: "github.create_pull_request".into(),
-                resource: "org/repo".into(),
-                contract_hash: hash_bytes(key_hint.as_bytes()),
-                branch: BranchId::generate(),
-                step: StepId::generate(),
-                policy_epoch: 1,
-                authorization_witness: hash_bytes(b"witness"),
-                external_response_digest: hash_bytes(b"resp"),
-                committed_at: chrono::Utc::now(),
-            },
-            signature: "00".into(),
-            key_id: "kernel-key-1".into(),
-        }
-    }
     #[test]
     fn append_chains_hashes_and_verifies() {
         let ledger = Ledger::open_in_memory().unwrap();
@@ -274,6 +248,46 @@ mod tests {
         assert!(matches!(
             ledger.irreversible_effects_since(&StateId::generate()),
             Err(KernelError::NotFound { .. })
+        ));
+    }
+
+    fn receipt(key_hint: &str) -> Receipt {
+        Receipt {
+            id: ReceiptId::generate(),
+            body: ReceiptBody {
+                effect: EffectId::generate(),
+                who: PrincipalId::generate(),
+                operation: "github.create_pull_request".into(),
+                resource: "org/repo".into(),
+                contract_hash: hash_bytes(key_hint.as_bytes()),
+                branch: BranchId::generate(),
+                step: StepId::generate(),
+                policy_epoch: 1,
+                authorization_witness: hash_bytes(b"witness"),
+                external_response_digest: hash_bytes(b"resp"),
+                committed_at: chrono::Utc::now(),
+            },
+            signature: "00".into(),
+            key_id: "kernel-key-1".into(),
+        }
+    }
+
+    #[test]
+    fn receipt_storage_and_idempotency() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let r = receipt("a");
+        ledger.store_receipt(&r, "ep-1-step-1").unwrap();
+        // Same receipt, same key: no-op.
+        ledger.store_receipt(&r, "ep-1-step-1").unwrap();
+        assert_eq!(ledger.receipt_by_idempotency_key("ep-1-step-1").unwrap(), Some(r.clone()));
+        assert_eq!(ledger.get_receipt(&r.id).unwrap(), r);
+        assert_eq!(ledger.receipt_by_idempotency_key("unknown").unwrap(), None);
+
+        // Different receipt under the same key: duplicate commit.
+        let other = receipt("b");
+        assert!(matches!(
+            ledger.store_receipt(&other, "ep-1-step-1"),
+            Err(KernelError::DuplicateCommit { .. })
         ));
     }
 }

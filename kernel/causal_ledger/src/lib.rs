@@ -236,4 +236,44 @@ mod tests {
         let seqs: Vec<i64> = chain.iter().map(|e| e.seq).collect();
         assert_eq!(seqs, vec![1, 2, 4, 5]); // noise (3) excluded
     }
+
+    #[test]
+    fn irreversible_effects_since_state() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let ep = EpisodeId::generate();
+        let st = StateId::generate();
+        ledger
+            .append(ev(
+                EventKind::EffectCommitted,
+                &ep,
+                json!({"effect_id": "fx-early", "class": "irreversible"}),
+            ))
+            .unwrap();
+        ledger
+            .append(ev(EventKind::StateDeltaRecorded, &ep, json!({"state_id": st.as_str(), "delta": {}})))
+            .unwrap();
+        ledger
+            .append(ev(
+                EventKind::EffectCommitted,
+                &ep,
+                json!({"effect_id": "fx-rev", "class": "compensatable"}),
+            ))
+            .unwrap();
+        ledger
+            .append(ev(
+                EventKind::EffectCommitted,
+                &ep,
+                json!({"effect_id": "fx-bad", "class": "irreversible"}),
+            ))
+            .unwrap();
+
+        let bad = ledger.irreversible_effects_since(&st).unwrap();
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].payload["effect_id"], "fx-bad");
+
+        assert!(matches!(
+            ledger.irreversible_effects_since(&StateId::generate()),
+            Err(KernelError::NotFound { .. })
+        ));
+    }
 }

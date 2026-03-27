@@ -211,4 +211,29 @@ mod tests {
         assert_eq!(hits[0].seq, 1);
         assert!(ledger.events_modifying_path("nope.rs").unwrap().is_empty());
     }
+
+    #[test]
+    fn causal_query_events_leading_to_effect() {
+        let ledger = Ledger::open_in_memory().unwrap();
+        let ep = EpisodeId::generate();
+        let fx = EffectId::generate();
+        let e1 = ledger.append(ev(EventKind::Objective, &ep, json!({}))).unwrap(); // seq 1
+        let e2 = ledger.append(ev(EventKind::DeclaredIntent, &ep, json!({}))).unwrap(); // seq 2
+        ledger.append(ev(EventKind::OsEvent, &ep, json!({"noise": true}))).unwrap(); // seq 3, unrelated
+        let mut proposed = ev(EventKind::EffectProposed, &ep, json!({"effect_id": fx.as_str()}));
+        proposed.caused_by = vec![e2.seq];
+        let e4 = ledger.append(proposed).unwrap();
+        // Link committed -> proposed and objective.
+        let mut committed = ev(
+            EventKind::EffectCommitted,
+            &ep,
+            json!({"effect_id": fx.as_str(), "class": "irreversible"}),
+        );
+        committed.caused_by = vec![e4.seq, e1.seq];
+        ledger.append(committed).unwrap(); // seq 5
+
+        let chain = ledger.events_leading_to_effect(fx.as_str()).unwrap();
+        let seqs: Vec<i64> = chain.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 4, 5]); // noise (3) excluded
+    }
 }

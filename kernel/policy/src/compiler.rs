@@ -82,3 +82,63 @@ pub fn compile_confinement(doc: &PolicyDocument, principal: &Principal) -> Compi
         syscall_profile,
     }
 }
+
+/// Compile an approved semantic grant into a [`CompiledGrant`].
+///
+/// `rule` is the (already matched) policy rule that authorized the grant;
+/// `extra_constraints` lets the approver narrow further (e.g. pin the exact
+/// repository). Extra constraints may only *add* parameters or replace a rule
+/// constraint with one that [`Constraint::narrows`] it — widening is rejected.
+pub fn compile_grant(
+    doc: &PolicyDocument,
+    principal: &Principal,
+    operation: &Operation,
+    rule: &PolicyRule,
+    extra_constraints: &IndexMap<String, Constraint>,
+    branch: Option<BranchId>,
+    now: DateTime<Utc>,
+) -> PolicyResult<CompiledGrant> {
+    if rule.effect == RuleEffect::Deny {
+        return Err(PolicyError::GrantRejected(format!(
+            "rule `{}` is a deny rule and cannot be compiled into a grant",
+            rule.id
+        )));
+    }
+    if !rule.matches_operation(&operation.0) {
+        return Err(PolicyError::GrantRejected(format!(
+            "rule `{}` does not cover operation `{}`",
+            rule.id, operation.0
+        )));
+    }
+    let mut constraints = rule.constraints.clone();
+    for (param, c) in extra_constraints {
+        match rule.constraints.get(param) {
+            Some(parent) if !c.narrows(parent) => {
+                return Err(PolicyError::GrantRejected(format!(
+                    "extra constraint on `{param}` widens the rule constraint"
+                )));
+            }
+            _ => {
+                constraints.insert(param.clone(), c.clone());
+            }
+        }
+    }
+    let mut budget = rule.budget.unwrap_or_else(ResourceBudget::step_default);
+    budget.risk_units = budget.risk_units.max(rule.risk_weight);
+    let ttl = Duration::seconds(i64::try_from(rule.ttl_seconds).unwrap_or(i64::MAX));
+    let lease = CapabilityLease {
+        id: LeaseId::generate(),
+        principal: principal.id.clone(),
+        operation: operation.clone(),
+        constraints,
+        remaining_uses: rule.max_uses,
+        issued_at: now,
+        expires_at: now + ttl,
+        bound_branch: branch,
+        budget,
+        parent_lease: None,
+        preconditions: IndexMap::new(),
+        revoked: false,
+    };
+    Ok(CompiledGrant { lease, confinement: compile_confinement(doc, principal) })
+}

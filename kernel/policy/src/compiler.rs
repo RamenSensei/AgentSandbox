@@ -49,3 +49,36 @@ pub struct CompiledGrant {
     pub lease: CapabilityLease,
     pub confinement: CompiledConfinement,
 }
+
+/// Compile the confinement for `principal` under `doc`.
+///
+/// Deterministic mapping:
+/// - path prefixes come from the document's [`crate::PathPolicy`];
+/// - egress domains come from the allowlist, except for operations outside
+///   the `net`/network-using namespaces on quarantined principals;
+/// - `env_scrub` is on for everything below [`TrustLevel::Standard`] and for
+///   every non-`Elevated` principal by default;
+/// - the syscall profile is [`SyscallProfile::Networkless`] when the egress
+///   allowlist is empty, [`SyscallProfile::Restricted`] for principals below
+///   [`TrustLevel::Standard`], and [`SyscallProfile::Standard`] otherwise.
+pub fn compile_confinement(doc: &PolicyDocument, principal: &Principal) -> CompiledConfinement {
+    let egress_domains = if principal.trust <= TrustLevel::Quarantined {
+        Vec::new()
+    } else {
+        doc.egress_domains.clone()
+    };
+    let syscall_profile = if egress_domains.is_empty() {
+        SyscallProfile::Networkless
+    } else if principal.trust < TrustLevel::Standard {
+        SyscallProfile::Restricted
+    } else {
+        SyscallProfile::Standard
+    };
+    CompiledConfinement {
+        writable_prefixes: doc.paths.writable_prefixes.clone(),
+        readable_prefixes: doc.paths.readable_prefixes.clone(),
+        egress_domains,
+        env_scrub: principal.trust < TrustLevel::Elevated,
+        syscall_profile,
+    }
+}

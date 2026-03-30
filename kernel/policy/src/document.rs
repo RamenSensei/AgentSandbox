@@ -27,3 +27,26 @@ pub struct PrincipalSelector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_trust: Option<TrustLevel>,
 }
+
+impl PrincipalSelector {
+    /// Whether this selector matches `principal`.
+    pub fn matches(&self, principal: &Principal) -> bool {
+        if !self.ids.is_empty() && !self.ids.contains(&principal.id) {
+            return false;
+        }
+        if !self.kinds.is_empty() && !self.kinds.contains(&principal.kind) {
+            return false;
+        }
+        if let Some(min) = self.min_trust {
+            if principal.trust < min {
+                return false;
+            }
+        }
+        if let Some(max) = self.max_trust {
+            if principal.trust > max {
+                return false;
+            }
+        }
+        true
+    }
+}

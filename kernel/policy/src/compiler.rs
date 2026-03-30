@@ -215,4 +215,19 @@ mod tests {
             Err(PolicyError::GrantRejected(_))
         ));
     }
+
+    #[test]
+    fn quarantined_principals_get_networkless_confinement() {
+        let d = doc();
+        let mut p = Principal::new_agent("skill");
+        p.trust = TrustLevel::Quarantined;
+        let c = compile_confinement(&d, &p);
+        assert!(c.egress_domains.is_empty());
+        assert_eq!(c.syscall_profile, SyscallProfile::Networkless);
+        assert!(c.env_scrub);
+        // Limited trust with network keeps egress but restricts syscalls.
+        p.trust = TrustLevel::Limited;
+        let c = compile_confinement(&d, &p);
+        assert_eq!(c.syscall_profile, SyscallProfile::Restricted);
+    }
 }

@@ -193,4 +193,26 @@ mod tests {
         assert_eq!(grant.confinement.syscall_profile, SyscallProfile::Standard);
         assert!(grant.confinement.env_scrub);
     }
+
+    #[test]
+    fn extra_constraints_may_narrow_but_not_widen() {
+        let d = doc();
+        let p = Principal::new_agent("agent");
+        let op = Operation::new("github.create_pull_request");
+        let now = Utc::now();
+        let mut narrow = IndexMap::new();
+        narrow.insert("head".into(), Constraint::Equals { value: json!("sandbox/fix-1") });
+        let grant = compile_grant(&d, &p, &op, &pr_rule(), &narrow, None, now).unwrap();
+        assert_eq!(
+            grant.lease.constraints.get("head"),
+            Some(&Constraint::Equals { value: json!("sandbox/fix-1") })
+        );
+
+        let mut widen = IndexMap::new();
+        widen.insert("head".into(), Constraint::Prefix { prefix: "".into() });
+        assert!(matches!(
+            compile_grant(&d, &p, &op, &pr_rule(), &widen, None, now),
+            Err(PolicyError::GrantRejected(_))
+        ));
+    }
 }

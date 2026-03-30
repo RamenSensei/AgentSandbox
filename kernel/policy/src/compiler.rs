@@ -142,3 +142,55 @@ pub fn compile_grant(
     };
     Ok(CompiledGrant { lease, confinement: compile_confinement(doc, principal) })
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{PathPolicy, PrincipalSelector};
+    use serde_json::json;
+
+    fn doc() -> PolicyDocument {
+        let mut d = PolicyDocument::default();
+        d.set_paths(PathPolicy {
+            readable_prefixes: vec!["".into()],
+            writable_prefixes: vec!["src/".into(), "tests/".into()],
+        });
+        d.set_egress_domains(vec!["api.github.com".into()]);
+        d
+    }
+
+    fn pr_rule() -> PolicyRule {
+        let mut constraints = IndexMap::new();
+        constraints.insert("repository".into(), Constraint::Equals { value: json!("org/repo") });
+        constraints.insert("head".into(), Constraint::Prefix { prefix: "sandbox/".into() });
+        PolicyRule {
+            id: "pr".into(),
+            principals: PrincipalSelector::default(),
+            operations: vec!["github.create_pull_request".into()],
+            effect: RuleEffect::Allow,
+            constraints,
+            max_uses: 2,
+            ttl_seconds: 900,
+            budget: None,
+            risk_weight: 5,
+            note: None,
+        }
+    }
+    #[test]
+    fn compiles_lease_and_confinement_from_rule() {
+        let d = doc();
+        let p = Principal::new_agent("agent");
+        let op = Operation::new("github.create_pull_request");
+        let now = Utc::now();
+        let grant =
+            compile_grant(&d, &p, &op, &pr_rule(), &IndexMap::new(), None, now).unwrap();
+        assert_eq!(grant.lease.principal, p.id);
+        assert_eq!(grant.lease.operation, op);
+        assert_eq!(grant.lease.remaining_uses, 2);
+        assert_eq!(grant.lease.expires_at, now + Duration::seconds(900));
+        assert_eq!(grant.lease.budget.risk_units, 10); // step_default max risk_weight
+        assert_eq!(grant.confinement.writable_prefixes, vec!["src/", "tests/"]);
+        assert_eq!(grant.confinement.egress_domains, vec!["api.github.com"]);
+        assert_eq!(grant.confinement.syscall_profile, SyscallProfile::Standard);
+        assert!(grant.confinement.env_scrub);
+    }
+}

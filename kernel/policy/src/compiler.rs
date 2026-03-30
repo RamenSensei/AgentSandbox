@@ -142,6 +142,7 @@ pub fn compile_grant(
     };
     Ok(CompiledGrant { lease, confinement: compile_confinement(doc, principal) })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +176,7 @@ mod tests {
             note: None,
         }
     }
+
     #[test]
     fn compiles_lease_and_confinement_from_rule() {
         let d = doc();
@@ -229,5 +231,18 @@ mod tests {
         p.trust = TrustLevel::Limited;
         let c = compile_confinement(&d, &p);
         assert_eq!(c.syscall_profile, SyscallProfile::Restricted);
+    }
+
+    #[test]
+    fn deny_rules_cannot_be_compiled() {
+        let d = doc();
+        let p = Principal::new_agent("agent");
+        let mut rule = pr_rule();
+        rule.effect = RuleEffect::Deny;
+        let op = Operation::new("github.create_pull_request");
+        assert!(matches!(
+            compile_grant(&d, &p, &op, &rule, &IndexMap::new(), None, Utc::now()),
+            Err(PolicyError::GrantRejected(_))
+        ));
     }
 }

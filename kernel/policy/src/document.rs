@@ -124,3 +124,29 @@ pub struct PathPolicy {
     #[serde(default)]
     pub writable_prefixes: Vec<String>,
 }
+
+/// Which MCP servers/tools may be invoked (glob patterns on
+/// `server` and `tool` names). Empty lists mean "none".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPolicy {
+    #[serde(default)]
+    pub allowed_servers: Vec<String>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+}
+
+/// A scope principals may *request* when denied, sketching the constraints
+/// policy would consider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestableScopeSpec {
+    /// Operation glob this scope covers.
+    pub operation: String,
+    /// Constraint sketch shown to the requester.
+    #[serde(default)]
+    pub constraints: serde_json::Value,
+    /// Whether granting requires a human in the loop.
+    #[serde(default)]
+    pub requires_human: bool,
+}

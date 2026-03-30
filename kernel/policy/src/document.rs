@@ -100,3 +100,27 @@ pub struct PolicyRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
+
+fn default_max_uses() -> u32 {
+    1
+}
+fn default_ttl_seconds() -> u64 {
+    600
+}
+
+impl PolicyRule {
+    /// Whether this rule's operation globs cover `operation`.
+    pub fn matches_operation(&self, operation: &str) -> bool {
+        self.operations.iter().any(|g| glob_match(g, operation))
+    }
+}
+
+/// Workspace-relative path prefixes the branch may touch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathPolicy {
+    #[serde(default)]
+    pub readable_prefixes: Vec<String>,
+    #[serde(default)]
+    pub writable_prefixes: Vec<String>,
+}

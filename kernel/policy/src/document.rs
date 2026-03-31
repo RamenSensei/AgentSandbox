@@ -288,3 +288,23 @@ impl PolicyDocument {
         self.egress_domains.iter().any(|g| glob_match(g, domain))
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn selector_matching_is_conjunctive() {
+        let mut p = Principal::new_agent("a");
+        p.trust = TrustLevel::Standard;
+        let sel = PrincipalSelector {
+            kinds: vec![PrincipalKind::Agent],
+            min_trust: Some(TrustLevel::Limited),
+            ..Default::default()
+        };
+        assert!(sel.matches(&p));
+        p.trust = TrustLevel::Quarantined;
+        assert!(!sel.matches(&p));
+        assert!(PrincipalSelector::default().matches(&p));
+        let by_id = PrincipalSelector { ids: vec![p.id.clone()], ..Default::default() };
+        assert!(by_id.matches(&p));
+    }
+}

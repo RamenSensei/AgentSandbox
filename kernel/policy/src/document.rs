@@ -150,3 +150,44 @@ pub struct RequestableScopeSpec {
     #[serde(default)]
     pub requires_human: bool,
 }
+
+/// Whether and how principals may request capability escalation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationPolicy {
+    /// Master switch: when false, denials advertise no requestable scopes.
+    #[serde(default)]
+    pub allow_requests: bool,
+    /// Scopes that may be requested.
+    #[serde(default)]
+    pub requestable: Vec<RequestableScopeSpec>,
+}
+
+/// The complete declarative policy for a kernel instance.
+///
+/// The document is deterministic data: evaluation depends only on it and the
+/// five explicit inputs of [`crate::PolicyEngine::evaluate`]. `policy_epoch`
+/// bumps on **every** mutation, so approvals pinned to an epoch are invalidated
+/// by any policy change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyDocument {
+    /// Monotonic epoch, bumped by every mutating call.
+    #[serde(default)]
+    pub policy_epoch: u64,
+    /// Ordered rules; first match wins.
+    #[serde(default)]
+    pub rules: Vec<PolicyRule>,
+    /// Path confinement compiled into every grant.
+    #[serde(default)]
+    pub paths: PathPolicy,
+    /// Egress domain allowlist (glob patterns, e.g. `*.github.com`).
+    #[serde(default)]
+    pub egress_domains: Vec<String>,
+    /// MCP tool policy.
+    #[serde(default)]
+    pub tools: ToolPolicy,
+    /// Escalation policy.
+    #[serde(default)]
+    pub escalation: EscalationPolicy,
+}

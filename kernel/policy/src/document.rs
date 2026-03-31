@@ -191,3 +191,100 @@ pub struct PolicyDocument {
     #[serde(default)]
     pub escalation: EscalationPolicy,
 }
+
+impl Default for PolicyDocument {
+    fn default() -> Self {
+        Self {
+            policy_epoch: 0,
+            rules: Vec::new(),
+            paths: PathPolicy::default(),
+            egress_domains: Vec::new(),
+            tools: ToolPolicy::default(),
+            escalation: EscalationPolicy::default(),
+        }
+    }
+}
+
+impl PolicyDocument {
+    /// Parse a document from YAML text and validate it.
+    pub fn from_yaml_str(yaml: &str) -> PolicyResult<Self> {
+        let doc: PolicyDocument = serde_yaml::from_str(yaml)?;
+        doc.validate()?;
+        Ok(doc)
+    }
+
+    /// Load and validate a document from a YAML file.
+    pub fn from_yaml_file(path: impl AsRef<Path>) -> PolicyResult<Self> {
+        Self::from_yaml_str(&std::fs::read_to_string(path)?)
+    }
+
+    /// Serialize back to YAML.
+    pub fn to_yaml(&self) -> PolicyResult<String> {
+        Ok(serde_yaml::to_string(self)?)
+    }
+
+    /// Semantic validation beyond what serde enforces.
+    pub fn validate(&self) -> PolicyResult<()> {
+        let mut seen = std::collections::HashSet::new();
+        for rule in &self.rules {
+            if rule.operations.is_empty() {
+                return Err(PolicyError::Invalid(format!(
+                    "rule `{}` has no operation globs",
+                    rule.id
+                )));
+            }
+            if !seen.insert(rule.id.as_str()) {
+                return Err(PolicyError::Invalid(format!("duplicate rule id `{}`", rule.id)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Append a rule, bumping the epoch.
+    pub fn add_rule(&mut self, rule: PolicyRule) -> PolicyResult<()> {
+        if self.rules.iter().any(|r| r.id == rule.id) {
+            return Err(PolicyError::Invalid(format!("duplicate rule id `{}`", rule.id)));
+        }
+        self.rules.push(rule);
+        self.bump_epoch();
+        Ok(())
+    }
+
+    /// Remove a rule by id, bumping the epoch. Returns whether it existed.
+    pub fn remove_rule(&mut self, id: &str) -> bool {
+        let before = self.rules.len();
+        self.rules.retain(|r| r.id != id);
+        let removed = self.rules.len() != before;
+        if removed {
+            self.bump_epoch();
+        }
+        removed
+    }
+
+    /// Replace the path policy, bumping the epoch.
+    pub fn set_paths(&mut self, paths: PathPolicy) {
+        self.paths = paths;
+        self.bump_epoch();
+    }
+
+    /// Replace the egress allowlist, bumping the epoch.
+    pub fn set_egress_domains(&mut self, domains: Vec<String>) {
+        self.egress_domains = domains;
+        self.bump_epoch();
+    }
+
+    /// Replace the escalation policy, bumping the epoch.
+    pub fn set_escalation(&mut self, escalation: EscalationPolicy) {
+        self.escalation = escalation;
+        self.bump_epoch();
+    }
+
+    fn bump_epoch(&mut self) {
+        self.policy_epoch += 1;
+    }
+
+    /// Whether `domain` is covered by the egress allowlist.
+    pub fn egress_allows(&self, domain: &str) -> bool {
+        self.egress_domains.iter().any(|g| glob_match(g, domain))
+    }
+}

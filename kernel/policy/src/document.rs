@@ -307,4 +307,34 @@ mod tests {
         let by_id = PrincipalSelector { ids: vec![p.id.clone()], ..Default::default() };
         assert!(by_id.matches(&p));
     }
+
+    #[test]
+    fn epoch_bumps_on_every_change() {
+        let mut doc = PolicyDocument::default();
+        assert_eq!(doc.policy_epoch, 0);
+        doc.add_rule(PolicyRule {
+            id: "r1".into(),
+            principals: PrincipalSelector::default(),
+            operations: vec!["fs.read".into()],
+            effect: RuleEffect::Allow,
+            constraints: IndexMap::new(),
+            max_uses: 1,
+            ttl_seconds: 60,
+            budget: None,
+            risk_weight: 0,
+            note: None,
+        })
+        .unwrap();
+        assert_eq!(doc.policy_epoch, 1);
+        doc.set_egress_domains(vec!["*.github.com".into()]);
+        assert_eq!(doc.policy_epoch, 2);
+        assert!(doc.remove_rule("r1"));
+        assert_eq!(doc.policy_epoch, 3);
+        assert!(!doc.remove_rule("r1"));
+        assert_eq!(doc.policy_epoch, 3);
+        doc.set_paths(PathPolicy::default());
+        assert_eq!(doc.policy_epoch, 4);
+        doc.set_escalation(EscalationPolicy::default());
+        assert_eq!(doc.policy_epoch, 5);
+    }
 }

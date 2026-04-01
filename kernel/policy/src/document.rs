@@ -288,9 +288,11 @@ impl PolicyDocument {
         self.egress_domains.iter().any(|g| glob_match(g, domain))
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn selector_matching_is_conjunctive() {
         let mut p = Principal::new_agent("a");
@@ -366,5 +368,20 @@ mod tests {
         let yaml = doc.to_yaml().unwrap();
         let parsed = PolicyDocument::from_yaml_str(&yaml).unwrap();
         assert_eq!(parsed, doc);
+    }
+
+    #[test]
+    fn invalid_documents_are_rejected() {
+        assert!(PolicyDocument::from_yaml_str("rules:\n  - id: r\n    operations: []\n    effect: allow\n").is_err());
+        let dup = r#"
+rules:
+  - id: r
+    operations: ["fs.read"]
+    effect: allow
+  - id: r
+    operations: ["fs.write"]
+    effect: deny
+"#;
+        assert!(PolicyDocument::from_yaml_str(dup).is_err());
     }
 }

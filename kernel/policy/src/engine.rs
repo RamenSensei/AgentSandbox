@@ -234,3 +234,101 @@ impl PolicyEngine {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{
+        EscalationPolicy, PathPolicy, PolicyRule, PrincipalSelector, RequestableScopeSpec,
+    };
+    use ak_core::capability::Constraint;
+    use ak_core::principal::TrustLevel;
+    use serde_json::json;
+
+    fn engine() -> PolicyEngine {
+        let mut doc = PolicyDocument::default();
+        doc.set_paths(PathPolicy {
+            readable_prefixes: vec!["".into()],
+            writable_prefixes: vec!["src/".into()],
+        });
+        doc.set_egress_domains(vec!["api.github.com".into()]);
+        doc.set_escalation(EscalationPolicy {
+            allow_requests: true,
+            requestable: vec![RequestableScopeSpec {
+                operation: "net.http_read".into(),
+                constraints: json!({"domain": "api.github.com"}),
+                requires_human: false,
+            }],
+        });
+        doc.add_rule(PolicyRule {
+            id: "deny-shell-for-tools".into(),
+            principals: PrincipalSelector {
+                kinds: vec![ak_core::principal::PrincipalKind::Tool],
+                ..Default::default()
+            },
+            operations: vec!["proc.shell".into()],
+            effect: RuleEffect::Deny,
+            constraints: IndexMap::new(),
+            max_uses: 1,
+            ttl_seconds: 60,
+            budget: None,
+            risk_weight: 0,
+            note: None,
+        })
+        .unwrap();
+        doc.add_rule(PolicyRule {
+            id: "allow-write-src".into(),
+            principals: PrincipalSelector::default(),
+            operations: vec!["fs.write".into()],
+            effect: RuleEffect::Allow,
+            constraints: {
+                let mut c = IndexMap::new();
+                c.insert("path".into(), Constraint::Prefix { prefix: "src/".into() });
+                c
+            },
+            max_uses: 20,
+            ttl_seconds: 600,
+            budget: None,
+            risk_weight: 1,
+            note: None,
+        })
+        .unwrap();
+        doc.add_rule(PolicyRule {
+            id: "approve-pr".into(),
+            principals: PrincipalSelector::default(),
+            operations: vec!["github.*".into()],
+            effect: RuleEffect::RequireApproval,
+            constraints: IndexMap::new(),
+            max_uses: 1,
+            ttl_seconds: 600,
+            budget: None,
+            risk_weight: 5,
+            note: None,
+        })
+        .unwrap();
+        PolicyEngine::new(doc)
+    }
+    #[test]
+    fn allow_path_compiles_a_grant() {
+        let e = engine();
+        let p = Principal::new_agent("agent");
+        let now = Utc::now();
+        let d = e.evaluate(
+            &p,
+            &Operation::new("fs.write"),
+            &json!({"path": "src/main.rs"}),
+            None,
+            now,
+        );
+        match d {
+            Decision::Allow { rule_id, grant } => {
+                assert_eq!(rule_id, "allow-write-src");
+                assert_eq!(grant.lease.remaining_uses, 20);
+                assert!(grant
+                    .lease
+                    .check(&p.id, &Operation::new("fs.write"), &json!({"path": "src/x"}), None, now)
+                    .is_ok());
+            }
+            other => panic!("expected allow, got {other:?}"),
+        }
+    }
+}

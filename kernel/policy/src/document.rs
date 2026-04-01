@@ -337,4 +337,34 @@ mod tests {
         doc.set_escalation(EscalationPolicy::default());
         assert_eq!(doc.policy_epoch, 5);
     }
+
+    #[test]
+    fn yaml_roundtrip_preserves_document() {
+        let mut doc = PolicyDocument::default();
+        doc.add_rule(PolicyRule {
+            id: "allow-read".into(),
+            principals: PrincipalSelector {
+                kinds: vec![PrincipalKind::Agent],
+                min_trust: Some(TrustLevel::Standard),
+                ..Default::default()
+            },
+            operations: vec!["fs.read".into(), "fs.list".into()],
+            effect: RuleEffect::Allow,
+            constraints: {
+                let mut c = IndexMap::new();
+                c.insert("path".into(), Constraint::Prefix { prefix: "src/".into() });
+                c
+            },
+            max_uses: 10,
+            ttl_seconds: 300,
+            budget: Some(ResourceBudget::step_default()),
+            risk_weight: 1,
+            note: Some("test".into()),
+        })
+        .unwrap();
+        doc.set_egress_domains(vec!["api.github.com".into()]);
+        let yaml = doc.to_yaml().unwrap();
+        let parsed = PolicyDocument::from_yaml_str(&yaml).unwrap();
+        assert_eq!(parsed, doc);
+    }
 }

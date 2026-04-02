@@ -234,6 +234,7 @@ impl PolicyEngine {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +308,7 @@ mod tests {
         .unwrap();
         PolicyEngine::new(doc)
     }
+
     #[test]
     fn allow_path_compiles_a_grant() {
         let e = engine();
@@ -419,5 +421,16 @@ mod tests {
             }
             other => panic!("expected deny, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn evaluation_is_deterministic() {
+        let e = engine();
+        let p = Principal::new_agent("agent");
+        let now = Utc::now();
+        let op = Operation::new("net.raw_socket");
+        let a = e.evaluate(&p, &op, &json!({}), None, now);
+        let b = e.evaluate(&p, &op, &json!({}), None, now);
+        assert_eq!(a, b);
     }
 }

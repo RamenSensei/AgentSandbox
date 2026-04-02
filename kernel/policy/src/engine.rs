@@ -354,4 +354,20 @@ mod tests {
             other => panic!("expected deny, got {other:?}"),
         }
     }
+
+    #[test]
+    fn unmatched_operation_default_denies_with_alternatives_and_scopes() {
+        let e = engine();
+        let p = Principal::new_agent("agent");
+        let d = e.evaluate(&p, &Operation::new("net.raw_socket"), &json!({}), None, Utc::now());
+        match d {
+            Decision::Deny { denial } => {
+                assert_eq!(denial.code, DenialCode::CapabilityDenied);
+                assert!(denial.safe_alternatives.contains(&Operation::new("fs.write")));
+                assert_eq!(denial.requestable_scopes.len(), 1);
+                assert_eq!(denial.requestable_scopes[0].operation.0, "net.http_read");
+            }
+            other => panic!("expected deny, got {other:?}"),
+        }
+    }
 }

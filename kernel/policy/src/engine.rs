@@ -370,4 +370,32 @@ mod tests {
             other => panic!("expected deny, got {other:?}"),
         }
     }
+
+    #[test]
+    fn explicit_deny_rule_wins_and_approval_path_carries_epoch() {
+        let e = engine();
+        let mut tool = Principal::new_agent("tool");
+        tool.kind = ak_core::principal::PrincipalKind::Tool;
+        let d = e.evaluate(&tool, &Operation::new("proc.shell"), &json!({}), None, Utc::now());
+        assert!(matches!(
+            d,
+            Decision::Deny { denial: Denial { code: DenialCode::PolicyForbidden, .. } }
+        ));
+
+        let agent = Principal::new_agent("agent");
+        let d = e.evaluate(
+            &agent,
+            &Operation::new("github.create_pull_request"),
+            &json!({}),
+            None,
+            Utc::now(),
+        );
+        match d {
+            Decision::RequireApproval { rule_id, policy_epoch, .. } => {
+                assert_eq!(rule_id, "approve-pr");
+                assert_eq!(policy_epoch, e.document().policy_epoch);
+            }
+            other => panic!("expected approval, got {other:?}"),
+        }
+    }
 }

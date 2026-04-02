@@ -331,4 +331,27 @@ mod tests {
             other => panic!("expected allow, got {other:?}"),
         }
     }
+
+    #[test]
+    fn constraint_violation_denies_with_correct_code() {
+        let e = engine();
+        let p = Principal::new_agent("agent");
+        let d = e.evaluate(
+            &p,
+            &Operation::new("fs.write"),
+            &json!({"path": "/etc/passwd"}),
+            None,
+            Utc::now(),
+        );
+        match d {
+            Decision::Deny { denial } => {
+                assert_eq!(denial.code, DenialCode::ConstraintViolated);
+                // No host paths leak in the reason.
+                assert!(!denial.reason.contains("/etc"));
+                assert!(!denial.reason.contains("src/"));
+                assert!(denial.escalation_allowed);
+            }
+            other => panic!("expected deny, got {other:?}"),
+        }
+    }
 }

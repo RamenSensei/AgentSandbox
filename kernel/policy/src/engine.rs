@@ -398,4 +398,26 @@ mod tests {
             other => panic!("expected approval, got {other:?}"),
         }
     }
+
+    #[test]
+    fn denials_are_redacted_by_trust() {
+        let e = engine();
+        let mut quarantined = Principal::new_agent("skill");
+        quarantined.trust = TrustLevel::Quarantined;
+        let d = e.evaluate(
+            &quarantined,
+            &Operation::new("net.raw_socket"),
+            &json!({}),
+            None,
+            Utc::now(),
+        );
+        match d {
+            Decision::Deny { denial } => {
+                assert!(denial.requestable_scopes.is_empty());
+                assert!(!denial.escalation_allowed);
+                assert_eq!(denial.reason, "operation not permitted for this principal");
+            }
+            other => panic!("expected deny, got {other:?}"),
+        }
+    }
 }

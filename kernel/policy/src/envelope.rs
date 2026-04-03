@@ -33,3 +33,32 @@ pub struct EnvelopeGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResourceBudget>,
 }
+
+fn default_uses() -> u32 {
+    1
+}
+fn default_envelope_ttl() -> u64 {
+    3600
+}
+
+/// A human-approved autonomy envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutonomyEnvelope {
+    /// Human-facing name of the approved task, audit only.
+    #[serde(default)]
+    pub name: String,
+    /// Operations the principal may perform.
+    pub allow: Vec<EnvelopeGrant>,
+    /// Operation globs that must never be granted, even if listed in `allow`.
+    /// Forbid wins over allow.
+    #[serde(default)]
+    pub forbid: Vec<String>,
+    /// Default lease TTL in seconds (default 3600).
+    #[serde(default = "default_envelope_ttl")]
+    pub ttl_seconds: u64,
+    /// Default per-lease resource budget; defaults to
+    /// [`ResourceBudget::step_default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ResourceBudget>,
+}

@@ -62,3 +62,72 @@ pub struct AutonomyEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResourceBudget>,
 }
+
+impl AutonomyEnvelope {
+    /// Parse an envelope from YAML text.
+    pub fn from_yaml_str(yaml: &str) -> PolicyResult<Self> {
+        let env: AutonomyEnvelope = serde_yaml::from_str(yaml)?;
+        env.validate()?;
+        Ok(env)
+    }
+
+    /// Load an envelope from a YAML file.
+    pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> PolicyResult<Self> {
+        Self::from_yaml_str(&std::fs::read_to_string(path)?)
+    }
+
+    /// Reject envelopes whose allow list collides with the forbid list.
+    /// Colliding entries are an authoring error, not something to silently
+    /// drop: the human should see exactly what they are approving.
+    pub fn validate(&self) -> PolicyResult<()> {
+        if self.allow.is_empty() {
+            return Err(PolicyError::EnvelopeRejected("envelope allows nothing".into()));
+        }
+        for grant in &self.allow {
+            if grant.operation.contains('*') {
+                return Err(PolicyError::EnvelopeRejected(format!(
+                    "allow entry `{}` uses a glob; envelopes grant concrete operations",
+                    grant.operation
+                )));
+            }
+            if let Some(forbidden) = self.forbid.iter().find(|f| glob_match(f, &grant.operation)) {
+                return Err(PolicyError::EnvelopeRejected(format!(
+                    "allow entry `{}` collides with forbid pattern `{forbidden}`",
+                    grant.operation
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile this envelope into a set of leases for `principal`, issued at
+    /// `now`. Each allow entry becomes one lease.
+    pub fn into_leases(
+        &self,
+        principal: &PrincipalId,
+        now: DateTime<Utc>,
+    ) -> PolicyResult<Vec<CapabilityLease>> {
+        self.validate()?;
+        let default_budget = self.budget.unwrap_or_else(ResourceBudget::step_default);
+        let mut leases = Vec::with_capacity(self.allow.len());
+        for grant in &self.allow {
+            let ttl_secs = grant.ttl_seconds.unwrap_or(self.ttl_seconds);
+            let ttl = Duration::seconds(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
+            leases.push(CapabilityLease {
+                id: LeaseId::generate(),
+                principal: principal.clone(),
+                operation: Operation::new(grant.operation.clone()),
+                constraints: grant.constraints.clone(),
+                remaining_uses: grant.max_uses,
+                issued_at: now,
+                expires_at: now + ttl,
+                bound_branch: None,
+                budget: grant.budget.unwrap_or(default_budget),
+                parent_lease: None,
+                preconditions: IndexMap::new(),
+                revoked: false,
+            });
+        }
+        Ok(leases)
+    }
+}

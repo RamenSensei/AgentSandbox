@@ -131,3 +131,55 @@ impl AutonomyEnvelope {
         Ok(leases)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const ENVELOPE: &str = r#"
+name: fix-issue-42
+ttl_seconds: 1800
+allow:
+  - operation: fs.write
+    max_uses: 50
+    constraints:
+      path:
+        kind: prefix
+        prefix: src/
+  - operation: github.create_pull_request
+    max_uses: 1
+    ttl_seconds: 600
+    constraints:
+      repository:
+        kind: equals
+        value: org/repo
+      base:
+        kind: equals
+        value: main
+forbid:
+  - "github.merge_*"
+  - "fs.delete"
+"#;
+    #[test]
+    fn envelope_parses_and_compiles_into_leases() {
+        let env = AutonomyEnvelope::from_yaml_str(ENVELOPE).unwrap();
+        assert_eq!(env.name, "fix-issue-42");
+        let now = Utc::now();
+        let principal = PrincipalId("pr-agent".into());
+        let leases = env.into_leases(&principal, now).unwrap();
+        assert_eq!(leases.len(), 2);
+        let write = &leases[0];
+        assert_eq!(write.operation.0, "fs.write");
+        assert_eq!(write.remaining_uses, 50);
+        assert_eq!(write.expires_at, now + Duration::seconds(1800));
+        assert!(write
+            .check(&principal, &write.operation, &json!({"path": "src/a.rs"}), None, now)
+            .is_ok());
+        assert!(write
+            .check(&principal, &write.operation, &json!({"path": "/etc/x"}), None, now)
+            .is_err());
+        let pr = &leases[1];
+        assert_eq!(pr.expires_at, now + Duration::seconds(600));
+        assert_eq!(pr.remaining_uses, 1);
+    }
+}

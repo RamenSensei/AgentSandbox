@@ -131,6 +131,7 @@ impl AutonomyEnvelope {
         Ok(leases)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +161,7 @@ forbid:
   - "github.merge_*"
   - "fs.delete"
 "#;
+
     #[test]
     fn envelope_parses_and_compiles_into_leases() {
         let env = AutonomyEnvelope::from_yaml_str(ENVELOPE).unwrap();
@@ -201,5 +203,13 @@ forbid:
     fn globs_and_empty_envelopes_are_rejected() {
         assert!(AutonomyEnvelope::from_yaml_str("allow: []\n").is_err());
         assert!(AutonomyEnvelope::from_yaml_str("allow:\n  - operation: \"fs.*\"\n").is_err());
+    }
+
+    #[test]
+    fn yaml_roundtrip() {
+        let env = AutonomyEnvelope::from_yaml_str(ENVELOPE).unwrap();
+        let yaml = serde_yaml::to_string(&env).unwrap();
+        let reparsed = AutonomyEnvelope::from_yaml_str(&yaml).unwrap();
+        assert_eq!(env, reparsed);
     }
 }

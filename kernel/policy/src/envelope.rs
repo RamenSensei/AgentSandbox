@@ -182,4 +182,18 @@ forbid:
         assert_eq!(pr.expires_at, now + Duration::seconds(600));
         assert_eq!(pr.remaining_uses, 1);
     }
+
+    #[test]
+    fn forbid_wins_over_allow() {
+        let bad = r#"
+allow:
+  - operation: github.merge_pull_request
+forbid:
+  - "github.merge_*"
+"#;
+        assert!(matches!(
+            AutonomyEnvelope::from_yaml_str(bad),
+            Err(PolicyError::EnvelopeRejected(_))
+        ));
+    }
 }

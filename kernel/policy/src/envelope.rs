@@ -196,4 +196,10 @@ forbid:
             Err(PolicyError::EnvelopeRejected(_))
         ));
     }
+
+    #[test]
+    fn globs_and_empty_envelopes_are_rejected() {
+        assert!(AutonomyEnvelope::from_yaml_str("allow: []\n").is_err());
+        assert!(AutonomyEnvelope::from_yaml_str("allow:\n  - operation: \"fs.*\"\n").is_err());
+    }
 }

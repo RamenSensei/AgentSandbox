@@ -1,0 +1,35 @@
+# Policy for a quarantined third-party skill: read-only, networkless, and
+# denied everything else. Quarantined principals also receive redacted
+# denials (code + safe alternatives only).
+policy_epoch: 1
+
+rules:
+  - id: allow-read-skill-dir
+    principals:
+      max_trust: quarantined
+    operations: ["fs.read"]
+    effect: allow
+    constraints:
+      path:
+        kind: prefix
+        prefix: skills/
+    max_uses: 100
+    ttl_seconds: 600
+
+  - id: deny-everything-else
+    operations: ["*"]
+    effect: deny
+
+paths:
+  readable_prefixes: ["skills/"]
+  writable_prefixes: []
+
+egress_domains: []
+
+tools:
+  allowed_servers: []
+  allowed_tools: []
+
+escalation:
+  allow_requests: false
+  requestable: []

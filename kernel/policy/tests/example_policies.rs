@@ -59,3 +59,32 @@ fn default_policy_allows_src_writes_and_gates_prs() {
         other => panic!("expected deny, got {other:?}"),
     }
 }
+
+#[test]
+fn quarantine_policy_confines_and_redacts() {
+    let engine = PolicyEngine::new(load("quarantine-skill.yaml"));
+    let mut skill = Principal::new_agent("third-party-skill");
+    skill.trust = TrustLevel::Quarantined;
+    let now = Utc::now();
+
+    match engine.evaluate(&skill, &Operation::new("fs.read"), &json!({"path": "skills/x/README"}), None, now) {
+        Decision::Allow { grant, .. } => {
+            assert!(grant.confinement.egress_domains.is_empty());
+            assert_eq!(grant.confinement.syscall_profile, SyscallProfile::Networkless);
+            assert!(grant.confinement.writable_prefixes.is_empty());
+            assert!(grant.confinement.env_scrub);
+        }
+        other => panic!("expected allow, got {other:?}"),
+    }
+
+    // Everything else is denied with a redacted denial.
+    match engine.evaluate(&skill, &Operation::new("net.http_read"), &json!({}), None, now) {
+        Decision::Deny { denial } => {
+            assert_eq!(denial.code, DenialCode::PolicyForbidden);
+            assert_eq!(denial.reason, "operation not permitted for this principal");
+            assert!(denial.requestable_scopes.is_empty());
+            assert!(!denial.escalation_allowed);
+        }
+        other => panic!("expected deny, got {other:?}"),
+    }
+}

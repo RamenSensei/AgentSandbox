@@ -1,0 +1,68 @@
+# Default policy for a standard-trust coding agent working on one repository.
+# Rules are evaluated in order; first match wins; anything unmatched is denied.
+policy_epoch: 1
+
+rules:
+  # Never allow deleting outside the workspace or force-y git operations.
+  - id: deny-fs-delete-outside-src
+    operations: ["fs.delete"]
+    effect: deny
+    note: deletions go through review
+
+  - id: allow-read-workspace
+    operations: ["fs.read", "state.diff", "trace.query"]
+    effect: allow
+    max_uses: 1000
+    ttl_seconds: 3600
+
+  - id: allow-write-src
+    operations: ["fs.write"]
+    effect: allow
+    constraints:
+      path:
+        kind: prefix
+        prefix: src/
+    max_uses: 200
+    ttl_seconds: 3600
+    risk_weight: 1
+
+  - id: allow-shell
+    principals:
+      min_trust: standard
+    operations: ["proc.shell"]
+    effect: allow
+    max_uses: 100
+    ttl_seconds: 3600
+    risk_weight: 2
+
+  - id: allow-github-api-read
+    operations: ["net.http_read"]
+    effect: allow
+    constraints:
+      url:
+        kind: prefix
+        prefix: https://api.github.com/
+    max_uses: 50
+    ttl_seconds: 3600
+
+  # Opening a PR is fine; anything else on GitHub needs a human.
+  - id: approve-github-pr
+    operations: ["github.create_pull_request"]
+    effect: require_approval
+    constraints:
+      repository:
+        kind: equals
+        value: org/repo
+      base:
+        kind: equals
+        value: main
+      head:
+        kind: prefix
+        prefix: sandbox/
+    max_uses: 1
+    ttl_seconds: 900
+    risk_weight: 5
+
+  - id: deny-github-rest
+    operations: ["github.*"]
+    effect: deny

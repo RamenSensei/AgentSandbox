@@ -66,3 +66,25 @@ rules:
   - id: deny-github-rest
     operations: ["github.*"]
     effect: deny
+
+paths:
+  readable_prefixes: [""]
+  writable_prefixes: ["src/", "tests/", "docs/"]
+
+egress_domains:
+  - api.github.com
+  - "*.githubusercontent.com"
+
+tools:
+  allowed_servers: ["github-mcp"]
+  allowed_tools: ["*"]
+
+escalation:
+  allow_requests: true
+  requestable:
+    - operation: fs.write
+      constraints: { path_prefix: "docs/" }
+      requires_human: false
+    - operation: github.create_pull_request
+      constraints: { repository: "org/repo", max_count: 1 }
+      requires_human: true

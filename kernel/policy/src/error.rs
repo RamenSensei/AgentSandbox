@@ -33,3 +33,13 @@ pub enum PolicyError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 }
+
+impl From<PolicyError> for ak_core::KernelError {
+    fn from(e: PolicyError) -> Self {
+        match e {
+            PolicyError::Io(err) => ak_core::KernelError::Io(err),
+            PolicyError::Serde(err) => ak_core::KernelError::Serde(err),
+            other => ak_core::KernelError::Other(other.to_string()),
+        }
+    }
+}

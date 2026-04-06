@@ -9,6 +9,29 @@ and on-disk formats.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-06
+
+### Added
+- `kernel/policy`: deterministic typed policy engine over operations, parameter
+  constraints (`equals`, `one_of`, `glob`, `prefix`, `max`, `forbidden`), path
+  and domain policy, and per-branch escalation rules.
+- Machine-readable `Denial` with `safe_alternatives` and `requestable_scopes`,
+  so agents can self-repair or request a narrower temporary capability instead
+  of interrupting a human.
+- Trust-scoped redaction of denial explanations by principal `TrustLevel`.
+- `kernel/identity`: `Principal` model for agents, sub-agents, and tools;
+  `CapabilityLease` with expiry, use counts, budgets, branch binding, and
+  world-state preconditions.
+- Temporary capability request flow (`capability.request`) with optional human
+  approval.
+
+### Changed
+- All kernel entry points now require an explicit lease; the ambient default
+  lease from 0.1.0 was removed (invariant: no ambient authority).
+
+### Fixed
+- Glob constraint matching no longer treats an empty pattern as match-all.
+
 ## [0.1.0] - 2026-03-09
 
 ### Added

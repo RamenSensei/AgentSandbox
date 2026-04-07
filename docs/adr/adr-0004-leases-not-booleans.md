@@ -25,3 +25,47 @@ declarative policy) — expressive for paths and domains but stateless, so no us
 counting, no expiry, no delegation lineage; OAuth-style scoped tokens per
 operation — pushes semantics into each external provider's scope language and
 gives us nothing for local operations like `fs.write`.
+
+## Decision
+
+All authority in AgentKernel is carried by `CapabilityLease` objects, checked
+deterministically by the kernel. A lease binds:
+
+- a `Principal` and a single namespaced `Operation` (e.g. `github.create_pull_request`);
+- parameter `Constraint`s (Equals/OneOf/Glob/Prefix/Max/Forbidden) keyed by
+  canonical parameter name;
+- a `remaining_uses` count and an `expires_at` time;
+- a `ResourceBudget` (CPU, tokens, network, cost);
+- optionally a `bound_branch`: authority does not follow the agent across
+  speculative branches unless explicitly rebound;
+- deterministic `preconditions` revalidated at commit time (ADR-0007).
+
+Delegation is only ever attenuation: `attenuate()` produces a child lease that
+must be no broader than the parent on every dimension (constraints must
+`narrows()`, uses/expiry/budget must fit), recording `parent_lease` for the
+audit chain. There is no ambient authority: no long-lived environment
+credentials in the guest (ADR-0010), and every action carries an explicit lease.
+
+## Consequences
+
+Positive:
+
+- Leases are the mechanical form of the "no ambient authority" invariant; a
+  stolen lease is worth one constrained operation for a few minutes, not an
+  organization-wide token.
+- Sub-agent and tool permissions are explicit, attenuated, time-bound,
+  branch-bound, revocable and auditable by construction.
+- Deterministic `check()` makes every policy decision replayable and testable.
+
+Negative:
+
+- The constraint language is deliberately small; some real policies ("total PR
+  count across all leases this episode") need policy-layer aggregation above leases.
+- `narrows()` is conservative and rejects unprovable relationships, which can
+  force humans to restate constraints in a comparable form.
+
+Follow-ups:
+
+- Lease revocation propagation to attenuated children.
+- A capability compiler from semantic requests ("run the tests") to lease sets
+  plus backend enforcement (Landlock, seccomp, egress proxy).

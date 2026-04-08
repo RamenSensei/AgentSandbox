@@ -29,3 +29,46 @@ method is not evidence of purity; only a connector's declared semantic contract 
 Alternatives considered: boolean (rejected above); a continuous risk score
 (rejected: not deterministic policy input, invites threshold gaming); per-effect
 free-text annotations (rejected: not machine-decidable).
+
+## Decision
+
+Every `EffectContract` carries an `EffectClass`, one of six ordered values:
+
+- `pure` — no observable side effect;
+- `local_reversible` — undone by rolling back local state;
+- `remote_reversible` — the remote system offers a true undo;
+- `compensatable` — reversible only via a compensating action (e.g. close the PR);
+- `irreversible` — cannot be undone;
+- `opaque_external` — semantics unknown; treated as irreversible and maximally
+  restricted. This is the mandatory default for any operation without a typed
+  connector contract, including all raw HTTP regardless of method.
+
+Classification comes from the connector's contract, never from transport-level
+heuristics. The broker keys its lifecycle on the class: `pure`/`local_reversible`
+may execute inside a branch; `compensatable` must register its compensation
+before commit; `irreversible` and `opaque_external` require the full
+propose/prepare/approve/commit path with commit-time revalidation (ADR-0007).
+
+## Consequences
+
+Positive:
+
+- Policy can be written honestly: "sub-agents may commit up to compensatable,
+  never irreversible" is expressible and enforceable.
+- The `opaque_external` default makes the unknown-API long tail fail closed
+  instead of fail open.
+- Compensation is a first-class phase (`Compensated { compensating_receipt }`),
+  so "undo" leaves its own Receipt.
+
+Negative:
+
+- Connector authors must classify every operation; misclassification is now a
+  connector bug with security impact, so connector review must check contracts,
+  not just code.
+- Six classes still simplify reality (compensation can fail); the broker must
+  surface compensation failures rather than report clean rollback.
+
+Follow-ups:
+
+- Conformance tests asserting `opaque_external` for uncontracted operations.
+- A connector contract lint that flags GET-implies-pure assumptions.

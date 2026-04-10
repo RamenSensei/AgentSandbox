@@ -82,3 +82,45 @@ guarantees. Full process checkpointing collides with sockets, GPUs, FUSE,
 kernel versions, device state, multi-process browsers, Unix domain sockets,
 and external service sessions — classes exist so those limits are stated, not
 papered over.
+
+### 3.1 The supports() matrix
+
+`ReplayClass::supports(mode)`:
+
+| ReplayClass | Audit | Sandbox | Live |
+|---|---|---|---|
+| `AuditOnly` | yes | no | no |
+| `FilesystemOnly` | yes | yes | yes |
+| `ProcessAndFilesystem` | yes | yes | yes |
+| `FrameworkHostCalls` | yes | yes | yes |
+| `BrowserProfile` | yes | yes | yes |
+
+In code: Audit is always supported; Sandbox and Live require `*self >=
+ReplayClass::FilesystemOnly` (the `Ord` on the enum is meaningful). A replay
+request over a range of steps is honored at the *weakest* class in the range;
+the kernel MUST report which steps limited fidelity rather than silently
+degrading.
+
+## 4. Divergence detection and classification
+
+Sandbox and Live replay compare re-execution against the recording at every
+step boundary. A divergence is any mismatch in: workspace Merkle root
+(`workspace_root`), `StateDelta` contents, observation summaries/exit codes,
+proposed effect contract hashes, or resource usage beyond tolerance.
+
+Divergences MUST be detected, classified, and reported — never silently
+absorbed. The classification dimensions:
+
+- **layer**: which state adapter diverged (workspace, process, tool session,
+  effect, observation);
+- **cause category**: uncaptured input (time, randomness, DNS, network),
+  external world change (Live), backend fidelity gap (class too weak),
+  nondeterministic guest code, kernel regression;
+- **severity**: cosmetic (log noise), semantic (different delta), effectual
+  (different proposed contract — always terminates a Live replay before
+  commit).
+
+**Divergence classification completeness** — the fraction of observed
+divergences the engine can attribute to a cause category — is a tracked
+metric (`metrics.md` §4). An unclassified divergence is a bug in the recorder
+or classifier, not an acceptable residue.

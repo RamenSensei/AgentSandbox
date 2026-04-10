@@ -124,3 +124,35 @@ absorbed. The classification dimensions:
 divergences the engine can attribute to a cause category — is a tracked
 metric (`metrics.md` §4). An unclassified divergence is a bug in the recorder
 or classifier, not an acceptable residue.
+
+## 5. Why "fully deterministic replay" is not claimed
+
+Recording host calls under pinned time and randomness can achieve
+byte-identical replay at the framework boundary (`FrameworkHostCalls`), and
+AgentKernel supports that class where a backend provides it. But the open
+network, live websites, and external SaaS are not deterministic systems:
+their state advances independently, their responses embed clocks and nonces,
+and their side effects cannot be rolled back or replayed into existence.
+
+Claiming "fully deterministic replay" of an episode that touched the open
+world would be marketing, not engineering. AgentKernel's position:
+
+- determinism claims are scoped to a `ReplayClass` and a mode;
+- everything external is captured as recorded observations (replayable in
+  Audit/Sandbox) or re-negotiated as contracts (Live);
+- the honest unit of cross-run comparability for external actions is the
+  `EffectContract` hash plus the receipt, not the bytes of the outcome.
+
+## 6. Interaction with the ledger and DAG
+
+Replay is a read path over two stores: the causal ledger (ordered events,
+observations, full outputs by `ContentHash`, receipts) and the State DAG
+(restorable nodes). Consequently:
+
+- any step is replayable in Audit mode forever, as long as its ledger entries
+  exist — ledger entries are never garbage collected;
+- Sandbox replay requires the node's blobs to still be materializable from
+  the CAS; GC MUST NOT collect blobs pinned by replay-retention policy;
+- `replay.*` verbs accept a step range within one episode and MUST refuse
+  ranges crossing a fidelity boundary unless the caller opts into degraded
+  (Audit-only) playback for the weaker segment.

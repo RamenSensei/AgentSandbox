@@ -52,3 +52,33 @@ may fail — in which case commit-time revalidation aborts exactly as it would
 in a first run. Live replay of a committed effect with an unchanged
 `idempotency_key` MUST hit duplicate-commit protection and return the
 existing receipt rather than acting twice.
+
+### 2.4 Committed effects are never re-executed in audit/sandbox
+
+In Audit and Sandbox modes, effects that were committed are represented by
+their receipts and recorded response digests. The replay engine MUST NOT call
+`Connector::commit` (or `prepare`) in these modes under any circumstances;
+connectors are simply not wired into the audit/sandbox replay path. Only Live
+mode touches connectors, and only through the full transaction pipeline.
+
+## 3. ReplayClass: per-backend honesty
+
+Each backend declares in its `BackendProfile`, and each `StateNode` records,
+what was faithfully captured:
+
+```rust
+pub enum ReplayClass {
+    AuditOnly,             // only recorded observations; no re-execution
+    FilesystemOnly,        // workspace content-addressed and restorable
+    ProcessAndFilesystem,  // + process tree checkpoint/restore
+    FrameworkHostCalls,    // host calls (model, tools, HTTP) recorded; byte-identical
+                           //   replay under pinned time/randomness
+    BrowserProfile,        // browser profile and page state restorable
+}
+```
+
+A backend MUST declare the weakest class describing what it actually
+guarantees. Full process checkpointing collides with sockets, GPUs, FUSE,
+kernel versions, device state, multi-process browsers, Unix domain sockets,
+and external service sessions — classes exist so those limits are stated, not
+papered over.

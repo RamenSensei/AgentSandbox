@@ -27,3 +27,34 @@ Scheduler allocates resources at step boundaries. Both live in
 The last row is normative and absolute: credentialed external operations are
 not a backend-selection problem. They route to the Effect Broker regardless
 of what backend the step otherwise uses.
+
+### 2.1 The selection rule
+
+> The router MUST select the **cheapest backend that satisfies the risk,
+> compatibility, and reproducibility requirements** of the action.
+
+Inputs to the decision, all from `BackendProfile`:
+
+```rust
+pub struct BackendProfile {
+    pub name: String,
+    pub isolation_strength: u8,   // 0 = in-process, 100 = hardware-virtualized
+    pub cold_start_ms: u64,       // self-reported typical cold start
+    pub replay_class: ReplayClass,
+    pub supports_fork: bool,
+    pub supports_gui: bool,
+    pub full_linux: bool,         // arbitrary Linux binaries vs. e.g. WASI-only
+}
+```
+
+- **Risk**: the action's operation namespace, the lease's `risk_units`, and
+  policy floors map to a minimum `isolation_strength`. Untrusted or
+  quarantined principals raise the floor.
+- **Compatibility**: does the action need `full_linux`, `supports_gui`,
+  `supports_fork`?
+- **Reproducibility**: does the episode's replay policy require a minimum
+  `ReplayClass` for this step?
+
+Among backends clearing all three floors, choose the lowest expected cost
+(cold/warm start latency plus resource footprint). Ties break toward higher
+`isolation_strength`.

@@ -58,3 +58,29 @@ pub struct BackendProfile {
 Among backends clearing all three floors, choose the lowest expected cost
 (cold/warm start latency plus resource footprint). Ties break toward higher
 `isolation_strength`.
+
+## 3. Step-level resource allocation
+
+Measurements on coding-agent workloads show OS execution/initialization can
+dominate end-to-end latency and memory peak/average ratios can exceed an
+order of magnitude. Static per-container limits waste both. The scheduler
+therefore operates at step and tool-call boundaries:
+
+- **Step-level cgroups**: each `ExecutionRequest` carries a `ResourceBudget`
+  (`cpu_ms`, `memory_bytes`, `network_bytes`, `tokens`, `cost_micro_usd`,
+  `risk_units`); the Capability Compiler renders it as cgroup limits for that
+  step, not a static container ceiling.
+- **Burst memory budgets**: short bursts above steady-state MAY be granted
+  from a shared burst pool, reclaimed at step end; peak/avg ratio is tracked
+  per action type to size the pool.
+- **Idle pause**: a guest waiting on model inference or human approval SHOULD
+  be paused (frozen cgroup or suspended VM) and its memory reclaimed;
+  tool-call idle time is a tracked metric.
+- **Semantic checkpoint policy**: full state capture happens at
+  scheduler-designated checkpoints (before risky actions, before fan-out, at
+  episode milestones), not every turn — most turns carry no state worth a
+  snapshot (cf. `state-dag.md` §7).
+- **Backend promotion/demotion**: a step MAY be promoted to a stronger
+  backend mid-episode (an action's risk grew) or demoted to a cheaper one
+  (pure-compute stretch). Promotion re-materializes the workspace from the
+  CAS on the new backend; process state does not migrate across backends.

@@ -119,3 +119,30 @@ Parallel speculation is powerful and expensive. The scheduler enforces:
 
 Parallel branch density (branches per host at target latency) is the
 corresponding efficiency metric.
+
+## 7. Context budget as a first-class resource
+
+The `tokens` dimension of `ResourceBudget` treats the model's context window
+as a sandbox resource, because it is one: a test run may emit 100 MB of logs,
+and pasting them into context destroys the agent's effective capacity. The
+kernel's contract (see `observation.rs`):
+
+- Raw output is stored in full in the ledger, addressed by `ContentHash`
+  (`full_output` on `Observation::Success`/`Failure`).
+- The agent receives a distilled observation — `summary`, optional structured
+  `data`, a bounded `stdout_head` (`distill_output` caps bytes and sets
+  `truncated`), `exit_code`, and for failures a `first_causal_failure` hint:
+
+```text
+137 tests passed, 3 failed
+first causal failure: package-x changed API
+relevant files: ...
+full log available via trace.query(...)
+```
+
+- Anything beyond the distillate is pulled on demand through `trace.query`,
+  charged against the token budget explicitly.
+
+Distillation is an amplifier, not a limiter: it increases the agent's
+effective context capacity per task, which is why token budgeting sits in the
+scheduler next to CPU and memory rather than in the harness.

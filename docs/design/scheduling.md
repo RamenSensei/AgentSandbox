@@ -146,3 +146,21 @@ full log available via trace.query(...)
 Distillation is an amplifier, not a limiter: it increases the agent's
 effective context capacity per task, which is why token budgeting sits in the
 scheduler next to CPU and memory rather than in the harness.
+
+## 8. Scheduling and security
+
+Two rules keep scheduling from becoming a policy bypass:
+
+- Backend selection MUST NOT go below the risk floor to save cost, ever; cost
+  optimization operates only within the set of backends that clear risk,
+  compatibility, and reproducibility. A configuration with no qualifying
+  backend yields a `Denial` with `code: BACKEND_UNAVAILABLE`, not a silent
+  downgrade.
+- Demotion (§3) re-derives the compiled confinement (`writable_prefixes`,
+  `readable_prefixes`, `egress_domains`) for the cheaper backend from the
+  same lease; it never carries over a stronger backend's laxer internal
+  assumptions.
+
+Scheduler decisions — backend chosen, floors applied, hints received, budget
+charged — are ledger events, so `step.explain` can answer "why did this run
+in gVisor?" the same way it answers "why was this denied?".

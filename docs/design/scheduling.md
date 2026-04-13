@@ -84,3 +84,38 @@ therefore operates at step and tool-call boundaries:
   backend mid-episode (an action's risk grew) or demoted to a cheaper one
   (pure-compute stretch). Promotion re-materializes the workspace from the
   CAS on the new backend; process state does not migrate across backends.
+
+## 4. Intent-aware prewarming
+
+Agents MAY declare intent hints ("about to compile", "will need a browser",
+"tests next"). The scheduler uses hints to prewarm backends, pre-pull images,
+and pre-fork warm parents, meaningfully cutting P99 latency and peak memory.
+
+Normative boundary: **hints optimize, never authorize.** A hint MUST NOT
+expand any lease, relax any constraint, skip any approval, or influence any
+policy decision. A wrong or adversarial hint costs performance only.
+
+## 5. Accounting
+
+CPU, memory, network, tokens, money, and risk share one model:
+`ResourceBudget`, charged at step boundaries via
+`ResourceBudget::charge(usage) -> Vec<&'static str>` (returning exhausted
+dimensions), with attenuation checked by `fits_within`. Every
+`ExecutionOutcome` reports `usage`; the ledger accumulates it per step,
+branch, principal, and episode. Exhaustion of any dimension produces a
+structured `Denial` with `code: BUDGET_EXHAUSTED` naming the dimension, so
+the agent can decide to economize, discard a branch, or request more budget.
+
+## 6. Branch fan-out budgets
+
+Parallel speculation is powerful and expensive. The scheduler enforces:
+
+- a maximum concurrent branch count per episode and per principal;
+- a fan-out budget: forking N branches charges each child's projected budget
+  against the parent's remaining `ResourceBudget` up front;
+- eviction: when contention rises, the scheduler MAY pause (never silently
+  discard) the branches with the worst progress-per-cost; discard is always
+  an explicit agent or policy decision.
+
+Parallel branch density (branches per host at target latency) is the
+corresponding efficiency metric.

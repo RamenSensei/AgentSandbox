@@ -19,3 +19,32 @@ pub trait ReceiptSigner: Send + Sync {
     /// Sign `message`, returning `(signature_hex, key_id)`.
     fn sign(&self, message: &[u8]) -> (String, String);
 }
+
+impl<F> ReceiptSigner for F
+where
+    F: Fn(&[u8]) -> (String, String) + Send + Sync,
+{
+    fn sign(&self, message: &[u8]) -> (String, String) {
+        self(message)
+    }
+}
+
+/// Approval record stored alongside an effect; hashed into the receipt as the
+/// `authorization_witness`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ApprovalRecord {
+    approver: PrincipalId,
+    approved_at: chrono::DateTime<chrono::Utc>,
+    policy_epoch: u64,
+    /// Contract hash the approver saw. Commit refuses if the effect's hash
+    /// has changed since.
+    contract_hash: ContentHash,
+}
+
+/// The transactional effect broker. See the crate-level docs for the
+/// lifecycle it enforces.
+pub struct EffectBroker {
+    connectors: Mutex<HashMap<String, Arc<dyn Connector>>>,
+    store: Mutex<Connection>,
+    signer: Box<dyn ReceiptSigner>,
+}

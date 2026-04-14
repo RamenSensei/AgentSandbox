@@ -48,3 +48,32 @@ pub struct EffectBroker {
     store: Mutex<Connection>,
     signer: Box<dyn ReceiptSigner>,
 }
+
+impl std::fmt::Debug for EffectBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EffectBroker").finish_non_exhaustive()
+    }
+}
+
+fn storage_err(e: rusqlite::Error) -> KernelError {
+    KernelError::Storage(e.to_string())
+}
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS effects (
+    id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL,
+    json TEXT NOT NULL,
+    observed_preconditions TEXT,
+    approval TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_effects_idem ON effects(idempotency_key);
+CREATE TABLE IF NOT EXISTS receipts (
+    id TEXT PRIMARY KEY,
+    effect_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    compensating INTEGER NOT NULL DEFAULT 0,
+    json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_receipts_idem ON receipts(idempotency_key);
+";

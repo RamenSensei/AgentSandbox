@@ -511,3 +511,33 @@ impl EffectBroker {
         Ok(receipt)
     }
 }
+
+fn wrong_phase(effect: &PendingEffect, expected: &'static str) -> KernelError {
+    let phase = match &effect.phase {
+        EffectPhase::Proposed => "proposed".to_string(),
+        EffectPhase::Prepared { .. } => "prepared".to_string(),
+        EffectPhase::Approved { .. } => "approved".to_string(),
+        EffectPhase::Committed { .. } => "committed".to_string(),
+        EffectPhase::Aborted { .. } => "aborted".to_string(),
+        EffectPhase::Compensated { .. } => "compensated".to_string(),
+    };
+    KernelError::WrongEffectPhase { effect: effect.id.to_string(), phase, expected }
+}
+
+/// Check that every key/value in `expected` matches `observed`. Returns a
+/// precise reason on the first mismatch.
+fn preconditions_hold(expected: &serde_json::Value, observed: &serde_json::Value) -> Result<(), String> {
+    let Some(map) = expected.as_object() else { return Ok(()) };
+    for (k, v) in map {
+        match observed.get(k) {
+            Some(o) if o == v => {}
+            Some(o) => {
+                return Err(format!(
+                    "precondition `{k}` drifted: expected {v}, observed {o}"
+                ))
+            }
+            None => return Err(format!("precondition `{k}` is no longer observable")),
+        }
+    }
+    Ok(())
+}

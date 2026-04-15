@@ -541,3 +541,300 @@ fn preconditions_hold(expected: &serde_json::Value, observed: &serde_json::Value
     }
     Ok(())
 }
+
+// The unused import lint would fire for CommitResult in some cfgs; it is part
+// of the public flow via the Connector trait.
+#[allow(unused)]
+fn _assert_commit_result_used(_r: CommitResult) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ak_core::traits::PreparedEffect;
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A connector over a fake external world whose observable state (a
+    /// "head sha") can be mutated between broker calls.
+    struct MockConnector {
+        world_sha: Mutex<String>,
+        commits: AtomicU64,
+        compensations: AtomicU64,
+        /// A secret only the connector may see, used to prove no secret
+        /// bytes leak into serialized broker artifacts.
+        vault: Arc<crate::secrets::SecretVault>,
+    }
+
+    impl MockConnector {
+        fn new(vault: Arc<crate::secrets::SecretVault>) -> Self {
+            Self {
+                world_sha: Mutex::new("sha-1".into()),
+                commits: AtomicU64::new(0),
+                compensations: AtomicU64::new(0),
+                vault,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Connector for MockConnector {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn operations(&self) -> Vec<(String, EffectClass)> {
+            vec![
+                ("mock.push".into(), EffectClass::Compensatable),
+                ("mock.email".into(), EffectClass::Irreversible),
+            ]
+        }
+        fn canonicalize(
+            &self,
+            _operation: &str,
+            args: &serde_json::Value,
+        ) -> KernelResult<serde_json::Value> {
+            Ok(args.clone())
+        }
+        async fn prepare(&self, _contract: &EffectContract) -> KernelResult<PreparedEffect> {
+            let sha = self
+                .world_sha
+                .lock()
+                .map_err(|_| KernelError::Other("poisoned".into()))?
+                .clone();
+            Ok(PreparedEffect {
+                preview: json!({"will": "push"}),
+                observed_preconditions: json!({"head_sha": sha}),
+            })
+        }
+        async fn commit(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
+            // Prove the connector-only credential path works; the secret must
+            // never appear in any broker artifact.
+            let auth = self.vault.with_secret("api_token", |s| format!("Bearer {s}"))?;
+            assert!(auth.contains("s3cr3t"));
+            self.commits.fetch_add(1, Ordering::SeqCst);
+            Ok(CommitResult { response: json!({"status": "ok", "id": 42}) })
+        }
+        async fn compensate(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
+            self.compensations.fetch_add(1, Ordering::SeqCst);
+            Ok(CommitResult { response: json!({"status": "reverted"}) })
+        }
+    }
+
+    fn test_signer() -> Box<dyn ReceiptSigner> {
+        Box::new(|msg: &[u8]| {
+            (ak_core::hash::hash_bytes(msg).0, "test-key".to_string())
+        })
+    }
+
+    fn contract(class: EffectClass, key: &str) -> EffectContract {
+        EffectContract {
+            operation: "mock.push".into(),
+            resource: "org/repo".into(),
+            arguments: json!({"branch": "main"}),
+            preconditions: json!({"head_sha": "sha-1"}),
+            idempotency_key: key.into(),
+            class,
+        }
+    }
+
+    struct Rig {
+        broker: EffectBroker,
+        connector: Arc<MockConnector>,
+        vault: Arc<crate::secrets::SecretVault>,
+    }
+
+    fn rig() -> Rig {
+        let vault = Arc::new(crate::secrets::SecretVault::in_memory());
+        vault.insert("api_token", "s3cr3t-hunter2").expect("insert");
+        let broker = EffectBroker::in_memory(test_signer()).expect("broker");
+        let connector = Arc::new(MockConnector::new(vault.clone()));
+        broker.register_connector(connector.clone());
+        Rig { broker, connector, vault }
+    }
+
+    fn propose(r: &Rig, c: EffectContract) -> PendingEffect {
+        r.broker
+            .propose(
+                c,
+                PrincipalId::generate(),
+                BranchId::generate(),
+                StepId::generate(),
+                LeaseId::generate(),
+            )
+            .expect("propose")
+    }
+
+    #[tokio::test]
+    async fn happy_path_lifecycle() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-1"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker
+            .approve(&fx.id, PrincipalId::generate(), 7)
+            .expect("approve");
+        let receipt = r.broker.commit(&fx.id, 7, |_| true).await.expect("commit");
+        assert_eq!(receipt.body.operation, "mock.push");
+        assert_eq!(receipt.body.contract_hash, fx.contract_hash);
+        assert_eq!(receipt.body.policy_epoch, 7);
+        assert_eq!(receipt.key_id, "test-key");
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 1);
+        // Phase is Committed and receipt is durable.
+        let stored = r.broker.effect(&fx.id).expect("effect");
+        assert!(matches!(stored.phase, EffectPhase::Committed { .. }));
+        assert_eq!(r.broker.receipt(&receipt.id).expect("receipt").body, receipt.body);
+        // Compensation produces a second, compensating receipt.
+        let comp = r.broker.compensate(&fx.id).await.expect("compensate");
+        assert_eq!(comp.body.operation, "mock.push.compensate");
+        assert_eq!(r.connector.compensations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_precondition_aborts_commit() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-2"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+        // The world moves under us.
+        *r.connector.world_sha.lock().expect("lock") = "sha-2".into();
+        let err = r.broker.commit(&fx.id, 1, |_| true).await.expect_err("must abort");
+        match err {
+            KernelError::StaleAuthorization { reason } => {
+                assert!(reason.contains("head_sha"), "reason: {reason}")
+            }
+            other => panic!("expected StaleAuthorization, got {other:?}"),
+        }
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            r.broker.effect(&fx.id).expect("effect").phase,
+            EffectPhase::Aborted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn changed_contract_aborts_commit() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-3"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+        // Simulate tampering: swap the stored contract arguments so the
+        // content no longer matches the hash the approver saw.
+        let mut stored = r.broker.effect(&fx.id).expect("effect");
+        stored.contract.arguments = json!({"branch": "release"});
+        r.broker.save_effect(&stored).expect("save");
+        let err = r.broker.commit(&fx.id, 1, |_| true).await.expect_err("must abort");
+        assert!(matches!(err, KernelError::StaleAuthorization { .. }), "{err:?}");
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn policy_epoch_change_aborts_commit() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-4"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker.approve(&fx.id, PrincipalId::generate(), 3).expect("approve");
+        let err = r.broker.commit(&fx.id, 4, |_| true).await.expect_err("must abort");
+        match err {
+            KernelError::StaleAuthorization { reason } => {
+                assert!(reason.contains("policy epoch"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_lease_aborts_commit() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-5"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+        let err = r.broker.commit(&fx.id, 1, |_| false).await.expect_err("must abort");
+        match err {
+            KernelError::StaleAuthorization { reason } => assert!(reason.contains("lease")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_idempotency_key_is_rejected() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-6"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+        r.broker.commit(&fx.id, 1, |_| true).await.expect("commit");
+        // A new proposal with the same key must be refused up front.
+        let err = r
+            .broker
+            .propose(
+                contract(EffectClass::Compensatable, "k-6"),
+                PrincipalId::generate(),
+                BranchId::generate(),
+                StepId::generate(),
+                LeaseId::generate(),
+            )
+            .expect_err("duplicate");
+        assert!(matches!(err, KernelError::DuplicateCommit { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn irreversible_requires_explicit_approval() {
+        let r = rig();
+        let mut c = contract(EffectClass::Irreversible, "k-7");
+        c.operation = "mock.email".into();
+        let fx = propose(&r, c);
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        // Committing straight from Prepared must be refused for irreversible
+        // effects.
+        let err = r.broker.commit(&fx.id, 1, |_| true).await.expect_err("needs approval");
+        assert!(matches!(err, KernelError::WrongEffectPhase { expected: "approved", .. }), "{err:?}");
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 0);
+        // With approval, it commits.
+        r.broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+        r.broker.commit(&fx.id, 1, |_| true).await.expect("commit");
+    }
+
+    #[tokio::test]
+    async fn reversible_may_commit_from_prepared() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-8"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        let receipt = r.broker.commit(&fx.id, 9, |_| true).await.expect("commit");
+        assert_eq!(receipt.body.policy_epoch, 9);
+    }
+
+    #[tokio::test]
+    async fn no_secret_bytes_in_serialized_artifacts() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-9"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        r.broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+        let receipt = r.broker.commit(&fx.id, 1, |_| true).await.expect("commit");
+
+        let effect_json = serde_json::to_string(&r.broker.effect(&fx.id).expect("fx")).expect("ser");
+        let receipt_json = serde_json::to_string(&receipt).expect("ser");
+        for leak in ["s3cr3t", "hunter2"] {
+            assert!(!effect_json.contains(leak), "secret leaked into PendingEffect");
+            assert!(!receipt_json.contains(leak), "secret leaked into Receipt");
+        }
+        // The vault's Debug output is redacted too.
+        assert!(!format!("{:?}", r.vault).contains("s3cr3t"));
+    }
+
+    #[tokio::test]
+    async fn abort_and_wrong_phase_transitions() {
+        let r = rig();
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-10"));
+        // prepare twice fails
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        assert!(r.broker.prepare(&fx.id).await.is_err());
+        r.broker.abort(&fx.id, "operator cancelled").expect("abort");
+        assert!(matches!(
+            r.broker.effect(&fx.id).expect("fx").phase,
+            EffectPhase::Aborted { .. }
+        ));
+        // committed effects cannot be aborted
+        let fx2 = propose(&r, contract(EffectClass::Compensatable, "k-11"));
+        r.broker.prepare(&fx2.id).await.expect("prepare");
+        r.broker.commit(&fx2.id, 1, |_| true).await.expect("commit");
+        assert!(r.broker.abort(&fx2.id, "nope").is_err());
+    }
+}

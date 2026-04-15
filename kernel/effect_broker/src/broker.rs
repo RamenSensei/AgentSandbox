@@ -77,3 +77,437 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_receipts_idem ON receipts(idempotency_key);
 ";
+
+impl EffectBroker {
+    /// Broker over an in-memory SQLite store (tests, ephemeral kernels).
+    pub fn in_memory(signer: Box<dyn ReceiptSigner>) -> KernelResult<Self> {
+        let conn = Connection::open_in_memory().map_err(storage_err)?;
+        Self::with_connection(conn, signer)
+    }
+
+    /// Broker over a file-backed SQLite store.
+    pub fn open(path: &std::path::Path, signer: Box<dyn ReceiptSigner>) -> KernelResult<Self> {
+        let conn = Connection::open(path).map_err(storage_err)?;
+        Self::with_connection(conn, signer)
+    }
+
+    fn with_connection(conn: Connection, signer: Box<dyn ReceiptSigner>) -> KernelResult<Self> {
+        conn.execute_batch(SCHEMA).map_err(storage_err)?;
+        Ok(Self {
+            connectors: Mutex::new(HashMap::new()),
+            store: Mutex::new(conn),
+            signer,
+        })
+    }
+
+    /// Register a connector under its [`Connector::name`]. Operations are
+    /// routed by the prefix before the first `.` (e.g. `github.create_branch`
+    /// routes to the `github` connector).
+    pub fn register_connector(&self, connector: Arc<dyn Connector>) {
+        let name = connector.name().to_string();
+        info!(connector = %name, "registering connector");
+        if let Ok(mut map) = self.connectors.lock() {
+            map.insert(name, connector);
+        }
+    }
+
+    fn connector_for(&self, operation: &str) -> KernelResult<Arc<dyn Connector>> {
+        let prefix = operation.split('.').next().unwrap_or(operation);
+        let map = self
+            .connectors
+            .lock()
+            .map_err(|_| KernelError::Storage("connector registry poisoned".into()))?;
+        map.get(prefix).cloned().ok_or_else(|| KernelError::NotFound {
+            kind: "connector",
+            id: prefix.to_string(),
+        })
+    }
+
+    fn with_store<T>(&self, f: impl FnOnce(&Connection) -> KernelResult<T>) -> KernelResult<T> {
+        let conn = self
+            .store
+            .lock()
+            .map_err(|_| KernelError::Storage("effect store poisoned".into()))?;
+        f(&conn)
+    }
+
+    fn load_effect(&self, id: &EffectId) -> KernelResult<PendingEffect> {
+        self.with_store(|conn| {
+            let json: Option<String> = conn
+                .query_row("SELECT json FROM effects WHERE id = ?1", params![id.as_str()], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(storage_err)?;
+            let json = json.ok_or_else(|| KernelError::NotFound {
+                kind: "effect",
+                id: id.to_string(),
+            })?;
+            Ok(serde_json::from_str(&json)?)
+        })
+    }
+
+    fn save_effect(&self, effect: &PendingEffect) -> KernelResult<()> {
+        let json = serde_json::to_string(effect)?;
+        self.with_store(|conn| {
+            conn.execute(
+                "UPDATE effects SET json = ?2 WHERE id = ?1",
+                params![effect.id.as_str(), json],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })
+    }
+
+    fn load_column(&self, id: &EffectId, column: &str) -> KernelResult<Option<String>> {
+        let sql = format!("SELECT {column} FROM effects WHERE id = ?1");
+        self.with_store(|conn| {
+            conn.query_row(&sql, params![id.as_str()], |r| r.get::<_, Option<String>>(0))
+                .optional()
+                .map_err(storage_err)?
+                .ok_or_else(|| KernelError::NotFound { kind: "effect", id: id.to_string() })
+        })
+    }
+
+    fn set_column(&self, id: &EffectId, column: &str, value: Option<&str>) -> KernelResult<()> {
+        let sql = format!("UPDATE effects SET {column} = ?2 WHERE id = ?1");
+        self.with_store(|conn| {
+            conn.execute(&sql, params![id.as_str(), value]).map_err(storage_err)?;
+            Ok(())
+        })
+    }
+
+    fn committed_receipt_for_key(&self, key: &str) -> KernelResult<Option<String>> {
+        self.with_store(|conn| {
+            conn.query_row(
+                "SELECT id FROM receipts WHERE idempotency_key = ?1 AND compensating = 0",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_err)
+        })
+    }
+
+    /// Fetch a receipt by id.
+    pub fn receipt(&self, id: &ReceiptId) -> KernelResult<Receipt> {
+        self.with_store(|conn| {
+            let json: Option<String> = conn
+                .query_row("SELECT json FROM receipts WHERE id = ?1", params![id.as_str()], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(storage_err)?;
+            let json = json.ok_or_else(|| KernelError::NotFound {
+                kind: "receipt",
+                id: id.to_string(),
+            })?;
+            Ok(serde_json::from_str(&json)?)
+        })
+    }
+
+    /// Fetch a pending effect by id.
+    pub fn effect(&self, id: &EffectId) -> KernelResult<PendingEffect> {
+        self.load_effect(id)
+    }
+
+    /// Propose an effect: canonicalize its arguments through the owning
+    /// connector, deduplicate on the idempotency key, and persist it in
+    /// phase `Proposed`.
+    ///
+    /// Returns [`KernelError::DuplicateCommit`] if the idempotency key has
+    /// already produced a committed receipt.
+    #[instrument(skip(self, contract), fields(operation = %contract.operation))]
+    pub fn propose(
+        &self,
+        mut contract: EffectContract,
+        proposer: PrincipalId,
+        branch: BranchId,
+        step: StepId,
+        lease: LeaseId,
+    ) -> KernelResult<PendingEffect> {
+        let connector = self.connector_for(&contract.operation)?;
+        contract.arguments = connector.canonicalize(&contract.operation, &contract.arguments)?;
+
+        if let Some(receipt) = self.committed_receipt_for_key(&contract.idempotency_key)? {
+            return Err(KernelError::DuplicateCommit {
+                key: contract.idempotency_key.clone(),
+                receipt,
+            });
+        }
+
+        let effect = PendingEffect::new(contract, proposer, branch, step, lease, Utc::now());
+        let json = serde_json::to_string(&effect)?;
+        self.with_store(|conn| {
+            conn.execute(
+                "INSERT INTO effects (id, idempotency_key, json) VALUES (?1, ?2, ?3)",
+                params![effect.id.as_str(), effect.contract.idempotency_key, json],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })?;
+        info!(effect = %effect.id, "effect proposed");
+        Ok(effect)
+    }
+
+    /// Dry-run the effect against the live external system, recording the
+    /// observed preconditions and moving to phase `Prepared`.
+    #[instrument(skip(self))]
+    pub async fn prepare(&self, effect_id: &EffectId) -> KernelResult<PreparedEffect> {
+        let mut effect = self.load_effect(effect_id)?;
+        if !matches!(effect.phase, EffectPhase::Proposed) {
+            return Err(wrong_phase(&effect, "proposed"));
+        }
+        let connector = self.connector_for(&effect.contract.operation)?;
+        let prepared = connector.prepare(&effect.contract).await?;
+
+        effect.phase = EffectPhase::Prepared { preview: prepared.preview.clone() };
+        self.save_effect(&effect)?;
+        self.set_column(
+            effect_id,
+            "observed_preconditions",
+            Some(&serde_json::to_string(&prepared.observed_preconditions)?),
+        )?;
+        info!(effect = %effect_id, "effect prepared");
+        Ok(prepared)
+    }
+
+    /// Record an explicit approval, bound to the contract hash and the policy
+    /// epoch under which the approval was granted.
+    #[instrument(skip(self))]
+    pub fn approve(
+        &self,
+        effect_id: &EffectId,
+        approver: PrincipalId,
+        policy_epoch: u64,
+    ) -> KernelResult<()> {
+        let mut effect = self.load_effect(effect_id)?;
+        if !matches!(effect.phase, EffectPhase::Prepared { .. }) {
+            return Err(wrong_phase(&effect, "prepared"));
+        }
+        let record = ApprovalRecord {
+            approver: approver.clone(),
+            approved_at: Utc::now(),
+            policy_epoch,
+            contract_hash: effect.contract_hash.clone(),
+        };
+        self.set_column(effect_id, "approval", Some(&serde_json::to_string(&record)?))?;
+        effect.phase = EffectPhase::Approved {
+            approver,
+            approved_at: record.approved_at,
+            policy_epoch,
+        };
+        self.save_effect(&effect)?;
+        info!(effect = %effect_id, "effect approved");
+        Ok(())
+    }
+
+    /// Commit the effect after full revalidation. Any failed check aborts the
+    /// effect and returns [`KernelError::StaleAuthorization`].
+    ///
+    /// Revalidation, in order:
+    /// 1. the contract hash is unchanged since approval;
+    /// 2. the policy epoch is unchanged since approval;
+    /// 3. the capability lease is still valid (`lease_check`);
+    /// 4. the connector's `prepare` is re-run and every declared precondition
+    ///    plus every prepare-time observation still holds;
+    /// 5. the idempotency key has not been committed elsewhere.
+    #[instrument(skip(self, lease_check))]
+    pub async fn commit(
+        &self,
+        effect_id: &EffectId,
+        current_policy_epoch: u64,
+        lease_check: impl Fn(&LeaseId) -> bool,
+    ) -> KernelResult<Receipt> {
+        let effect = self.load_effect(effect_id)?;
+
+        // Irreversible / opaque effects can only be committed from an
+        // explicit approval; reversible ones may commit straight from
+        // `Prepared`.
+        let approval: Option<ApprovalRecord> = match &effect.phase {
+            EffectPhase::Approved { .. } => {
+                let raw = self.load_column(effect_id, "approval")?.ok_or_else(|| {
+                    KernelError::Storage("approved effect missing approval record".into())
+                })?;
+                Some(serde_json::from_str(&raw)?)
+            }
+            EffectPhase::Prepared { .. } => {
+                if matches!(
+                    effect.contract.class,
+                    EffectClass::Irreversible | EffectClass::OpaqueExternal
+                ) {
+                    return Err(wrong_phase(&effect, "approved"));
+                }
+                None
+            }
+            _ => return Err(wrong_phase(&effect, "approved")),
+        };
+
+        // 1. Contract must hash to exactly what was proposed (and approved).
+        let live_hash = effect.contract.contract_hash();
+        if live_hash != effect.contract_hash {
+            return self.stale(effect_id, "contract content no longer matches its recorded hash").await;
+        }
+        if let Some(a) = &approval {
+            if a.contract_hash != live_hash {
+                return self
+                    .stale(effect_id, "contract hash changed since approval")
+                    .await;
+            }
+            // 2. Policy epoch unchanged since approval.
+            if a.policy_epoch != current_policy_epoch {
+                return self
+                    .stale(
+                        effect_id,
+                        &format!(
+                            "policy epoch advanced from {} to {} since approval",
+                            a.policy_epoch, current_policy_epoch
+                        ),
+                    )
+                    .await;
+            }
+        }
+
+        // 3. Lease still valid.
+        if !lease_check(&effect.lease) {
+            return self
+                .stale(effect_id, &format!("lease `{}` is no longer valid", effect.lease))
+                .await;
+        }
+
+        // 4. Re-observe the world and compare preconditions.
+        let connector = self.connector_for(&effect.contract.operation)?;
+        let reprepared = connector.prepare(&effect.contract).await?;
+        if let Err(reason) =
+            preconditions_hold(&effect.contract.preconditions, &reprepared.observed_preconditions)
+        {
+            return self.stale(effect_id, &reason).await;
+        }
+        if let Some(raw) = self.load_column(effect_id, "observed_preconditions")? {
+            let prepared_obs: serde_json::Value = serde_json::from_str(&raw)?;
+            if let Err(reason) = preconditions_hold(&prepared_obs, &reprepared.observed_preconditions)
+            {
+                return self.stale(effect_id, &reason).await;
+            }
+        }
+
+        // 5. Exactly-once.
+        if let Some(receipt) = self.committed_receipt_for_key(&effect.contract.idempotency_key)? {
+            return Err(KernelError::DuplicateCommit {
+                key: effect.contract.idempotency_key.clone(),
+                receipt,
+            });
+        }
+
+        // All checks passed: perform the effect.
+        let result = connector.commit(&effect.contract).await?;
+        let witness_source = match &approval {
+            Some(a) => serde_json::to_value(a)?,
+            None => serde_json::json!({
+                "auto_commit": true,
+                "contract_hash": effect.contract_hash,
+            }),
+        };
+        let body = ReceiptBody {
+            effect: effect.id.clone(),
+            who: effect.proposer.clone(),
+            operation: effect.contract.operation.clone(),
+            resource: effect.contract.resource.clone(),
+            contract_hash: effect.contract_hash.clone(),
+            branch: effect.branch.clone(),
+            step: effect.step.clone(),
+            policy_epoch: current_policy_epoch,
+            authorization_witness: hash_canonical(&witness_source),
+            external_response_digest: hash_canonical(&result.response),
+            committed_at: Utc::now(),
+        };
+        let receipt = self.sign_and_store(&effect, body, false)?;
+
+        let mut effect = effect;
+        effect.phase = EffectPhase::Committed { receipt: receipt.id.clone() };
+        self.save_effect(&effect)?;
+        info!(effect = %effect_id, receipt = %receipt.id, "effect committed");
+        Ok(receipt)
+    }
+
+    fn sign_and_store(
+        &self,
+        effect: &PendingEffect,
+        body: ReceiptBody,
+        compensating: bool,
+    ) -> KernelResult<Receipt> {
+        let (signature, key_id) = self.signer.sign(canonical_json(&body).as_bytes());
+        let receipt = Receipt { id: ReceiptId::generate(), body, signature, key_id };
+        let json = serde_json::to_string(&receipt)?;
+        self.with_store(|conn| {
+            conn.execute(
+                "INSERT INTO receipts (id, effect_id, idempotency_key, compensating, json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    receipt.id.as_str(),
+                    effect.id.as_str(),
+                    effect.contract.idempotency_key,
+                    compensating as i64,
+                    json
+                ],
+            )
+            .map_err(storage_err)?;
+            Ok(())
+        })?;
+        Ok(receipt)
+    }
+
+    async fn stale(&self, effect_id: &EffectId, reason: &str) -> KernelResult<Receipt> {
+        warn!(effect = %effect_id, reason, "commit-time revalidation failed; aborting");
+        self.abort(effect_id, reason)?;
+        Err(KernelError::StaleAuthorization { reason: reason.to_string() })
+    }
+
+    /// Abort a not-yet-committed effect with a human-readable reason.
+    #[instrument(skip(self))]
+    pub fn abort(&self, effect_id: &EffectId, reason: &str) -> KernelResult<()> {
+        let mut effect = self.load_effect(effect_id)?;
+        match effect.phase {
+            EffectPhase::Committed { .. } | EffectPhase::Compensated { .. } => {
+                return Err(wrong_phase(&effect, "proposed|prepared|approved"));
+            }
+            _ => {}
+        }
+        effect.phase = EffectPhase::Aborted { reason: reason.to_string() };
+        self.save_effect(&effect)?;
+        Ok(())
+    }
+
+    /// Run the connector's compensating action for a committed effect and
+    /// record a compensating receipt.
+    #[instrument(skip(self))]
+    pub async fn compensate(&self, effect_id: &EffectId) -> KernelResult<Receipt> {
+        let effect = self.load_effect(effect_id)?;
+        if !matches!(effect.phase, EffectPhase::Committed { .. }) {
+            return Err(wrong_phase(&effect, "committed"));
+        }
+        let connector = self.connector_for(&effect.contract.operation)?;
+        let result = connector.compensate(&effect.contract).await?;
+        let body = ReceiptBody {
+            effect: effect.id.clone(),
+            who: effect.proposer.clone(),
+            operation: format!("{}.compensate", effect.contract.operation),
+            resource: effect.contract.resource.clone(),
+            contract_hash: effect.contract_hash.clone(),
+            branch: effect.branch.clone(),
+            step: effect.step.clone(),
+            policy_epoch: 0,
+            authorization_witness: hash_canonical(&serde_json::json!({
+                "compensation_for": effect.id,
+            })),
+            external_response_digest: hash_canonical(&result.response),
+            committed_at: Utc::now(),
+        };
+        let receipt = self.sign_and_store(&effect, body, true)?;
+        let mut effect = effect;
+        effect.phase = EffectPhase::Compensated { compensating_receipt: receipt.id.clone() };
+        self.save_effect(&effect)?;
+        info!(effect = %effect_id, receipt = %receipt.id, "effect compensated");
+        Ok(receipt)
+    }
+}

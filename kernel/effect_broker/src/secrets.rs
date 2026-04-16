@@ -21,3 +21,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::{info, instrument};
+
+/// A minted single-use token: guest-visible handle to a vault secret.
+#[derive(Debug, Clone)]
+pub struct ScopedToken {
+    /// The opaque random token string handed to the guest.
+    pub token: String,
+    /// When the token stops being redeemable.
+    pub expires_at: DateTime<Utc>,
+}
+
+struct TokenState {
+    secret_name: String,
+    expires_at: DateTime<Utc>,
+}
+
+/// In-memory (optionally file-backed) store of named secrets.
+///
+/// File-backed vaults persist as JSON with `0600` permissions. See the module
+/// docs for the exposure invariant.
+pub struct SecretVault {
+    secrets: Mutex<HashMap<String, String>>,
+    tokens: Mutex<HashMap<String, TokenState>>,
+    path: Option<PathBuf>,
+}

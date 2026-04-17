@@ -159,3 +159,15 @@ impl SecretVault {
         self.with_secret(&state.secret_name, f)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn with_secret_lends_value() {
+        let v = SecretVault::in_memory();
+        v.insert("gh", "tok-123").expect("insert");
+        let len = v.with_secret("gh", |s| s.len()).expect("read");
+        assert_eq!(len, 7);
+        assert!(v.with_secret("missing", |_| ()).is_err());
+    }
+}

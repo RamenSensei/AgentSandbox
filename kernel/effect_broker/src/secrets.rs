@@ -170,4 +170,23 @@ mod tests {
         assert_eq!(len, 7);
         assert!(v.with_secret("missing", |_| ()).is_err());
     }
+
+    #[test]
+    fn scoped_token_is_single_use_and_expires() {
+        let v = SecretVault::in_memory();
+        v.insert("gh", "tok-123").expect("insert");
+        let t = v.mint_scoped_token("gh", Duration::seconds(60)).expect("mint");
+        assert!(t.token.starts_with("akst-"));
+        assert!(!t.token.contains("tok-123"));
+        let got = v.redeem_scoped_token(&t.token, |s| s.to_string()).expect("redeem");
+        assert_eq!(got, "tok-123");
+        // Second redemption fails.
+        assert!(v.redeem_scoped_token(&t.token, |s| s.to_string()).is_err());
+        // Expired token fails.
+        let t2 = v.mint_scoped_token("gh", Duration::seconds(-1)).expect("mint");
+        assert!(matches!(
+            v.redeem_scoped_token(&t2.token, |s| s.to_string()),
+            Err(KernelError::StaleAuthorization { .. })
+        ));
+    }
 }

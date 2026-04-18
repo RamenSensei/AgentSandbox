@@ -189,4 +189,22 @@ mod tests {
             Err(KernelError::StaleAuthorization { .. })
         ));
     }
+
+    #[test]
+    fn file_backed_vault_round_trips_with_0600() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("vault.json");
+        {
+            let v = SecretVault::open(path.clone()).expect("open");
+            v.insert("gh", "tok-123").expect("insert");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let v = SecretVault::open(path).expect("reopen");
+        assert_eq!(v.with_secret("gh", |s| s.to_string()).expect("read"), "tok-123");
+    }
 }

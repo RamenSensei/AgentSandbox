@@ -159,9 +159,11 @@ impl SecretVault {
         self.with_secret(&state.secret_name, f)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn with_secret_lends_value() {
         let v = SecretVault::in_memory();
@@ -206,5 +208,14 @@ mod tests {
         }
         let v = SecretVault::open(path).expect("reopen");
         assert_eq!(v.with_secret("gh", |s| s.to_string()).expect("read"), "tok-123");
+    }
+
+    #[test]
+    fn debug_is_redacted() {
+        let v = SecretVault::in_memory();
+        v.insert("gh", "tok-123").expect("insert");
+        let dbg = format!("{v:?}");
+        assert!(!dbg.contains("tok-123"));
+        assert!(!dbg.contains("gh") || dbg.contains("redacted"));
     }
 }

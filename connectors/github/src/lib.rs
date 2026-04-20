@@ -125,3 +125,27 @@ impl GithubConnector {
             .ok_or_else(|| conn_err(format!("ref heads/{branch}: response missing object.sha")))
     }
 }
+
+/// Validate `args` has exactly the `required` (string) fields plus optional
+/// string fields from `optional`; reject unknown fields.
+fn validate_fields(args: &Value, required: &[&str], optional: &[&str]) -> KernelResult<()> {
+    let obj = args
+        .as_object()
+        .ok_or_else(|| conn_err("arguments must be a JSON object"))?;
+    for key in obj.keys() {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
+            return Err(conn_err(format!("unknown field `{key}`")));
+        }
+    }
+    for key in required {
+        GithubConnector::get_str(args, key)?;
+    }
+    for key in *&optional {
+        if let Some(v) = obj.get(*key) {
+            if !v.is_string() {
+                return Err(conn_err(format!("field `{key}` must be a string")));
+            }
+        }
+    }
+    Ok(())
+}

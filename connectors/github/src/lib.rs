@@ -26,3 +26,26 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, instrument};
+
+/// Minimal credential source. Implementations lend a live token; callers
+/// must use it immediately for a request and must not persist it.
+pub trait TokenSource: Send + Sync {
+    /// Return the current API token.
+    fn token(&self) -> KernelResult<String>;
+}
+
+/// A fixed token, for tests and simple deployments.
+pub struct StaticTokenSource(pub String);
+
+impl TokenSource for StaticTokenSource {
+    fn token(&self) -> KernelResult<String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The GitHub connector. See crate docs for the operation table.
+pub struct GithubConnector {
+    base_url: String,
+    client: reqwest::Client,
+    tokens: Arc<dyn TokenSource>,
+}

@@ -394,3 +394,6 @@ impl Connector for GithubConnector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

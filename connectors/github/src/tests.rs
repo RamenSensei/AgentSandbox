@@ -104,3 +104,38 @@ async fn spawn_mock() -> (String, S) {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), state)
 }
+
+fn connector(base: &str) -> GithubConnector {
+    GithubConnector::new(base, Arc::new(StaticTokenSource("test-token".into())))
+}
+
+fn contract(op: &str, args: Value, class: EffectClass) -> EffectContract {
+    EffectContract {
+        operation: op.into(),
+        resource: "acme/widgets".into(),
+        arguments: args,
+        preconditions: json!({}),
+        idempotency_key: "k".into(),
+        class,
+    }
+}
+
+#[test]
+fn canonicalize_rejects_unknown_and_missing_fields() {
+    let gh = connector("http://unused");
+    // unknown field
+    let err = gh
+        .canonicalize(OP_CREATE_BRANCH, &json!({"owner": "a", "repo": "r", "branch": "b", "from_branch": "main", "force": true}))
+        .unwrap_err();
+    assert!(err.to_string().contains("unknown field"));
+    // missing field
+    assert!(gh.canonicalize(OP_CREATE_BRANCH, &json!({"owner": "a"})).is_err());
+    // unsupported (and forbidden) operations do not exist
+    assert!(gh.canonicalize("github.merge_pull_request", &json!({})).is_err());
+    assert!(gh.canonicalize("github.delete_repository", &json!({})).is_err());
+    // valid
+    let ok = gh
+        .canonicalize(OP_READ_REPO, &json!({"repo": "r", "owner": "a"}))
+        .unwrap();
+    assert_eq!(ok, json!({"owner": "a", "repo": "r"}));
+}

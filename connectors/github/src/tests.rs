@@ -139,3 +139,43 @@ fn canonicalize_rejects_unknown_and_missing_fields() {
         .unwrap();
     assert_eq!(ok, json!({"owner": "a", "repo": "r"}));
 }
+
+#[test]
+fn only_declared_operations_exist() {
+    let gh = connector("http://unused");
+    let ops: Vec<String> = gh.operations().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        ops,
+        vec![OP_READ_REPO, OP_CREATE_BRANCH, OP_CREATE_DRAFT_PR, OP_COMMENT_ISSUE]
+    );
+    for (_, class) in gh.operations() {
+        assert!(class <= EffectClass::Irreversible);
+    }
+}
+
+#[tokio::test]
+async fn create_branch_prepare_captures_precondition_and_commit_creates_ref() {
+    let (base, state) = spawn_mock().await;
+    let gh = connector(&base);
+    let c = contract(
+        OP_CREATE_BRANCH,
+        json!({"owner": "acme", "repo": "widgets", "branch": "feature-x", "from_branch": "main"}),
+        EffectClass::Compensatable,
+    );
+    let prepared = gh.prepare(&c).await.unwrap();
+    assert_eq!(prepared.observed_preconditions, json!({"base_head_sha": "sha-live-1"}));
+    assert!(prepared.preview["action"].as_str().unwrap().contains("feature-x"));
+    // No side effect from prepare.
+    assert!(state.created_refs.lock().unwrap().is_empty());
+
+    let result = gh.commit(&c).await.unwrap();
+    assert_eq!(result.response["ref"], "refs/heads/feature-x");
+    assert_eq!(state.created_refs.lock().unwrap().len(), 1);
+    // Auth header used the token source.
+    assert!(state.auth_headers.lock().unwrap().iter().any(|h| h == "Bearer test-token"));
+
+    // Compensation deletes the ref.
+    let comp = gh.compensate(&c).await.unwrap();
+    assert_eq!(comp.response["deleted_ref"], "refs/heads/feature-x");
+    assert!(state.created_refs.lock().unwrap().is_empty());
+}

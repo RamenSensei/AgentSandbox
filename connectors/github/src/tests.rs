@@ -179,3 +179,40 @@ async fn create_branch_prepare_captures_precondition_and_commit_creates_ref() {
     assert_eq!(comp.response["deleted_ref"], "refs/heads/feature-x");
     assert!(state.created_refs.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn precondition_drift_is_visible_between_prepares() {
+    let (base, state) = spawn_mock().await;
+    let gh = connector(&base);
+    let c = contract(
+        OP_CREATE_BRANCH,
+        json!({"owner": "acme", "repo": "widgets", "branch": "b", "from_branch": "main"}),
+        EffectClass::Compensatable,
+    );
+    let p1 = gh.prepare(&c).await.unwrap();
+    *state.sha.lock().unwrap() = "sha-live-2".into();
+    let p2 = gh.prepare(&c).await.unwrap();
+    assert_ne!(p1.observed_preconditions, p2.observed_preconditions);
+}
+
+#[tokio::test]
+async fn draft_pr_commit_and_compensate_closes_pr() {
+    let (base, state) = spawn_mock().await;
+    let gh = connector(&base);
+    let c = contract(
+        OP_CREATE_DRAFT_PR,
+        json!({"owner": "acme", "repo": "widgets", "title": "Fix", "head": "feature-x", "base": "main", "body": "hi"}),
+        EffectClass::Compensatable,
+    );
+    let prepared = gh.prepare(&c).await.unwrap();
+    assert_eq!(prepared.observed_preconditions["base_head_sha"], "sha-live-1");
+    assert_eq!(prepared.preview["draft"], true);
+
+    let result = gh.commit(&c).await.unwrap();
+    assert_eq!(result.response["number"], 7);
+    assert_eq!(result.response["draft"], true);
+
+    let comp = gh.compensate(&c).await.unwrap();
+    assert_eq!(comp.response["closed_pr"], 7);
+    assert_eq!(*state.pr_state.lock().unwrap(), "closed");
+}

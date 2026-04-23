@@ -216,3 +216,35 @@ async fn draft_pr_commit_and_compensate_closes_pr() {
     assert_eq!(comp.response["closed_pr"], 7);
     assert_eq!(*state.pr_state.lock().unwrap(), "closed");
 }
+
+#[tokio::test]
+async fn comment_on_issue_is_irreversible_and_uncompensatable() {
+    let (base, state) = spawn_mock().await;
+    let gh = connector(&base);
+    let c = contract(
+        OP_COMMENT_ISSUE,
+        json!({"owner": "acme", "repo": "widgets", "issue_number": 12, "body": "done"}),
+        EffectClass::Irreversible,
+    );
+    let prepared = gh.prepare(&c).await.unwrap();
+    assert_eq!(prepared.observed_preconditions, json!({"issue_state": "open"}));
+    let result = gh.commit(&c).await.unwrap();
+    assert_eq!(result.response["id"], 9001);
+    assert_eq!(state.comments.lock().unwrap().len(), 1);
+    assert!(gh.compensate(&c).await.is_err());
+}
+
+#[tokio::test]
+async fn read_repository_is_pure_round_trip() {
+    let (base, _state) = spawn_mock().await;
+    let gh = connector(&base);
+    let c = contract(
+        OP_READ_REPO,
+        json!({"owner": "acme", "repo": "widgets"}),
+        EffectClass::Pure,
+    );
+    let prepared = gh.prepare(&c).await.unwrap();
+    assert_eq!(prepared.preview["full_name"], "acme/widgets");
+    let result = gh.commit(&c).await.unwrap();
+    assert_eq!(result.response["default_branch"], "main");
+}

@@ -8,6 +8,7 @@ members = [
     "kernel/effect_broker",
     "kernel/causal_ledger",
     "connectors/github",
+    "connectors/http",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ ak-state-dag = { path = "kernel/state_dag" }
 ak-effect-broker = { path = "kernel/effect_broker" }
 ak-causal-ledger = { path = "kernel/causal_ledger" }
 ak-connector-github = { path = "connectors/github" }
+ak-connector-http = { path = "connectors/http" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

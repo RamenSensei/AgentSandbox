@@ -25,3 +25,36 @@
 //!   guard set and the allowlist check;
 //! - response bodies are streamed and capped at
 //!   [`HttpConnectorConfig::max_response_bytes`].
+
+use ak_core::capability::glob_match;
+use ak_core::effect::{EffectClass, EffectContract};
+use ak_core::traits::{CommitResult, Connector, PreparedEffect};
+use ak_core::{KernelError, KernelResult};
+use async_trait::async_trait;
+use reqwest::Url;
+use serde_json::{json, Value};
+use std::net::IpAddr;
+use tracing::{debug, instrument, warn};
+
+/// Operation name for the read-only proxy.
+pub const OP_HTTP_GET: &str = "http.get";
+
+fn conn_err(msg: impl std::fmt::Display) -> KernelError {
+    KernelError::Connector(msg.to_string())
+}
+
+/// Configuration for [`HttpConnector`].
+#[derive(Debug, Clone)]
+pub struct HttpConnectorConfig {
+    /// `*`-glob patterns of read-safe domains, e.g. `["docs.rs", "*.wikipedia.org"]`.
+    /// Matching hosts classify `http.get` as `Pure`; everything else is
+    /// `OpaqueExternal`.
+    pub allowlist: Vec<String>,
+    /// Hard cap on response body size in bytes.
+    pub max_response_bytes: usize,
+    /// Maximum number of redirects followed (each hop is re-checked).
+    pub max_redirects: usize,
+    /// **Tests only.** Permit loopback targets so a mock server can be used.
+    /// Never enable in production: it disables the literal-IP/localhost guard.
+    pub danger_allow_loopback: bool,
+}

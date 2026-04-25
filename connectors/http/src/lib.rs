@@ -224,3 +224,74 @@ impl HttpConnector {
         Err(conn_err(format!("too many redirects (max {})", self.config.max_redirects)))
     }
 }
+
+#[async_trait]
+impl Connector for HttpConnector {
+    fn name(&self) -> &str {
+        "http"
+    }
+
+    /// `http.get` is advertised at its *worst-case* class. Use
+    /// [`HttpConnector::classify`] for the per-target class.
+    fn operations(&self) -> Vec<(String, EffectClass)> {
+        vec![(OP_HTTP_GET.into(), EffectClass::OpaqueExternal)]
+    }
+
+    #[instrument(skip(self, args))]
+    fn canonicalize(&self, operation: &str, args: &Value) -> KernelResult<Value> {
+        if operation != OP_HTTP_GET {
+            return Err(conn_err(format!("unsupported operation `{operation}`")));
+        }
+        let obj = args.as_object().ok_or_else(|| conn_err("arguments must be an object"))?;
+        for key in obj.keys() {
+            if key != "url" {
+                return Err(conn_err(format!("unknown field `{key}`")));
+            }
+        }
+        let url = obj
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| conn_err("missing required string field `url`"))?;
+        // Reject guard violations at canonicalize time already.
+        let parsed = self.guard_url(url)?;
+        Ok(json!({ "url": parsed.as_str() }))
+    }
+
+    /// Dry-run: guard + classify, no request is made.
+    #[instrument(skip(self, contract))]
+    async fn prepare(&self, contract: &EffectContract) -> KernelResult<PreparedEffect> {
+        let url = contract
+            .arguments
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| conn_err("missing `url`"))?;
+        let class = self.classify(url)?;
+        Ok(PreparedEffect {
+            preview: json!({
+                "method": "GET",
+                "url": url,
+                "classified_as": if class == EffectClass::Pure { "pure (allowlisted)" } else { "opaque_external" },
+            }),
+            observed_preconditions: json!({}),
+        })
+    }
+
+    #[instrument(skip(self, contract))]
+    async fn commit(&self, contract: &EffectContract) -> KernelResult<CommitResult> {
+        let url = contract
+            .arguments
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| conn_err("missing `url`"))?;
+        let parsed = self.guard_url(url)?;
+        let allowlisted = self.is_allowlisted(&parsed);
+        // A contract claiming Pure must actually be on the allowlist.
+        if contract.class == EffectClass::Pure && !allowlisted {
+            return Err(conn_err(format!(
+                "contract claims Pure but `{url}` is not on the read-safe allowlist"
+            )));
+        }
+        let response = self.fetch(parsed, allowlisted).await?;
+        Ok(CommitResult { response })
+    }
+}

@@ -58,3 +58,46 @@ pub struct HttpConnectorConfig {
     /// Never enable in production: it disables the literal-IP/localhost guard.
     pub danger_allow_loopback: bool,
 }
+
+impl Default for HttpConnectorConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            max_response_bytes: 1024 * 1024,
+            max_redirects: 5,
+            danger_allow_loopback: false,
+        }
+    }
+}
+
+/// The read-only HTTP proxy connector. See crate docs for the guard model.
+#[derive(Debug)]
+pub struct HttpConnector {
+    config: HttpConnectorConfig,
+    client: reqwest::Client,
+}
+
+/// Is this address in a range that must never be reached from a guest?
+fn is_forbidden_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local() // includes 169.254.169.254 metadata
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                // CGNAT 100.64.0.0/10
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // unique local fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // v4-mapped: recurse
+                || v6.to_ipv4_mapped().map(|m| is_forbidden_ip(&IpAddr::V4(m))).unwrap_or(false)
+        }
+    }
+}

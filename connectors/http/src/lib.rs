@@ -101,3 +101,126 @@ fn is_forbidden_ip(ip: &IpAddr) -> bool {
         }
     }
 }
+
+impl HttpConnector {
+    pub fn new(config: HttpConnectorConfig) -> KernelResult<Self> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(conn_err)?;
+        Ok(Self { config, client })
+    }
+
+    /// Run the full SSRF guard set on `url`, returning the parsed URL.
+    /// Refuses non-http(s) schemes, literal IPs, localhost, and (defense in
+    /// depth) any forbidden address range.
+    pub fn guard_url(&self, url: &str) -> KernelResult<Url> {
+        let parsed = Url::parse(url).map_err(|e| conn_err(format!("invalid url `{url}`: {e}")))?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => return Err(conn_err(format!("scheme `{other}` refused: only http(s) allowed"))),
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| conn_err(format!("url `{url}` has no host")))?;
+        let d = host.to_ascii_lowercase();
+        // Literal IPs (v4, or bracketed v6) are refused. `Url` normalizes
+        // hosts, so parsing the host string catches every literal form.
+        if let Ok(ip) = d.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+            self.refuse_ip(ip)?;
+        }
+        if !self.config.danger_allow_loopback
+            && (d == "localhost" || d.ends_with(".localhost") || d.ends_with(".local"))
+        {
+            return Err(conn_err(format!("host `{host}` refused: localhost target")));
+        }
+        Ok(parsed)
+    }
+
+    fn refuse_ip(&self, ip: IpAddr) -> KernelResult<()> {
+        if self.config.danger_allow_loopback && ip.is_loopback() {
+            return Ok(());
+        }
+        if is_forbidden_ip(&ip) {
+            return Err(conn_err(format!("ip `{ip}` refused: private/loopback/link-local range")));
+        }
+        // Even public literal IPs are refused: guests must name their target.
+        Err(conn_err(format!("literal ip `{ip}` refused: use a domain name")))
+    }
+
+    /// Does the host of `url` match the read-safe allowlist?
+    pub fn is_allowlisted(&self, url: &Url) -> bool {
+        let Some(host) = url.host_str() else { return false };
+        self.config
+            .allowlist
+            .iter()
+            .any(|pattern| glob_match(pattern, host))
+    }
+
+    /// Classify a target: `Pure` only when guards pass **and** the host is
+    /// allowlisted; otherwise `OpaqueExternal`. Errors when guards refuse
+    /// the URL outright.
+    pub fn classify(&self, url: &str) -> KernelResult<EffectClass> {
+        let parsed = self.guard_url(url)?;
+        Ok(if self.is_allowlisted(&parsed) {
+            EffectClass::Pure
+        } else {
+            EffectClass::OpaqueExternal
+        })
+    }
+
+    /// Perform the GET with manual redirect handling: every hop re-runs the
+    /// guard set, and when `require_allowlist` is set (the request was
+    /// classified `Pure`), every hop must also stay on the allowlist.
+    async fn fetch(&self, start: Url, require_allowlist: bool) -> KernelResult<Value> {
+        let mut url = start;
+        for _hop in 0..=self.config.max_redirects {
+            debug!(%url, "http.get fetch");
+            let resp = self.client.get(url.clone()).send().await.map_err(conn_err)?;
+            let status = resp.status();
+            if status.is_redirection() {
+                let location = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| conn_err(format!("redirect {status} without Location header")))?;
+                let next = url
+                    .join(location)
+                    .map_err(|e| conn_err(format!("bad redirect target `{location}`: {e}")))?;
+                // Re-run the full guard set on the hop target.
+                let next = self.guard_url(next.as_str())?;
+                if require_allowlist && !self.is_allowlisted(&next) {
+                    warn!(target = %next, "redirect left the allowlist");
+                    return Err(conn_err(format!(
+                        "redirect to `{next}` refused: target is not on the read-safe allowlist"
+                    )));
+                }
+                url = next;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(conn_err(format!("GET {url} returned {status}")));
+            }
+            // Stream the body under the size cap.
+            let mut body: Vec<u8> = Vec::new();
+            let mut resp = resp;
+            while let Some(chunk) = resp.chunk().await.map_err(conn_err)? {
+                if body.len() + chunk.len() > self.config.max_response_bytes {
+                    return Err(conn_err(format!(
+                        "response exceeds cap of {} bytes",
+                        self.config.max_response_bytes
+                    )));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let text = String::from_utf8_lossy(&body).into_owned();
+            return Ok(json!({
+                "url": url.as_str(),
+                "status": status.as_u16(),
+                "body": text,
+                "bytes": body.len(),
+            }));
+        }
+        Err(conn_err(format!("too many redirects (max {})", self.config.max_redirects)))
+    }
+}

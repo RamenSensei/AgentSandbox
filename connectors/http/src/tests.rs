@@ -111,3 +111,31 @@ async fn spawn_mock() -> String {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}")
 }
+
+fn contract(url: &str, class: EffectClass) -> EffectContract {
+    EffectContract {
+        operation: OP_HTTP_GET.into(),
+        resource: url.into(),
+        arguments: json!({ "url": url }),
+        preconditions: json!({}),
+        idempotency_key: "k".into(),
+        class,
+    }
+}
+
+#[tokio::test]
+async fn commit_fetches_and_caps_size() {
+    let base = spawn_mock().await;
+    let host = Url::parse(&base).unwrap().host_str().unwrap().to_string();
+    let c = HttpConnector::new(test_config(vec![host], 1024)).unwrap();
+
+    let ok = c.commit(&contract(&format!("{base}/ok"), EffectClass::Pure)).await.unwrap();
+    assert_eq!(ok.response["status"], 200);
+    assert_eq!(ok.response["body"], "hello world");
+
+    let err = c
+        .commit(&contract(&format!("{base}/big"), EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("exceeds cap"), "{err}");
+}

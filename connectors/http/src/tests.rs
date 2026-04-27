@@ -54,3 +54,32 @@ fn guard_matrix_refuses_ssrf_targets() {
     assert!(c.guard_url("https://example.com/page").is_ok());
     assert!(c.guard_url("http://sub.other.org/").is_ok());
 }
+
+#[test]
+fn classification_is_pure_only_on_allowlist() {
+    let c = connector(&["docs.rs", "*.wikipedia.org"]);
+    assert_eq!(c.classify("https://docs.rs/serde").unwrap(), EffectClass::Pure);
+    assert_eq!(
+        c.classify("https://en.wikipedia.org/wiki/Rust").unwrap(),
+        EffectClass::Pure
+    );
+    // GET is not automatically pure: off-list hosts are opaque.
+    assert_eq!(
+        c.classify("https://evil.example.net/hook").unwrap(),
+        EffectClass::OpaqueExternal
+    );
+    assert_eq!(
+        c.classify("https://docs.rs.evil.net/").unwrap(),
+        EffectClass::OpaqueExternal
+    );
+}
+
+#[test]
+fn canonicalize_validates_shape_and_guards() {
+    let c = connector(&["example.com"]);
+    assert!(c.canonicalize(OP_HTTP_GET, &json!({"url": "https://example.com/a"})).is_ok());
+    assert!(c.canonicalize(OP_HTTP_GET, &json!({"url": "http://169.254.169.254/"})).is_err());
+    assert!(c.canonicalize(OP_HTTP_GET, &json!({"url": "https://example.com", "method": "POST"})).is_err());
+    assert!(c.canonicalize(OP_HTTP_GET, &json!({})).is_err());
+    assert!(c.canonicalize("http.post", &json!({"url": "https://example.com"})).is_err());
+}

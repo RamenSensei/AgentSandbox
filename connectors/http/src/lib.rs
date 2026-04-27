@@ -295,3 +295,6 @@ impl Connector for HttpConnector {
         Ok(CommitResult { response })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -139,3 +139,29 @@ async fn commit_fetches_and_caps_size() {
         .unwrap_err();
     assert!(err.to_string().contains("exceeds cap"), "{err}");
 }
+
+#[tokio::test]
+async fn redirects_are_rechecked_per_hop() {
+    let base = spawn_mock().await;
+    let host = Url::parse(&base).unwrap().host_str().unwrap().to_string();
+    let c = HttpConnector::new(test_config(vec![host], 65536)).unwrap();
+
+    // On-allowlist redirect is followed.
+    let ok = c.commit(&contract(&format!("{base}/hop"), EffectClass::Pure)).await.unwrap();
+    assert_eq!(ok.response["body"], "hello world");
+
+    // Redirect that leaves the allowlist is refused.
+    let err = c
+        .commit(&contract(&format!("{base}/offsite"), EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("allowlist"), "{err}");
+
+    // Redirect to the metadata service is refused by the guards even though
+    // loopback itself is (test-only) allowed.
+    let err = c
+        .commit(&contract(&format!("{base}/metadata"), EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+}

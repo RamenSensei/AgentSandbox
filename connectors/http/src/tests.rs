@@ -83,3 +83,31 @@ fn canonicalize_validates_shape_and_guards() {
     assert!(c.canonicalize(OP_HTTP_GET, &json!({})).is_err());
     assert!(c.canonicalize("http.post", &json!({"url": "https://example.com"})).is_err());
 }
+
+fn test_config(allowlist: Vec<String>, max_bytes: usize) -> HttpConnectorConfig {
+    HttpConnectorConfig {
+        allowlist,
+        max_response_bytes: max_bytes,
+        max_redirects: 5,
+        danger_allow_loopback: true,
+    }
+}
+
+async fn spawn_mock() -> String {
+    let app = Router::new()
+        .route("/ok", get(|| async { "hello world" }))
+        .route("/big", get(|| async { "x".repeat(4096) }))
+        .route("/hop", get(|| async { Redirect::temporary("/ok") }))
+        .route(
+            "/offsite",
+            get(|| async { Redirect::temporary("http://not-allowlisted.example/x") }),
+        )
+        .route(
+            "/metadata",
+            get(|| async { Redirect::temporary("http://169.254.169.254/latest") }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}

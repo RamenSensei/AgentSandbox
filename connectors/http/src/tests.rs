@@ -165,3 +165,33 @@ async fn redirects_are_rechecked_per_hop() {
         .unwrap_err();
     assert!(err.to_string().contains("refused"), "{err}");
 }
+
+#[tokio::test]
+async fn pure_claim_off_allowlist_is_refused() {
+    let base = spawn_mock().await;
+    // Empty allowlist: nothing is pure.
+    let c = HttpConnector::new(test_config(vec![], 65536)).unwrap();
+    let err = c
+        .commit(&contract(&format!("{base}/ok"), EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not on the read-safe allowlist"), "{err}");
+    // As OpaqueExternal it is allowed through (guards permitting).
+    let ok = c
+        .commit(&contract(&format!("{base}/ok"), EffectClass::OpaqueExternal))
+        .await
+        .unwrap();
+    assert_eq!(ok.response["body"], "hello world");
+}
+
+#[tokio::test]
+async fn prepare_is_a_pure_dry_run() {
+    let c = connector(&["docs.rs"]);
+    let p = c.prepare(&contract("https://docs.rs/serde", EffectClass::Pure)).await.unwrap();
+    assert_eq!(p.preview["classified_as"], "pure (allowlisted)");
+    let p = c
+        .prepare(&contract("https://other.example/x", EffectClass::OpaqueExternal))
+        .await
+        .unwrap();
+    assert_eq!(p.preview["classified_as"], "opaque_external");
+}

@@ -19,3 +19,41 @@
 //!   specific server binary — never to the agent that happens to call it.
 //!   Use a distinct [`McpGateway`] (with a distinct `server_name`) per
 //!   server process; never multiplex two servers behind one principal.
+
+use ak_core::effect::{EffectClass, EffectContract};
+use ak_core::traits::{CommitResult, Connector, PreparedEffect};
+use ak_core::{KernelError, KernelResult};
+use async_trait::async_trait;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
+use tracing::{debug, info, instrument};
+
+fn conn_err(msg: impl std::fmt::Display) -> KernelError {
+    KernelError::Connector(msg.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Manifest
+// ---------------------------------------------------------------------------
+
+/// Constraint on a single tool parameter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParamSpec {
+    /// Must the parameter be present?
+    #[serde(default)]
+    pub required: bool,
+    /// Required JSON type: `string` | `number` | `boolean` | `object` | `array`.
+    #[serde(default)]
+    pub r#type: Option<String>,
+    /// Closed set of allowed values.
+    #[serde(default)]
+    pub one_of: Option<Vec<Value>>,
+    /// Maximum length for string values.
+    #[serde(default)]
+    pub max_len: Option<usize>,
+}

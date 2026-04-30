@@ -89,3 +89,35 @@ pub struct SignedManifest {
     /// Identifier of the signing key (informational).
     pub key_id: String,
 }
+
+impl SignedManifest {
+    /// Verify the signature against `public_key` (32-byte hex) and parse the
+    /// manifest. Verification failure or YAML errors refuse the manifest.
+    pub fn verify_and_parse(&self, public_key_hex: &str) -> KernelResult<Manifest> {
+        let key_bytes: [u8; 32] = hex::decode(public_key_hex)
+            .map_err(|e| conn_err(format!("bad manifest public key hex: {e}")))?
+            .try_into()
+            .map_err(|_| conn_err("manifest public key must be 32 bytes"))?;
+        let key = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| conn_err(format!("bad manifest public key: {e}")))?;
+        let sig_bytes: [u8; 64] = hex::decode(&self.signature)
+            .map_err(|e| conn_err(format!("bad manifest signature hex: {e}")))?
+            .try_into()
+            .map_err(|_| conn_err("manifest signature must be 64 bytes"))?;
+        key.verify(self.manifest_yaml.as_bytes(), &Signature::from_bytes(&sig_bytes))
+            .map_err(|_| conn_err("manifest signature verification failed"))?;
+        serde_yaml::from_str(&self.manifest_yaml)
+            .map_err(|e| conn_err(format!("manifest yaml invalid: {e}")))
+    }
+}
+
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}

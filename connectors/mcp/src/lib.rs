@@ -121,3 +121,51 @@ fn json_type_name(v: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+
+impl ToolSpec {
+    /// Enforce the parameter constraints against `args`.
+    pub fn enforce(&self, tool: &str, args: &Value) -> KernelResult<()> {
+        let obj = args
+            .as_object()
+            .ok_or_else(|| conn_err(format!("tool `{tool}`: arguments must be an object")))?;
+        for (key, value) in obj {
+            let Some(spec) = self.params.get(key) else {
+                if self.allow_extra_params {
+                    continue;
+                }
+                return Err(conn_err(format!(
+                    "tool `{tool}`: parameter `{key}` is not declared in the manifest"
+                )));
+            };
+            if let Some(t) = &spec.r#type {
+                if json_type_name(value) != t {
+                    return Err(conn_err(format!(
+                        "tool `{tool}`: parameter `{key}` must be of type {t}"
+                    )));
+                }
+            }
+            if let Some(allowed) = &spec.one_of {
+                if !allowed.contains(value) {
+                    return Err(conn_err(format!(
+                        "tool `{tool}`: parameter `{key}` value is not in the allowed set"
+                    )));
+                }
+            }
+            if let (Some(max), Some(s)) = (spec.max_len, value.as_str()) {
+                if s.len() > max {
+                    return Err(conn_err(format!(
+                        "tool `{tool}`: parameter `{key}` exceeds max length {max}"
+                    )));
+                }
+            }
+        }
+        for (key, spec) in &self.params {
+            if spec.required && !obj.contains_key(key) {
+                return Err(conn_err(format!(
+                    "tool `{tool}`: required parameter `{key}` is missing"
+                )));
+            }
+        }
+        Ok(())
+    }
+}

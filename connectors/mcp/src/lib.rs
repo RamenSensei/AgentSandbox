@@ -57,3 +57,35 @@ pub struct ParamSpec {
     #[serde(default)]
     pub max_len: Option<usize>,
 }
+
+/// Declared semantics of one tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSpec {
+    /// The declared effect class the manifest signer vouches for.
+    pub class: EffectClass,
+    /// Per-parameter constraints. Parameters not listed here are rejected
+    /// unless `allow_extra_params` is set.
+    #[serde(default)]
+    pub params: BTreeMap<String, ParamSpec>,
+    #[serde(default)]
+    pub allow_extra_params: bool,
+}
+
+/// A manifest mapping tool names to declared semantics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    pub tools: BTreeMap<String, ToolSpec>,
+}
+
+/// A YAML manifest plus an Ed25519 signature over the exact YAML bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedManifest {
+    /// The manifest document, verbatim (signature covers these bytes).
+    pub manifest_yaml: String,
+    /// Hex-encoded Ed25519 signature.
+    pub signature: String,
+    /// Identifier of the signing key (informational).
+    pub key_id: String,
+}

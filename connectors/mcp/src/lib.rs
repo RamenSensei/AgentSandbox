@@ -214,3 +214,120 @@ impl Transport {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Gateway
+// ---------------------------------------------------------------------------
+
+/// A gateway to one MCP server process. Implements [`Connector`] with
+/// operations named `<server_name>.<tool>`.
+pub struct McpGateway {
+    server_name: String,
+    manifest: Option<Manifest>,
+    transport: Mutex<Transport>,
+}
+
+impl std::fmt::Debug for McpGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpGateway").field("server", &self.server_name).finish_non_exhaustive()
+    }
+}
+
+impl McpGateway {
+    /// Spawn `command args…` as a child MCP server speaking newline-delimited
+    /// JSON-RPC on its stdio. If `manifest` is provided it must verify
+    /// against `manifest_public_key_hex`.
+    #[instrument(skip(manifest))]
+    pub fn spawn(
+        server_name: &str,
+        command: &str,
+        args: &[&str],
+        manifest: Option<(&SignedManifest, &str)>,
+    ) -> KernelResult<Self> {
+        let manifest = Self::check_manifest(manifest)?;
+        let mut child = tokio::process::Command::new(command)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let stdin = child.stdin.take().ok_or_else(|| conn_err("child stdin unavailable"))?;
+        let stdout = child.stdout.take().ok_or_else(|| conn_err("child stdout unavailable"))?;
+        info!(server = server_name, command, "spawned mcp server");
+        Ok(Self {
+            server_name: server_name.to_string(),
+            manifest,
+            transport: Mutex::new(Transport {
+                reader: BufReader::new(Box::new(stdout)),
+                writer: Box::new(stdin),
+                next_id: 0,
+                _child: Some(child),
+            }),
+        })
+    }
+
+    /// Build a gateway over arbitrary streams (tests: `tokio::io::duplex`).
+    pub fn from_streams(
+        server_name: &str,
+        reader: impl AsyncRead + Send + Unpin + 'static,
+        writer: impl AsyncWrite + Send + Unpin + 'static,
+        manifest: Option<(&SignedManifest, &str)>,
+    ) -> KernelResult<Self> {
+        let manifest = Self::check_manifest(manifest)?;
+        Ok(Self {
+            server_name: server_name.to_string(),
+            manifest,
+            transport: Mutex::new(Transport {
+                reader: BufReader::new(Box::new(reader)),
+                writer: Box::new(writer),
+                next_id: 0,
+                _child: None,
+            }),
+        })
+    }
+
+    fn check_manifest(
+        manifest: Option<(&SignedManifest, &str)>,
+    ) -> KernelResult<Option<Manifest>> {
+        manifest.map(|(m, key)| m.verify_and_parse(key)).transpose()
+    }
+
+    /// The declared effect class of `tool`: from the verified manifest, else
+    /// the [`EffectClass::OpaqueExternal`] default.
+    pub fn effect_class(&self, tool: &str) -> EffectClass {
+        self.manifest
+            .as_ref()
+            .and_then(|m| m.tools.get(tool))
+            .map(|t| t.class)
+            .unwrap_or(EffectClass::OpaqueExternal)
+    }
+
+    fn tool_of(&self, operation: &str) -> KernelResult<String> {
+        operation
+            .strip_prefix(&format!("{}.", self.server_name))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                conn_err(format!(
+                    "operation `{operation}` does not belong to mcp server `{}`",
+                    self.server_name
+                ))
+            })
+    }
+
+    /// `tools/list` against the live server.
+    pub async fn list_tools(&self) -> KernelResult<Vec<Value>> {
+        let mut t = self.transport.lock().await;
+        let result = t.call("tools/list", json!({})).await?;
+        Ok(result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// `tools/call` against the live server.
+    async fn call_tool(&self, tool: &str, arguments: &Value) -> KernelResult<Value> {
+        let mut t = self.transport.lock().await;
+        t.call("tools/call", json!({ "name": tool, "arguments": arguments })).await
+    }
+}

@@ -331,3 +331,79 @@ impl McpGateway {
         t.call("tools/call", json!({ "name": tool, "arguments": arguments })).await
     }
 }
+
+#[async_trait]
+impl Connector for McpGateway {
+    fn name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Only manifest-declared tools are advertised with their vouched class.
+    /// Undeclared tools remain callable but always classify as
+    /// `OpaqueExternal`.
+    fn operations(&self) -> Vec<(String, EffectClass)> {
+        self.manifest
+            .as_ref()
+            .map(|m| {
+                m.tools
+                    .iter()
+                    .map(|(tool, spec)| (format!("{}.{}", self.server_name, tool), spec.class))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Enforces manifest parameter constraints *before* anything reaches the
+    /// server process.
+    #[instrument(skip(self, args))]
+    fn canonicalize(&self, operation: &str, args: &Value) -> KernelResult<Value> {
+        let tool = self.tool_of(operation)?;
+        if !args.is_object() {
+            return Err(conn_err("arguments must be a JSON object"));
+        }
+        if let Some(manifest) = &self.manifest {
+            if let Some(spec) = manifest.tools.get(&tool) {
+                spec.enforce(&tool, args)?;
+            }
+        }
+        // serde_json objects are BTreeMaps: re-encoding is key-sorted.
+        Ok(args.clone())
+    }
+
+    /// Dry-run: confirm the tool exists via `tools/list`; no `tools/call` is
+    /// issued (an MCP call may side-effect, so prepare never forwards one).
+    #[instrument(skip(self, contract), fields(operation = %contract.operation))]
+    async fn prepare(&self, contract: &EffectContract) -> KernelResult<PreparedEffect> {
+        let tool = self.tool_of(&contract.operation)?;
+        let tools = self.list_tools().await?;
+        let listed = tools
+            .iter()
+            .any(|t| t.get("name").and_then(Value::as_str) == Some(tool.as_str()));
+        if !listed {
+            return Err(conn_err(format!("mcp server does not expose tool `{tool}`")));
+        }
+        let class = self.effect_class(&tool);
+        Ok(PreparedEffect {
+            preview: json!({
+                "server": self.server_name,
+                "tool": tool,
+                "arguments": contract.arguments,
+                "declared_class": class,
+                "manifest_backed": self.manifest.as_ref().map(|m| m.tools.contains_key(&tool)).unwrap_or(false),
+            }),
+            observed_preconditions: json!({ "tool_listed": true }),
+        })
+    }
+
+    #[instrument(skip(self, contract), fields(operation = %contract.operation))]
+    async fn commit(&self, contract: &EffectContract) -> KernelResult<CommitResult> {
+        let tool = self.tool_of(&contract.operation)?;
+        // Re-enforce constraints at the boundary, even if canonicalize was
+        // bypassed upstream.
+        if let Some(spec) = self.manifest.as_ref().and_then(|m| m.tools.get(&tool)) {
+            spec.enforce(&tool, &contract.arguments)?;
+        }
+        let response = self.call_tool(&tool, &contract.arguments).await?;
+        Ok(CommitResult { response })
+    }
+}

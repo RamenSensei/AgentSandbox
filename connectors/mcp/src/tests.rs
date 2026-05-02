@@ -50,3 +50,29 @@ fn spawn_test_server() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
     });
     (client_r, client_w)
 }
+
+const MANIFEST_YAML: &str = r#"
+tools:
+  echo:
+    class: pure
+    params:
+      text:
+        required: true
+        type: string
+        max_len: 100
+      mode:
+        one_of: ["plain", "loud"]
+"#;
+
+fn signed_manifest() -> (SignedManifest, String) {
+    let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let signature = key.sign(MANIFEST_YAML.as_bytes());
+    (
+        SignedManifest {
+            manifest_yaml: MANIFEST_YAML.to_string(),
+            signature: hex::encode(signature.to_bytes()),
+            key_id: "manifest-key-1".into(),
+        },
+        hex::encode(key.verifying_key().to_bytes()),
+    )
+}

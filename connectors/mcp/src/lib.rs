@@ -407,3 +407,6 @@ impl Connector for McpGateway {
         Ok(CommitResult { response })
     }
 }
+
+#[cfg(test)]
+mod tests;

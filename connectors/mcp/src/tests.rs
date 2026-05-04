@@ -175,3 +175,10 @@ fn manifest_signature_is_verified() {
     let (r, w) = spawn_test_server_sync();
     assert!(McpGateway::from_streams("notes", r, w, Some((&tampered, &pubkey))).is_err());
 }
+
+/// Non-async wrapper (the streams don't need a live server for this test).
+fn spawn_test_server_sync() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    let (_a, b) = tokio::io::duplex(1024);
+    let (c, _d) = tokio::io::duplex(1024);
+    (b, c)
+}

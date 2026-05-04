@@ -9,6 +9,37 @@ and on-disk formats.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-04
+
+### Added
+- `kernel/effect_broker`: full external-effect lifecycle — propose →
+  canonicalize → prepare → approve → commit-time revalidation → commit →
+  signed receipt — with `EffectClass` classification (`pure`,
+  `local_reversible`, `remote_reversible`, `compensatable`, `irreversible`,
+  `opaque_external`) and compensation support.
+- `connectors/github`: typed connector for repository metadata reads, branch
+  creation, draft pull requests, and issue/PR comments; merge, settings, and
+  admin operations are denied by default. Credentials live in the connector,
+  never in guests.
+- `connectors/http`: mediated egress with per-domain policy; GET is not assumed
+  pure — connectors declare operation semantics.
+- Secret broker: connector-held credentials, short-lived single-use tokens, and
+  placeholder substitution for guests.
+- Signed `Receipt` recording principal, operation, canonical arguments hash,
+  target resource, branch/step, policy version, authorization witness, external
+  response digest, and commit timestamp.
+- `examples/coding-agent-github`: end-to-end demo — fork three fix branches,
+  run tests, select the best, prepare a draft PR, human approves the exact
+  contract, commit with base-SHA revalidation.
+
+### Changed
+- `PendingEffect` phases are now an explicit typed state machine
+  (`Proposed`/`Prepared`/`Approved`/`Committed`/`Aborted`/`Compensated`).
+
+### Fixed
+- Canonicalization now sorts JSON object keys recursively so semantically equal
+  contracts hash identically.
+
 ## [0.2.0] - 2026-04-06
 
 ### Added

@@ -148,3 +148,30 @@ async fn manifest_constraints_are_enforced_before_forwarding() {
     let bad = contract("notes.echo", json!({"evil": true, "text": "hi"}), EffectClass::Pure);
     assert!(g.commit(&bad).await.is_err());
 }
+
+#[tokio::test]
+async fn prepare_refuses_unlisted_tools_and_foreign_operations() {
+    let g = gateway(true);
+    let c = contract("notes.nonexistent", json!({}), EffectClass::OpaqueExternal);
+    assert!(g.prepare(&c).await.is_err());
+    let foreign = contract("github.create_branch", json!({}), EffectClass::Compensatable);
+    assert!(g.prepare(&foreign).await.is_err());
+    assert!(g.canonicalize("github.create_branch", &json!({})).is_err());
+}
+
+#[test]
+fn manifest_signature_is_verified() {
+    let (m, pubkey) = signed_manifest();
+    assert!(m.verify_and_parse(&pubkey).is_ok());
+    // Tampered manifest fails.
+    let mut tampered = m.clone();
+    tampered.manifest_yaml = tampered.manifest_yaml.replace("pure", "irreversible");
+    assert!(tampered.verify_and_parse(&pubkey).is_err());
+    // Wrong key fails.
+    let other = SigningKey::generate(&mut rand::rngs::OsRng);
+    let other_pub = hex::encode(other.verifying_key().to_bytes());
+    assert!(m.verify_and_parse(&other_pub).is_err());
+    // Gateway construction refuses a bad manifest.
+    let (r, w) = spawn_test_server_sync();
+    assert!(McpGateway::from_streams("notes", r, w, Some((&tampered, &pubkey))).is_err());
+}

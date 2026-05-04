@@ -114,3 +114,37 @@ async fn tools_list_and_call_round_trip() {
     let result = g.commit(&c).await.expect("commit");
     assert_eq!(result.response["content"][0]["text"], "hi");
 }
+
+#[tokio::test]
+async fn undeclared_tools_default_to_opaque_external() {
+    let g = gateway(true);
+    assert_eq!(g.effect_class("delete_everything"), EffectClass::OpaqueExternal);
+    assert_eq!(g.effect_class("echo"), EffectClass::Pure);
+    // Without any manifest, everything is opaque and nothing is advertised.
+    let g2 = gateway(false);
+    assert_eq!(g2.effect_class("echo"), EffectClass::OpaqueExternal);
+    assert!(g2.operations().is_empty());
+    // Advertised ops carry the manifest classes.
+    let ops = g.operations();
+    assert_eq!(ops, vec![("notes.echo".to_string(), EffectClass::Pure)]);
+}
+
+#[tokio::test]
+async fn manifest_constraints_are_enforced_before_forwarding() {
+    let g = gateway(true);
+    // missing required param
+    assert!(g.canonicalize("notes.echo", &json!({})).is_err());
+    // wrong type
+    assert!(g.canonicalize("notes.echo", &json!({"text": 5})).is_err());
+    // undeclared param
+    assert!(g.canonicalize("notes.echo", &json!({"text": "hi", "evil": true})).is_err());
+    // value outside one_of
+    assert!(g.canonicalize("notes.echo", &json!({"text": "hi", "mode": "shout"})).is_err());
+    // over max_len
+    assert!(g.canonicalize("notes.echo", &json!({"text": "x".repeat(200)})).is_err());
+    // ok
+    assert!(g.canonicalize("notes.echo", &json!({"text": "hi", "mode": "loud"})).is_ok());
+    // commit re-enforces even if canonicalize was bypassed
+    let bad = contract("notes.echo", json!({"evil": true, "text": "hi"}), EffectClass::Pure);
+    assert!(g.commit(&bad).await.is_err());
+}

@@ -76,3 +76,41 @@ fn signed_manifest() -> (SignedManifest, String) {
         hex::encode(key.verifying_key().to_bytes()),
     )
 }
+
+fn gateway(with_manifest: bool) -> McpGateway {
+    let (r, w) = spawn_test_server();
+    if with_manifest {
+        let (m, pubkey) = signed_manifest();
+        McpGateway::from_streams("notes", r, w, Some((&m, &pubkey))).expect("gateway")
+    } else {
+        McpGateway::from_streams("notes", r, w, None).expect("gateway")
+    }
+}
+
+fn contract(op: &str, args: Value, class: EffectClass) -> EffectContract {
+    EffectContract {
+        operation: op.into(),
+        resource: "mcp://notes".into(),
+        arguments: args,
+        preconditions: json!({}),
+        idempotency_key: "k".into(),
+        class,
+    }
+}
+
+#[tokio::test]
+async fn tools_list_and_call_round_trip() {
+    let g = gateway(true);
+    let tools = g.list_tools().await.expect("list");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["name"], "echo");
+
+    let c = contract("notes.echo", json!({"text": "hi"}), EffectClass::Pure);
+    let prepared = g.prepare(&c).await.expect("prepare");
+    assert_eq!(prepared.observed_preconditions, json!({"tool_listed": true}));
+    assert_eq!(prepared.preview["declared_class"], "pure");
+    assert_eq!(prepared.preview["manifest_backed"], true);
+
+    let result = g.commit(&c).await.expect("commit");
+    assert_eq!(result.response["content"][0]["text"], "hi");
+}

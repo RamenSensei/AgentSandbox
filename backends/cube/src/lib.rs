@@ -27,3 +27,28 @@
 //! Profile: isolation_strength **90** (microVM), `supports_fork = true`
 //! (snapshot + clone), replay class `ProcessAndFilesystem` (snapshots capture
 //! the process tree and filesystem).
+
+use ak_core::action::ActionKind;
+use ak_core::budget::ResourceBudget;
+use ak_core::error::{KernelError, KernelResult};
+use ak_core::ids::{BranchId, StateId};
+use ak_core::replay::ReplayClass;
+use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+const BACKEND_NAME: &str = "cube";
+
+/// Configuration for [`CubeBackend`].
+#[derive(Debug, Clone)]
+pub struct CubeConfig {
+    /// Base URL of the Cube control plane, e.g. `https://api.cube.example`.
+    pub endpoint: String,
+    /// Bearer token. Prefer injecting via [`CubeConfig::from_env`].
+    pub auth_token: Option<String>,
+    /// Per-request HTTP timeout.
+    pub request_timeout: Duration,
+}

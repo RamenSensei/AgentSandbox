@@ -130,3 +130,114 @@ pub struct CubeClient {
     config: CubeConfig,
     http: reqwest::Client,
 }
+
+impl CubeClient {
+    pub fn new(config: CubeConfig) -> KernelResult<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(unavailable)?;
+        Ok(Self { config, http })
+    }
+
+    async fn post<B: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> KernelResult<R> {
+        let url = format!("{}{path}", self.config.endpoint.trim_end_matches('/'));
+        let mut req = self.http.post(&url).json(body);
+        if let Some(token) = &self.config.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(unavailable)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(unavailable(format!("{url} returned {status}: {text}")));
+        }
+        resp.json().await.map_err(unavailable)
+    }
+
+    pub async fn create_sandbox(&self, branch: &BranchId) -> KernelResult<String> {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("branch", branch.as_str());
+        let resp: CreateSandboxResponse =
+            self.post("/v1/sandboxes", &CreateSandboxRequest { metadata }).await?;
+        Ok(resp.sandbox_id)
+    }
+
+    pub async fn exec(
+        &self,
+        sandbox: &str,
+        command: &str,
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
+        timeout_ms: u64,
+    ) -> KernelResult<(i32, String, String, u64)> {
+        let resp: ExecResponse = self
+            .post(
+                &format!("/v1/sandboxes/{sandbox}/exec"),
+                &ExecRequest { command, cwd, env, timeout_ms },
+            )
+            .await?;
+        Ok((resp.exit_code, resp.stdout, resp.stderr, resp.duration_ms))
+    }
+
+    pub async fn write_file(&self, sandbox: &str, path: &str, contents_b64: &str) -> KernelResult<()> {
+        let _: serde_json::Value = self
+            .post(
+                &format!("/v1/sandboxes/{sandbox}/files/write"),
+                &FileWriteRequest { path, contents_b64 },
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn read_file(&self, sandbox: &str, path: &str) -> KernelResult<Vec<u8>> {
+        let resp: FileReadResponse = self
+            .post(&format!("/v1/sandboxes/{sandbox}/files/read"), &FilePathRequest { path })
+            .await?;
+        b64_decode(&resp.contents_b64)
+            .map_err(|e| unavailable(format!("service returned invalid base64: {e}")))
+    }
+
+    pub async fn delete_path(&self, sandbox: &str, path: &str) -> KernelResult<()> {
+        let _: serde_json::Value = self
+            .post(&format!("/v1/sandboxes/{sandbox}/files/delete"), &FilePathRequest { path })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn snapshot(&self, sandbox: &str) -> KernelResult<String> {
+        let resp: SnapshotResponse = self
+            .post(&format!("/v1/sandboxes/{sandbox}/snapshot"), &serde_json::json!({}))
+            .await?;
+        Ok(resp.snapshot_id)
+    }
+
+    pub async fn clone_snapshot(&self, snapshot: &str, branch: &BranchId) -> KernelResult<String> {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("branch", branch.as_str());
+        let resp: CreateSandboxResponse = self
+            .post(&format!("/v1/snapshots/{snapshot}/clone"), &CreateSandboxRequest { metadata })
+            .await?;
+        Ok(resp.sandbox_id)
+    }
+
+    pub async fn delete_sandbox(&self, sandbox: &str) -> KernelResult<()> {
+        let url = format!(
+            "{}/v1/sandboxes/{sandbox}",
+            self.config.endpoint.trim_end_matches('/')
+        );
+        let mut req = self.http.delete(&url);
+        if let Some(token) = &self.config.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(unavailable)?;
+        if !resp.status().is_success() {
+            return Err(unavailable(format!("{url} returned {}", resp.status())));
+        }
+        Ok(())
+    }
+}

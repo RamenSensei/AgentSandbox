@@ -103,3 +103,30 @@ struct FileWriteRequest<'a> {
     path: &'a str,
     contents_b64: &'a str,
 }
+
+#[derive(Debug, Serialize)]
+struct FilePathRequest<'a> {
+    path: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileReadResponse {
+    contents_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotResponse {
+    snapshot_id: String,
+}
+
+// ---- Client ----------------------------------------------------------------
+
+fn unavailable(reason: impl std::fmt::Display) -> KernelError {
+    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+}
+
+/// Typed HTTP client for the Cube control API.
+pub struct CubeClient {
+    config: CubeConfig,
+    http: reqwest::Client,
+}

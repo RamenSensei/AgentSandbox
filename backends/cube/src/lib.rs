@@ -241,3 +241,34 @@ impl CubeClient {
         Ok(())
     }
 }
+
+// ---- Backend ---------------------------------------------------------------
+
+/// Cube backend: routes actions to per-branch remote sandboxes and supports
+/// CoW fork via snapshot + clone.
+pub struct CubeBackend {
+    client: CubeClient,
+    /// Live sandbox per branch.
+    sandboxes: Mutex<HashMap<BranchId, String>>,
+    /// Sandbox that materialized each base state (for `fork`).
+    state_sandboxes: Mutex<HashMap<StateId, String>>,
+}
+
+impl CubeBackend {
+    pub fn new(config: CubeConfig) -> KernelResult<Self> {
+        Ok(Self {
+            client: CubeClient::new(config)?,
+            sandboxes: Mutex::new(HashMap::new()),
+            state_sandboxes: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn sandbox_for(&self, branch: &BranchId) -> KernelResult<String> {
+        if let Some(id) = self.sandboxes.lock().await.get(branch) {
+            return Ok(id.clone());
+        }
+        let id = self.client.create_sandbox(branch).await?;
+        self.sandboxes.lock().await.insert(branch.clone(), id.clone());
+        Ok(id)
+    }
+}

@@ -272,3 +272,88 @@ impl CubeBackend {
         Ok(id)
     }
 }
+
+#[async_trait]
+impl Backend for CubeBackend {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: BACKEND_NAME.into(),
+            isolation_strength: 90,
+            cold_start_ms: 250,
+            replay_class: ReplayClass::ProcessAndFilesystem,
+            supports_fork: true,
+            supports_gui: false,
+            full_linux: true,
+        }
+    }
+
+    async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        let sandbox = self.sandbox_for(&req.branch).await?;
+        let (exit_code, stdout, stderr, duration_ms) = match &req.action {
+            ActionKind::Shell { command, cwd, env } => {
+                self.client
+                    .exec(&sandbox, command, cwd.as_deref(), env, req.budget.cpu_ms.max(1))
+                    .await?
+            }
+            ActionKind::ReadFile { path } => {
+                let bytes = self.client.read_file(&sandbox, path).await?;
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                (0, text, String::new(), 0)
+            }
+            ActionKind::WriteFile { path, contents_b64 } => {
+                self.client.write_file(&sandbox, path, contents_b64).await?;
+                (0, String::new(), String::new(), 0)
+            }
+            ActionKind::DeletePath { path } => {
+                self.client.delete_path(&sandbox, path).await?;
+                (0, String::new(), String::new(), 0)
+            }
+            other => {
+                return Err(unavailable(format!(
+                    "cube backend does not execute `{}` actions",
+                    other.required_operation().0
+                )))
+            }
+        };
+        self.state_sandboxes
+            .lock()
+            .await
+            .insert(req.base_state.clone(), sandbox.clone());
+        let paths_written = match &req.action {
+            ActionKind::WriteFile { path, .. } => vec![path.clone()],
+            _ => Vec::new(),
+        };
+        let bytes = (stdout.len() + stderr.len()) as u64;
+        Ok(ExecutionOutcome {
+            exit_code,
+            stdout: stdout.into_bytes(),
+            stderr: stderr.into_bytes(),
+            usage: ResourceBudget {
+                cpu_ms: duration_ms,
+                network_bytes: bytes,
+                ..ResourceBudget::zero()
+            },
+            paths_written,
+            replay_class: ReplayClass::ProcessAndFilesystem,
+        })
+    }
+
+    /// Fork via snapshot + clone. Returns `Ok(false)` when the source state
+    /// is unknown to this backend (kernel then re-materializes from the CAS).
+    async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
+        let source = { self.state_sandboxes.lock().await.get(from).cloned() };
+        let Some(source) = source else { return Ok(false) };
+        let snapshot = self.client.snapshot(&source).await?;
+        let clone = self.client.clone_snapshot(&snapshot, to_branch).await?;
+        self.sandboxes.lock().await.insert(to_branch.clone(), clone);
+        Ok(true)
+    }
+
+    async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
+        let sandbox = { self.sandboxes.lock().await.remove(branch) };
+        if let Some(sandbox) = sandbox {
+            self.client.delete_sandbox(&sandbox).await?;
+        }
+        Ok(())
+    }
+}

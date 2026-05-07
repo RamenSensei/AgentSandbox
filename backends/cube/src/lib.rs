@@ -357,3 +357,38 @@ impl Backend for CubeBackend {
         Ok(())
     }
 }
+
+/// Minimal standard base64 decode (padding optional) for file reads.
+fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
+    fn val(c: u8) -> Result<u32, String> {
+        match c {
+            b'A'..=b'Z' => Ok(u32::from(c - b'A')),
+            b'a'..=b'z' => Ok(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Ok(u32::from(c - b'0') + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(format!("invalid base64 byte 0x{c:02x}")),
+        }
+    }
+    let cleaned: Vec<u8> =
+        input.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=').collect();
+    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
+    for chunk in cleaned.chunks(4) {
+        if chunk.len() == 1 {
+            return Err("truncated base64 input".into());
+        }
+        let mut n: u32 = 0;
+        for &c in chunk {
+            n = (n << 6) | val(c)?;
+        }
+        n <<= 6 * (4 - chunk.len()) as u32;
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Ok(out)
+}

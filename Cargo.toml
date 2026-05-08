@@ -8,6 +8,7 @@ members = [
     "kernel/effect_broker",
     "kernel/causal_ledger",
     "backends/cube",
+    "backends/forkd",
     "connectors/github",
     "connectors/http",
     "connectors/mcp",
@@ -28,6 +29,7 @@ ak-state-dag = { path = "kernel/state_dag" }
 ak-effect-broker = { path = "kernel/effect_broker" }
 ak-causal-ledger = { path = "kernel/causal_ledger" }
 ak-backend-cube = { path = "backends/cube" }
+ak-backend-forkd = { path = "backends/forkd" }
 ak-connector-github = { path = "connectors/github" }
 ak-connector-http = { path = "connectors/http" }
 ak-connector-mcp = { path = "connectors/mcp" }

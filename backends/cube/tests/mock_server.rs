@@ -78,3 +78,28 @@ async fn exec_happy_path() {
     assert!(String::from_utf8_lossy(&out.stdout).ends_with(":echo hi"));
     assert_eq!(out.usage.cpu_ms, 42);
 }
+
+#[tokio::test]
+async fn fork_snapshots_and_clones() {
+    let endpoint = spawn_mock().await;
+    let backend = Arc::new(CubeBackend::new(CubeConfig::new(endpoint)).unwrap());
+    // Unknown state: honest "no native fork" answer.
+    assert!(!backend.fork(&StateId("st-unknown".into()), &BranchId("br-x".into())).await.unwrap());
+    // Execute to register the state, then fork it.
+    backend.execute(shell_req("br-1", "st-42", "true")).await.unwrap();
+    let forked = backend.fork(&StateId("st-42".into()), &BranchId("br-2".into())).await.unwrap();
+    assert!(forked);
+    // The forked branch executes in the cloned sandbox.
+    let out = backend.execute(shell_req("br-2", "st-43", "pwd")).await.unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("clone-from-snap-of-"));
+}
+
+#[tokio::test]
+async fn unreachable_endpoint_maps_to_backend_unavailable() {
+    let backend = CubeBackend::new(CubeConfig::new("http://127.0.0.1:1")).unwrap();
+    let err = backend.execute(shell_req("br-1", "st-1", "true")).await.unwrap_err();
+    match err {
+        KernelError::BackendUnavailable { backend, .. } => assert_eq!(backend, "cube"),
+        other => panic!("expected BackendUnavailable, got {other:?}"),
+    }
+}

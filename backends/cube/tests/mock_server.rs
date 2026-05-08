@@ -55,3 +55,26 @@ async fn spawn_mock() -> String {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}")
 }
+
+fn shell_req(branch: &str, state: &str, cmd: &str) -> ExecutionRequest {
+    ExecutionRequest {
+        branch: BranchId(branch.into()),
+        base_state: StateId(state.into()),
+        actor: PrincipalId("pr-t".into()),
+        action: ActionKind::Shell { command: cmd.into(), cwd: None, env: BTreeMap::new() },
+        budget: ResourceBudget::step_default(),
+        writable_prefixes: vec![],
+        readable_prefixes: vec![],
+        egress_domains: vec![],
+    }
+}
+
+#[tokio::test]
+async fn exec_happy_path() {
+    let endpoint = spawn_mock().await;
+    let backend = CubeBackend::new(CubeConfig::new(endpoint)).unwrap();
+    let out = backend.execute(shell_req("br-1", "st-1", "echo hi")).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert!(String::from_utf8_lossy(&out.stdout).ends_with(":echo hi"));
+    assert_eq!(out.usage.cpu_ms, 42);
+}

@@ -103,3 +103,24 @@ async fn unreachable_endpoint_maps_to_backend_unavailable() {
         other => panic!("expected BackendUnavailable, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn http_error_status_maps_to_backend_unavailable() {
+    // Mock that always answers 500.
+    let app = Router::new().route(
+        "/v1/sandboxes",
+        post(|| async {
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let backend = CubeBackend::new(CubeConfig::new(format!("http://{addr}"))).unwrap();
+    let err = backend.execute(shell_req("br-1", "st-1", "true")).await.unwrap_err();
+    match err {
+        KernelError::BackendUnavailable { reason, .. } => assert!(reason.contains("500")),
+        other => panic!("expected BackendUnavailable, got {other:?}"),
+    }
+}

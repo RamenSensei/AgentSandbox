@@ -49,3 +49,28 @@ pub struct ForkdConfig {
     /// Per-request HTTP timeout.
     pub request_timeout: Duration,
 }
+
+impl ForkdConfig {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self { endpoint: endpoint.into(), auth_token: None, request_timeout: Duration::from_secs(30) }
+    }
+
+    /// Read the auth token from `FORKD_API_TOKEN` in the environment.
+    pub fn from_env(endpoint: impl Into<String>) -> Self {
+        let mut c = Self::new(endpoint);
+        c.auth_token = std::env::var("FORKD_API_TOKEN").ok();
+        c
+    }
+}
+
+// ---- Wire DTOs -------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ParentResponse {
+    parent_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkRequest<'a> {
+    branch: &'a str,
+}

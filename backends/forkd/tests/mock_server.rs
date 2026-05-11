@@ -51,3 +51,30 @@ async fn spawn_mock() -> String {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}")
 }
+
+fn shell_req(branch: &str, state: &str, cmd: &str) -> ExecutionRequest {
+    ExecutionRequest {
+        branch: BranchId(branch.into()),
+        base_state: StateId(state.into()),
+        actor: PrincipalId("pr-t".into()),
+        action: ActionKind::Shell { command: cmd.into(), cwd: None, env: BTreeMap::new() },
+        budget: ResourceBudget::step_default(),
+        writable_prefixes: vec![],
+        readable_prefixes: vec![],
+        egress_domains: vec![],
+    }
+}
+
+#[tokio::test]
+async fn exec_forks_a_child_from_the_warm_parent() {
+    let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
+    let out = backend.execute(shell_req("br-1", "st-1", "uname")).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(stdout.contains("of-p-warm") && stdout.ends_with("|uname"), "{stdout}");
+    assert_eq!(out.usage.cpu_ms, 7);
+    // Same branch reuses the same child.
+    let again = backend.execute(shell_req("br-1", "st-2", "id")).await.unwrap();
+    let stdout2 = String::from_utf8_lossy(&again.stdout).into_owned();
+    assert_eq!(stdout.split('|').next(), stdout2.split('|').next());
+}

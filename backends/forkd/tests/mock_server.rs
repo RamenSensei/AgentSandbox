@@ -78,3 +78,34 @@ async fn exec_forks_a_child_from_the_warm_parent() {
     let stdout2 = String::from_utf8_lossy(&again.stdout).into_owned();
     assert_eq!(stdout.split('|').next(), stdout2.split('|').next());
 }
+
+#[tokio::test]
+async fn fork_fans_out_a_live_child() {
+    let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
+    assert!(!backend.fork(&StateId("st-nope".into()), &BranchId("br-b".into())).await.unwrap());
+    backend.execute(shell_req("br-a", "st-9", "true")).await.unwrap();
+    assert!(backend.fork(&StateId("st-9".into()), &BranchId("br-b".into())).await.unwrap());
+    let out = backend.execute(shell_req("br-b", "st-10", "hostname")).await.unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("cow-of-c-"));
+}
+
+#[tokio::test]
+async fn write_file_is_translated_to_a_shell_exec() {
+    let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
+    let mut r = shell_req("br-1", "st-1", "");
+    r.action = ActionKind::WriteFile { path: "a/b.txt".into(), contents_b64: "aGk=".into() };
+    let out = backend.execute(r).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.paths_written, vec!["a/b.txt".to_string()]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("base64 -d"));
+}
+
+#[tokio::test]
+async fn unreachable_endpoint_maps_to_backend_unavailable() {
+    let backend = ForkdBackend::new(ForkdConfig::new("http://127.0.0.1:1")).unwrap();
+    let err = backend.execute(shell_req("br-1", "st-1", "true")).await.unwrap_err();
+    match err {
+        KernelError::BackendUnavailable { backend, .. } => assert_eq!(backend, "forkd"),
+        other => panic!("expected BackendUnavailable, got {other:?}"),
+    }
+}

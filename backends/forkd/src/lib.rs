@@ -99,3 +99,105 @@ struct ExecResponse {
     #[serde(default)]
     duration_ms: u64,
 }
+
+fn unavailable(reason: impl std::fmt::Display) -> KernelError {
+    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+}
+
+/// POSIX single-quote a string for safe embedding in `sh -c`.
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+// ---- Client ----------------------------------------------------------------
+
+/// Typed HTTP client for the forkd control API.
+pub struct ForkdClient {
+    config: ForkdConfig,
+    http: reqwest::Client,
+}
+
+impl ForkdClient {
+    pub fn new(config: ForkdConfig) -> KernelResult<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(unavailable)?;
+        Ok(Self { config, http })
+    }
+
+    async fn post<B: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> KernelResult<R> {
+        let url = format!("{}{path}", self.config.endpoint.trim_end_matches('/'));
+        let mut req = self.http.post(&url).json(body);
+        if let Some(token) = &self.config.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(unavailable)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(unavailable(format!("{url} returned {status}: {text}")));
+        }
+        resp.json().await.map_err(unavailable)
+    }
+
+    /// Ensure a warm parent exists; idempotent on the service side.
+    pub async fn ensure_parent(&self) -> KernelResult<String> {
+        let resp: ParentResponse = self.post("/v1/parents", &serde_json::json!({})).await?;
+        Ok(resp.parent_id)
+    }
+
+    pub async fn fork_parent(&self, parent: &str, branch: &BranchId) -> KernelResult<String> {
+        let resp: ForkResponse = self
+            .post(&format!("/v1/parents/{parent}/fork"), &ForkRequest { branch: branch.as_str() })
+            .await?;
+        Ok(resp.child_id)
+    }
+
+    pub async fn fork_child(&self, child: &str, branch: &BranchId) -> KernelResult<String> {
+        let resp: ForkResponse = self
+            .post(&format!("/v1/children/{child}/fork"), &ForkRequest { branch: branch.as_str() })
+            .await?;
+        Ok(resp.child_id)
+    }
+
+    pub async fn exec(
+        &self,
+        child: &str,
+        command: &str,
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
+        timeout_ms: u64,
+    ) -> KernelResult<ExecOutcome> {
+        let resp: ExecResponse = self
+            .post(
+                &format!("/v1/children/{child}/exec"),
+                &ExecRequest { command, cwd, env, timeout_ms },
+            )
+            .await?;
+        Ok(ExecOutcome {
+            exit_code: resp.exit_code,
+            stdout: resp.stdout,
+            stderr: resp.stderr,
+            duration_ms: resp.duration_ms,
+        })
+    }
+
+    pub async fn delete_child(&self, child: &str) -> KernelResult<()> {
+        let url =
+            format!("{}/v1/children/{child}", self.config.endpoint.trim_end_matches('/'));
+        let mut req = self.http.delete(&url);
+        if let Some(token) = &self.config.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(unavailable)?;
+        if !resp.status().is_success() {
+            return Err(unavailable(format!("{url} returned {}", resp.status())));
+        }
+        Ok(())
+    }
+}

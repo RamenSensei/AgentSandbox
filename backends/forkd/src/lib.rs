@@ -251,3 +251,89 @@ impl ForkdBackend {
         Ok(child)
     }
 }
+
+#[async_trait]
+impl Backend for ForkdBackend {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: BACKEND_NAME.into(),
+            isolation_strength: 90,
+            cold_start_ms: 15,
+            replay_class: ReplayClass::ProcessAndFilesystem,
+            supports_fork: true,
+            supports_gui: false,
+            full_linux: true,
+        }
+    }
+
+    async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        let child = self.child_for(&req.branch).await?;
+        let timeout_ms = req.budget.cpu_ms.max(1);
+        let empty = BTreeMap::new();
+        let out = match &req.action {
+            ActionKind::Shell { command, cwd, env } => {
+                self.client.exec(&child, command, cwd.as_deref(), env, timeout_ms).await?
+            }
+            ActionKind::ReadFile { path } => {
+                self.client
+                    .exec(&child, &format!("cat {}", shq(path)), None, &empty, timeout_ms)
+                    .await?
+            }
+            ActionKind::WriteFile { path, contents_b64 } => {
+                let cmd = format!(
+                    "mkdir -p \"$(dirname {p})\" && printf %s {b} | base64 -d > {p}",
+                    p = shq(path),
+                    b = shq(contents_b64)
+                );
+                self.client.exec(&child, &cmd, None, &empty, timeout_ms).await?
+            }
+            ActionKind::DeletePath { path } => {
+                self.client
+                    .exec(&child, &format!("rm -rf -- {}", shq(path)), None, &empty, timeout_ms)
+                    .await?
+            }
+            other => {
+                return Err(unavailable(format!(
+                    "forkd backend does not execute `{}` actions",
+                    other.required_operation().0
+                )))
+            }
+        };
+        self.state_children.lock().await.insert(req.base_state.clone(), child);
+        let paths_written = match &req.action {
+            ActionKind::WriteFile { path, .. } => vec![path.clone()],
+            _ => Vec::new(),
+        };
+        let bytes = (out.stdout.len() + out.stderr.len()) as u64;
+        Ok(ExecutionOutcome {
+            exit_code: out.exit_code,
+            stdout: out.stdout.into_bytes(),
+            stderr: out.stderr.into_bytes(),
+            usage: ResourceBudget {
+                cpu_ms: out.duration_ms,
+                network_bytes: bytes,
+                ..ResourceBudget::zero()
+            },
+            paths_written,
+            replay_class: ReplayClass::ProcessAndFilesystem,
+        })
+    }
+
+    /// CoW fan-out: fork the live child that produced `from`. Returns
+    /// `Ok(false)` when that state is unknown to this backend.
+    async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
+        let source = { self.state_children.lock().await.get(from).cloned() };
+        let Some(source) = source else { return Ok(false) };
+        let child = self.client.fork_child(&source, to_branch).await?;
+        self.children.lock().await.insert(to_branch.clone(), child);
+        Ok(true)
+    }
+
+    async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
+        let child = { self.children.lock().await.remove(branch) };
+        if let Some(child) = child {
+            self.client.delete_child(&child).await?;
+        }
+        Ok(())
+    }
+}

@@ -201,3 +201,53 @@ impl ForkdClient {
         Ok(())
     }
 }
+
+/// Result of a remote exec.
+#[derive(Debug, Clone)]
+pub struct ExecOutcome {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+}
+
+// ---- Backend ---------------------------------------------------------------
+
+/// forkd backend: one CoW child per branch, forked from a warm parent.
+pub struct ForkdBackend {
+    client: ForkdClient,
+    parent: Mutex<Option<String>>,
+    children: Mutex<HashMap<BranchId, String>>,
+    state_children: Mutex<HashMap<StateId, String>>,
+}
+
+impl ForkdBackend {
+    pub fn new(config: ForkdConfig) -> KernelResult<Self> {
+        Ok(Self {
+            client: ForkdClient::new(config)?,
+            parent: Mutex::new(None),
+            children: Mutex::new(HashMap::new()),
+            state_children: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn child_for(&self, branch: &BranchId) -> KernelResult<String> {
+        if let Some(id) = self.children.lock().await.get(branch) {
+            return Ok(id.clone());
+        }
+        let parent = {
+            let mut guard = self.parent.lock().await;
+            match guard.as_ref() {
+                Some(p) => p.clone(),
+                None => {
+                    let p = self.client.ensure_parent().await?;
+                    *guard = Some(p.clone());
+                    p
+                }
+            }
+        };
+        let child = self.client.fork_parent(&parent, branch).await?;
+        self.children.lock().await.insert(branch.clone(), child.clone());
+        Ok(child)
+    }
+}

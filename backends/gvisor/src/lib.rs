@@ -21,3 +21,30 @@
 //! Profile: isolation_strength **70** (user-space kernel, syscall
 //! interception), `supports_fork = false` (runsc has no CoW container fork),
 //! replay class [`ReplayClass::FilesystemOnly`].
+
+use ak_core::action::ActionKind;
+use ak_core::budget::ResourceBudget;
+use ak_core::error::{KernelError, KernelResult};
+use ak_core::ids::BranchId;
+use ak_core::replay::ReplayClass;
+use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+const BACKEND_NAME: &str = "gvisor";
+
+/// Configuration for [`GvisorBackend`].
+#[derive(Debug, Clone)]
+pub struct GvisorConfig {
+    /// Base URL of the runsc host's control API.
+    pub endpoint: String,
+    /// Bearer token. Prefer injecting via [`GvisorConfig::from_env`].
+    pub auth_token: Option<String>,
+    /// Container image to launch for new branches, if the host requires one.
+    pub image: Option<String>,
+    /// Per-request HTTP timeout.
+    pub request_timeout: Duration,
+}

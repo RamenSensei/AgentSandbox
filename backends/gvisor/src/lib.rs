@@ -48,3 +48,28 @@ pub struct GvisorConfig {
     /// Per-request HTTP timeout.
     pub request_timeout: Duration,
 }
+
+impl GvisorConfig {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            auth_token: None,
+            image: None,
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Read the auth token from `GVISOR_API_TOKEN` in the environment.
+    pub fn from_env(endpoint: impl Into<String>) -> Self {
+        let mut c = Self::new(endpoint);
+        c.auth_token = std::env::var("GVISOR_API_TOKEN").ok();
+        c
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CreateContainerRequest<'a> {
+    branch: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<&'a str>,
+}

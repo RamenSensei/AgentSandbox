@@ -73,3 +73,28 @@ struct CreateContainerRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     image: Option<&'a str>,
 }
+
+#[derive(Debug, Deserialize)]
+struct CreateContainerResponse {
+    container_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecRequest<'a> {
+    command: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a str>,
+    env: &'a BTreeMap<String, String>,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecResponse {
+    exit_code: i32,
+    #[serde(default)]
+    stdout: String,
+    #[serde(default)]
+    stderr: String,
+    #[serde(default)]
+    duration_ms: u64,
+}

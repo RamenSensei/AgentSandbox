@@ -98,3 +98,87 @@ struct ExecResponse {
     #[serde(default)]
     duration_ms: u64,
 }
+
+fn unavailable(reason: impl std::fmt::Display) -> KernelError {
+    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+}
+
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Typed HTTP client for the runsc host control API.
+pub struct GvisorClient {
+    config: GvisorConfig,
+    http: reqwest::Client,
+}
+
+impl GvisorClient {
+    pub fn new(config: GvisorConfig) -> KernelResult<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(unavailable)?;
+        Ok(Self { config, http })
+    }
+
+    async fn post<B: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> KernelResult<R> {
+        let url = format!("{}{path}", self.config.endpoint.trim_end_matches('/'));
+        let mut req = self.http.post(&url).json(body);
+        if let Some(token) = &self.config.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(unavailable)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(unavailable(format!("{url} returned {status}: {text}")));
+        }
+        resp.json().await.map_err(unavailable)
+    }
+
+    pub async fn create_container(&self, branch: &BranchId) -> KernelResult<String> {
+        let resp: CreateContainerResponse = self
+            .post(
+                "/v1/containers",
+                &CreateContainerRequest { branch: branch.as_str(), image: self.config.image.as_deref() },
+            )
+            .await?;
+        Ok(resp.container_id)
+    }
+
+    pub async fn exec(
+        &self,
+        container: &str,
+        command: &str,
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
+        timeout_ms: u64,
+    ) -> KernelResult<(i32, String, String, u64)> {
+        let resp: ExecResponse = self
+            .post(
+                &format!("/v1/containers/{container}/exec"),
+                &ExecRequest { command, cwd, env, timeout_ms },
+            )
+            .await?;
+        Ok((resp.exit_code, resp.stdout, resp.stderr, resp.duration_ms))
+    }
+
+    pub async fn delete_container(&self, container: &str) -> KernelResult<()> {
+        let url =
+            format!("{}/v1/containers/{container}", self.config.endpoint.trim_end_matches('/'));
+        let mut req = self.http.delete(&url);
+        if let Some(token) = &self.config.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(unavailable)?;
+        if !resp.status().is_success() {
+            return Err(unavailable(format!("{url} returned {}", resp.status())));
+        }
+        Ok(())
+    }
+}

@@ -278,3 +278,40 @@ impl Backend for GvisorBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unreachable_endpoint_maps_to_backend_unavailable() {
+        let b = GvisorBackend::new(GvisorConfig::new("http://127.0.0.1:1")).unwrap();
+        let err = b
+            .execute(ExecutionRequest {
+                branch: BranchId("br-1".into()),
+                base_state: ak_core::ids::StateId("st-1".into()),
+                actor: ak_core::ids::PrincipalId("pr-1".into()),
+                action: ActionKind::Shell {
+                    command: "true".into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
+                budget: ResourceBudget::step_default(),
+                writable_prefixes: vec![],
+                readable_prefixes: vec![],
+                egress_domains: vec![],
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, KernelError::BackendUnavailable { .. }));
+    }
+
+    #[test]
+    fn profile_is_honest() {
+        let b = GvisorBackend::new(GvisorConfig::new("http://localhost:9999")).unwrap();
+        let p = b.profile();
+        assert_eq!(p.isolation_strength, 70);
+        assert!(!p.supports_fork);
+        assert_eq!(p.replay_class, ReplayClass::FilesystemOnly);
+    }
+}

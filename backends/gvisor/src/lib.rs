@@ -182,3 +182,99 @@ impl GvisorClient {
         Ok(())
     }
 }
+
+/// gVisor backend: one runsc container per branch.
+pub struct GvisorBackend {
+    client: GvisorClient,
+    containers: Mutex<HashMap<BranchId, String>>,
+}
+
+impl GvisorBackend {
+    pub fn new(config: GvisorConfig) -> KernelResult<Self> {
+        Ok(Self { client: GvisorClient::new(config)?, containers: Mutex::new(HashMap::new()) })
+    }
+
+    async fn container_for(&self, branch: &BranchId) -> KernelResult<String> {
+        if let Some(id) = self.containers.lock().await.get(branch) {
+            return Ok(id.clone());
+        }
+        let id = self.client.create_container(branch).await?;
+        self.containers.lock().await.insert(branch.clone(), id.clone());
+        Ok(id)
+    }
+}
+
+#[async_trait]
+impl Backend for GvisorBackend {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: BACKEND_NAME.into(),
+            isolation_strength: 70,
+            cold_start_ms: 120,
+            replay_class: ReplayClass::FilesystemOnly,
+            supports_fork: false,
+            supports_gui: false,
+            full_linux: true,
+        }
+    }
+
+    async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        let container = self.container_for(&req.branch).await?;
+        let timeout_ms = req.budget.cpu_ms.max(1);
+        let empty = BTreeMap::new();
+        let (exit_code, stdout, stderr, duration_ms) = match &req.action {
+            ActionKind::Shell { command, cwd, env } => {
+                self.client.exec(&container, command, cwd.as_deref(), env, timeout_ms).await?
+            }
+            ActionKind::ReadFile { path } => {
+                self.client
+                    .exec(&container, &format!("cat {}", shq(path)), None, &empty, timeout_ms)
+                    .await?
+            }
+            ActionKind::WriteFile { path, contents_b64 } => {
+                let cmd = format!(
+                    "mkdir -p \"$(dirname {p})\" && printf %s {b} | base64 -d > {p}",
+                    p = shq(path),
+                    b = shq(contents_b64)
+                );
+                self.client.exec(&container, &cmd, None, &empty, timeout_ms).await?
+            }
+            ActionKind::DeletePath { path } => {
+                self.client
+                    .exec(&container, &format!("rm -rf -- {}", shq(path)), None, &empty, timeout_ms)
+                    .await?
+            }
+            other => {
+                return Err(unavailable(format!(
+                    "gvisor backend does not execute `{}` actions",
+                    other.required_operation().0
+                )))
+            }
+        };
+        let paths_written = match &req.action {
+            ActionKind::WriteFile { path, .. } => vec![path.clone()],
+            _ => Vec::new(),
+        };
+        let bytes = (stdout.len() + stderr.len()) as u64;
+        Ok(ExecutionOutcome {
+            exit_code,
+            stdout: stdout.into_bytes(),
+            stderr: stderr.into_bytes(),
+            usage: ResourceBudget {
+                cpu_ms: duration_ms,
+                network_bytes: bytes,
+                ..ResourceBudget::zero()
+            },
+            paths_written,
+            replay_class: ReplayClass::FilesystemOnly,
+        })
+    }
+
+    async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
+        let container = { self.containers.lock().await.remove(branch) };
+        if let Some(container) = container {
+            self.client.delete_container(&container).await?;
+        }
+        Ok(())
+    }
+}

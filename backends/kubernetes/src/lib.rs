@@ -25,3 +25,39 @@
 //! router must never guess, [`KubernetesConfig::isolation_strength`] is an
 //! explicit configuration input supplied alongside the runtime class.
 //! `supports_fork = false` (no CoW sandbox cloning in the CRD).
+
+use ak_core::action::ActionKind;
+use ak_core::budget::ResourceBudget;
+use ak_core::error::{KernelError, KernelResult};
+use ak_core::ids::BranchId;
+use ak_core::replay::ReplayClass;
+use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+const BACKEND_NAME: &str = "kubernetes";
+const API_BASE: &str = "/apis/agents.x-k8s.io/v1alpha1";
+
+/// Configuration for [`KubernetesBackend`].
+#[derive(Debug, Clone)]
+pub struct KubernetesConfig {
+    /// API server base URL, e.g. `https://kube-apiserver:6443`.
+    pub endpoint: String,
+    /// Bearer token (service account). Prefer [`KubernetesConfig::from_env`].
+    pub auth_token: Option<String>,
+    /// Namespace in which sandboxes are created.
+    pub namespace: String,
+    /// `runtimeClassName` for sandbox pods (e.g. `gvisor`, `kata`).
+    pub runtime_class: Option<String>,
+    /// Pod image for the sandbox.
+    pub image: String,
+    /// Isolation strength advertised to the router. MUST match the configured
+    /// runtime class; there is no safe default guess, so callers set it
+    /// explicitly (see crate docs for suggested values).
+    pub isolation_strength: u8,
+    /// Per-request HTTP timeout.
+    pub request_timeout: Duration,
+}

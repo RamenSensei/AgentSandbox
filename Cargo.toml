@@ -10,6 +10,7 @@ members = [
     "backends/cube",
     "backends/forkd",
     "backends/gvisor",
+    "backends/kubernetes",
     "connectors/github",
     "connectors/http",
     "connectors/mcp",
@@ -32,6 +33,7 @@ ak-causal-ledger = { path = "kernel/causal_ledger" }
 ak-backend-cube = { path = "backends/cube" }
 ak-backend-forkd = { path = "backends/forkd" }
 ak-backend-gvisor = { path = "backends/gvisor" }
+ak-backend-kubernetes = { path = "backends/kubernetes" }
 ak-connector-github = { path = "connectors/github" }
 ak-connector-http = { path = "connectors/http" }
 ak-connector-mcp = { path = "connectors/mcp" }

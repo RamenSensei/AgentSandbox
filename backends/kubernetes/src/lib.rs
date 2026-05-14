@@ -61,3 +61,26 @@ pub struct KubernetesConfig {
     /// Per-request HTTP timeout.
     pub request_timeout: Duration,
 }
+
+impl KubernetesConfig {
+    pub fn new(endpoint: impl Into<String>, isolation_strength: u8) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            auth_token: None,
+            namespace: "default".into(),
+            runtime_class: None,
+            image: "ghcr.io/agent-kernel/sandbox:latest".into(),
+            isolation_strength,
+            request_timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Read the auth token from `KUBERNETES_API_TOKEN` in the environment.
+    pub fn from_env(endpoint: impl Into<String>, isolation_strength: u8) -> Self {
+        let mut c = Self::new(endpoint, isolation_strength);
+        c.auth_token = std::env::var("KUBERNETES_API_TOKEN").ok();
+        c
+    }
+}
+
+// ---- Wire DTOs -------------------------------------------------------------

@@ -109,3 +109,35 @@ struct SandboxSpec<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime_class_name: Option<&'a str>,
 }
+
+#[derive(Debug, Deserialize)]
+struct SandboxObject {
+    metadata: SandboxObjectMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+struct SandboxObjectMetadata {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecRequest<'a> {
+    command: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a str>,
+    env: &'a BTreeMap<String, String>,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecResponse {
+    exit_code: i32,
+    #[serde(default)]
+    stdout: String,
+    #[serde(default)]
+    stderr: String,
+    #[serde(default)]
+    duration_ms: u64,
+}

@@ -237,3 +237,32 @@ impl KubernetesClient {
         Ok(())
     }
 }
+
+// ---- Backend ---------------------------------------------------------------
+
+/// Kubernetes Sandbox-CRD backend: one Sandbox object per branch.
+pub struct KubernetesBackend {
+    client: KubernetesClient,
+    isolation_strength: u8,
+    sandboxes: Mutex<HashMap<BranchId, String>>,
+}
+
+impl KubernetesBackend {
+    pub fn new(config: KubernetesConfig) -> KernelResult<Self> {
+        let isolation_strength = config.isolation_strength;
+        Ok(Self {
+            client: KubernetesClient::new(config)?,
+            isolation_strength,
+            sandboxes: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn sandbox_for(&self, branch: &BranchId) -> KernelResult<String> {
+        if let Some(name) = self.sandboxes.lock().await.get(branch) {
+            return Ok(name.clone());
+        }
+        let name = self.client.create_sandbox(branch).await?;
+        self.sandboxes.lock().await.insert(branch.clone(), name.clone());
+        Ok(name)
+    }
+}

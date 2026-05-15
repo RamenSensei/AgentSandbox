@@ -84,3 +84,28 @@ impl KubernetesConfig {
 }
 
 // ---- Wire DTOs -------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxManifest<'a> {
+    api_version: &'static str,
+    kind: &'static str,
+    metadata: SandboxMetadata<'a>,
+    spec: SandboxSpec<'a>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SandboxMetadata<'a> {
+    #[serde(rename = "generateName", skip_serializing_if = "Option::is_none")]
+    generate_name: Option<&'a str>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSpec<'a> {
+    image: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_class_name: Option<&'a str>,
+}

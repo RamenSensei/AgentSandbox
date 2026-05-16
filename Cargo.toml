@@ -7,6 +7,7 @@ members = [
     "kernel/state_dag",
     "kernel/effect_broker",
     "kernel/causal_ledger",
+    "backends/local",
     "backends/cube",
     "backends/forkd",
     "backends/gvisor",
@@ -30,6 +31,7 @@ ak-policy = { path = "kernel/policy" }
 ak-state-dag = { path = "kernel/state_dag" }
 ak-effect-broker = { path = "kernel/effect_broker" }
 ak-causal-ledger = { path = "kernel/causal_ledger" }
+ak-backend-local = { path = "backends/local" }
 ak-backend-cube = { path = "backends/cube" }
 ak-backend-forkd = { path = "backends/forkd" }
 ak-backend-gvisor = { path = "backends/gvisor" }

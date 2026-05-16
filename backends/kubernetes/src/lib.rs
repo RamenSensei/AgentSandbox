@@ -342,3 +342,43 @@ impl Backend for KubernetesBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolation_is_parameterized_by_config() {
+        for strength in [40u8, 70, 90] {
+            let b = KubernetesBackend::new(KubernetesConfig::new("http://localhost:6443", strength))
+                .unwrap();
+            assert_eq!(b.profile().isolation_strength, strength);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_api_server_maps_to_backend_unavailable() {
+        let b = KubernetesBackend::new(KubernetesConfig::new("http://127.0.0.1:1", 70)).unwrap();
+        let err = b
+            .execute(ExecutionRequest {
+                branch: BranchId("br-1".into()),
+                base_state: ak_core::ids::StateId("st-1".into()),
+                actor: ak_core::ids::PrincipalId("pr-1".into()),
+                action: ActionKind::Shell {
+                    command: "true".into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
+                budget: ResourceBudget::step_default(),
+                writable_prefixes: vec![],
+                readable_prefixes: vec![],
+                egress_domains: vec![],
+            })
+            .await
+            .unwrap_err();
+        match err {
+            KernelError::BackendUnavailable { backend, .. } => assert_eq!(backend, "kubernetes"),
+            other => panic!("expected BackendUnavailable, got {other:?}"),
+        }
+    }
+}

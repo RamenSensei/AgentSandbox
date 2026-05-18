@@ -93,3 +93,28 @@ impl LocalBackend {
         Ok(dir)
     }
 }
+
+/// Runtime bubblewrap detection (Linux only; always `false` elsewhere).
+fn detect_bwrap() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    std::process::Command::new("bwrap")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn denial(code: DenialCode, op: &str, reason: impl Into<String>) -> KernelError {
+    KernelError::Denied(Box::new(Denial {
+        code,
+        attempted_operation: Operation::new(op),
+        reason: reason.into(),
+        safe_alternatives: Vec::new(),
+        requestable_scopes: Vec::new(),
+        escalation_allowed: false,
+    }))
+}

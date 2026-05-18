@@ -26,3 +26,31 @@
 //!
 //! Replay class: [`ReplayClass::FilesystemOnly`] — the workspace tree is the
 //! only state this backend can faithfully restore.
+
+use ak_core::action::ActionKind;
+use ak_core::budget::ResourceBudget;
+use ak_core::capability::Operation;
+use ak_core::denial::{Denial, DenialCode};
+use ak_core::error::{KernelError, KernelResult};
+use ak_core::ids::BranchId;
+use ak_core::replay::ReplayClass;
+use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
+use async_trait::async_trait;
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+pub mod b64;
+
+/// Configuration for [`LocalBackend`].
+#[derive(Debug, Clone)]
+pub struct LocalBackendConfig {
+    /// Root directory under which per-branch workspaces are created.
+    pub root: PathBuf,
+    /// Maximum bytes of stdout/stderr retained per stream.
+    pub max_capture_bytes: usize,
+    /// Timeout used when `budget.cpu_ms` is zero would otherwise mean
+    /// "no time at all"; a zero budget is refused, this is only a hard upper
+    /// clamp on very large budgets.
+    pub max_wall_clock: Duration,
+}

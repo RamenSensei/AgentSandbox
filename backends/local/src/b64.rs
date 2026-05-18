@@ -54,3 +54,16 @@ pub fn decode(input: &str) -> Result<Vec<u8>, String> {
     }
     Ok(out)
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn round_trip() {
+        for case in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", b"\x00\xff\x10"] {
+            assert_eq!(decode(&encode(case)).unwrap(), case, "case {case:?}");
+        }
+        assert_eq!(encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(encode(b"foo"), "Zm9v");
+        assert_eq!(encode(b"fo"), "Zm8=");
+    }
+}

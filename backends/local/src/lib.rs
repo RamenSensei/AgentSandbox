@@ -54,3 +54,42 @@ pub struct LocalBackendConfig {
     /// clamp on very large budgets.
     pub max_wall_clock: Duration,
 }
+
+impl LocalBackendConfig {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            max_capture_bytes: 1 << 20,
+            max_wall_clock: Duration::from_secs(600),
+        }
+    }
+}
+
+/// Local OS-sandbox backend. See the crate docs for the confinement model.
+pub struct LocalBackend {
+    config: LocalBackendConfig,
+    /// Whether `bwrap` was found on this host (Linux only, runtime-detected).
+    bwrap: bool,
+}
+
+impl LocalBackend {
+    /// Create the backend, ensuring the workspace root exists and probing for
+    /// bubblewrap on Linux.
+    pub fn new(config: LocalBackendConfig) -> KernelResult<Self> {
+        std::fs::create_dir_all(&config.root)?;
+        let bwrap = detect_bwrap();
+        Ok(Self { config, bwrap })
+    }
+
+    /// Whether shell commands will be wrapped in bubblewrap.
+    pub fn uses_bwrap(&self) -> bool {
+        self.bwrap
+    }
+
+    /// The workspace directory for a branch, created on demand.
+    pub fn workspace_for(&self, branch: &BranchId) -> KernelResult<PathBuf> {
+        let dir = self.config.root.join(branch.as_str());
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+}

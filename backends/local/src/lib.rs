@@ -118,3 +118,34 @@ fn denial(code: DenialCode, op: &str, reason: impl Into<String>) -> KernelError 
         escalation_allowed: false,
     }))
 }
+
+/// Normalize a workspace-relative path: reject absolute paths, `..`
+/// components, and empty paths. Returns the normalized relative `PathBuf`.
+fn normalize_relative(op: &str, raw: &str) -> KernelResult<PathBuf> {
+    let p = Path::new(raw);
+    if p.as_os_str().is_empty() {
+        return Err(denial(DenialCode::ConstraintViolated, op, "empty path"));
+    }
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Normal(c) => out.push(c),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(denial(
+                    DenialCode::ConstraintViolated,
+                    op,
+                    format!("path `{raw}` contains `..`"),
+                ))
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(denial(
+                    DenialCode::ConstraintViolated,
+                    op,
+                    format!("path `{raw}` is absolute; only workspace-relative paths are allowed"),
+                ))
+            }
+        }
+    }
+    Ok(out)
+}

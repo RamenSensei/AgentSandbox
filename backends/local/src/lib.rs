@@ -248,3 +248,25 @@ fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
     }
     out
 }
+
+fn diff_written(
+    before: &BTreeMap<String, (SystemTime, u64)>,
+    after: &BTreeMap<String, (SystemTime, u64)>,
+) -> Vec<String> {
+    after
+        .iter()
+        .filter(|(path, stat)| before.get(*path) != Some(stat))
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+fn cap(mut bytes: Vec<u8>, max: usize) -> Vec<u8> {
+    bytes.truncate(max);
+    bytes
+}
+
+struct ExecResult {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}

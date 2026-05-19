@@ -223,3 +223,28 @@ fn resolve_confined(
     }
     Ok(full)
 }
+
+/// Snapshot of `(mtime, len)` per workspace-relative path, used to diff
+/// written paths across an execution.
+fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![workspace.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(workspace)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                out.insert(rel, (mtime, meta.len()));
+            }
+        }
+    }
+    out
+}

@@ -149,3 +149,77 @@ fn normalize_relative(op: &str, raw: &str) -> KernelResult<PathBuf> {
     }
     Ok(out)
 }
+
+/// Check a normalized relative path against allowed prefixes. An empty prefix
+/// list means the whole workspace is allowed; an empty-string prefix likewise.
+fn matches_prefixes(rel: &Path, prefixes: &[String]) -> bool {
+    if prefixes.is_empty() {
+        return true;
+    }
+    prefixes.iter().any(|p| {
+        let p = p.trim_start_matches("./").trim_end_matches('/');
+        if p.is_empty() {
+            return true;
+        }
+        rel.starts_with(p)
+    })
+}
+
+/// Resolve a workspace-relative path with full confinement:
+/// normalization, prefix matching, and symlink-escape rejection by
+/// canonicalizing the deepest *existing* ancestor and verifying it is still
+/// under the canonicalized workspace.
+fn resolve_confined(
+    op: &str,
+    workspace: &Path,
+    raw: &str,
+    prefixes: &[String],
+) -> KernelResult<PathBuf> {
+    let rel = normalize_relative(op, raw)?;
+    if !matches_prefixes(&rel, prefixes) {
+        return Err(denial(
+            DenialCode::ConstraintViolated,
+            op,
+            format!("path `{raw}` is outside the allowed prefixes"),
+        ));
+    }
+    let ws_canon = workspace.canonicalize()?;
+    let full = ws_canon.join(&rel);
+    // Find the deepest existing ancestor of `full` and canonicalize it: this
+    // resolves any symlink placed inside the workspace that points outside.
+    let mut probe: &Path = &full;
+    let anchor = loop {
+        if probe.exists() {
+            break probe.canonicalize()?;
+        }
+        match probe.parent() {
+            Some(parent) => probe = parent,
+            None => {
+                return Err(denial(
+                    DenialCode::ConstraintViolated,
+                    op,
+                    format!("path `{raw}` has no resolvable ancestor"),
+                ))
+            }
+        }
+    };
+    if !anchor.starts_with(&ws_canon) {
+        return Err(denial(
+            DenialCode::ConstraintViolated,
+            op,
+            format!("path `{raw}` escapes the workspace"),
+        ));
+    }
+    // If the path itself exists, also verify its own canonical form.
+    if full.exists() {
+        let canon = full.canonicalize()?;
+        if !canon.starts_with(&ws_canon) {
+            return Err(denial(
+                DenialCode::ConstraintViolated,
+                op,
+                format!("path `{raw}` escapes the workspace via a symlink"),
+            ));
+        }
+    }
+    Ok(full)
+}

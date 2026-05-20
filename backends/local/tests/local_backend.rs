@@ -24,3 +24,31 @@ fn req(action: ActionKind) -> ExecutionRequest {
         egress_domains: vec![],
     }
 }
+
+fn shell(cmd: &str) -> ActionKind {
+    ActionKind::Shell { command: cmd.into(), cwd: None, env: BTreeMap::new() }
+}
+
+#[tokio::test]
+async fn echo_runs_and_reports_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let out = b.execute(req(shell("echo hello"))).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+    assert_eq!(out.replay_class, ReplayClass::FilesystemOnly);
+    assert!(out.usage.memory_bytes >= 6);
+}
+
+#[tokio::test]
+async fn timeout_kills_the_process() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let mut r = req(shell("sleep 30"));
+    r.budget.cpu_ms = 300;
+    let started = Instant::now();
+    let out = b.execute(r).await.unwrap();
+    assert_eq!(out.exit_code, -1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("timeout"));
+    assert!(started.elapsed().as_secs() < 10, "process was not killed promptly");
+}

@@ -385,3 +385,108 @@ impl LocalBackend {
         }
     }
 }
+
+#[async_trait]
+impl Backend for LocalBackend {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: "local".into(),
+            isolation_strength: if self.bwrap { 35 } else { 20 },
+            cold_start_ms: 5,
+            replay_class: ReplayClass::FilesystemOnly,
+            supports_fork: false,
+            supports_gui: false,
+            full_linux: true,
+        }
+    }
+
+    async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        let workspace = self.workspace_for(&req.branch)?;
+        let before = scan_workspace(&workspace);
+        let started = Instant::now();
+
+        let result = match &req.action {
+            ActionKind::Shell { command, cwd, env } => {
+                self.run_shell(&workspace, command, cwd.as_deref(), env, &req.budget)
+                    .await?
+            }
+            ActionKind::ReadFile { path } => {
+                let full = resolve_confined("fs.read", &workspace, path, &req.readable_prefixes)?;
+                match std::fs::read(&full) {
+                    Ok(bytes) => ExecResult {
+                        exit_code: 0,
+                        stdout: cap(bytes, self.config.max_capture_bytes),
+                        stderr: Vec::new(),
+                    },
+                    Err(e) => ExecResult {
+                        exit_code: 1,
+                        stdout: Vec::new(),
+                        stderr: format!("read failed: {e}").into_bytes(),
+                    },
+                }
+            }
+            ActionKind::WriteFile { path, contents_b64 } => {
+                let full = resolve_confined("fs.write", &workspace, path, &req.writable_prefixes)?;
+                let contents = b64::decode(contents_b64).map_err(|e| {
+                    denial(DenialCode::ConstraintViolated, "fs.write", format!("invalid base64: {e}"))
+                })?;
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&full, &contents)?;
+                ExecResult { exit_code: 0, stdout: Vec::new(), stderr: Vec::new() }
+            }
+            ActionKind::DeletePath { path } => {
+                let full = resolve_confined("fs.delete", &workspace, path, &req.writable_prefixes)?;
+                let outcome = if full.is_dir() {
+                    std::fs::remove_dir_all(&full)
+                } else {
+                    std::fs::remove_file(&full)
+                };
+                match outcome {
+                    Ok(()) => ExecResult { exit_code: 0, stdout: Vec::new(), stderr: Vec::new() },
+                    Err(e) => ExecResult {
+                        exit_code: 1,
+                        stdout: Vec::new(),
+                        stderr: format!("delete failed: {e}").into_bytes(),
+                    },
+                }
+            }
+            other => {
+                return Err(denial(
+                    DenialCode::PolicyForbidden,
+                    &other.required_operation().0,
+                    "the local backend only executes shell and workspace file actions",
+                ))
+            }
+        };
+
+        let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let after = scan_workspace(&workspace);
+        let paths_written = diff_written(&before, &after);
+        let captured = (result.stdout.len() + result.stderr.len()) as u64;
+
+        Ok(ExecutionOutcome {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            // Wall-clock elapsed as the CPU proxy; captured output bytes are
+            // charged against the memory dimension as a proxy.
+            usage: ResourceBudget {
+                cpu_ms: elapsed_ms,
+                memory_bytes: captured,
+                ..ResourceBudget::zero()
+            },
+            paths_written,
+            replay_class: ReplayClass::FilesystemOnly,
+        })
+    }
+
+    async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
+        let dir = self.config.root.join(branch.as_str());
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+}

@@ -270,3 +270,118 @@ struct ExecResult {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
+
+impl LocalBackend {
+    async fn run_shell(
+        &self,
+        workspace: &Path,
+        command: &str,
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
+        budget: &ResourceBudget,
+    ) -> KernelResult<ExecResult> {
+        if budget.cpu_ms == 0 {
+            return Err(denial(
+                DenialCode::BudgetExhausted,
+                "proc.shell",
+                "cpu_ms budget is zero; refusing to start the process",
+            ));
+        }
+        let timeout = Duration::from_millis(budget.cpu_ms).min(self.config.max_wall_clock);
+        let cwd = match cwd {
+            Some(c) => resolve_confined("proc.shell", workspace, c, &[])?,
+            None => workspace.to_path_buf(),
+        };
+        if !cwd.is_dir() {
+            return Err(denial(
+                DenialCode::ConstraintViolated,
+                "proc.shell",
+                "cwd does not exist in the workspace",
+            ));
+        }
+
+        let host_path =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+
+        let mut cmd = if self.bwrap {
+            // Runtime-detected bubblewrap wrap (Linux): read-only rootfs,
+            // writable workspace bind, no network, fresh PID namespace.
+            let mut c = tokio::process::Command::new("bwrap");
+            c.arg("--die-with-parent")
+                .arg("--unshare-net")
+                .arg("--unshare-pid")
+                .arg("--ro-bind")
+                .arg("/")
+                .arg("/")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--proc")
+                .arg("/proc")
+                .arg("--bind")
+                .arg(workspace)
+                .arg(workspace)
+                .arg("--chdir")
+                .arg(&cwd)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(command);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("/bin/sh");
+            c.arg("-c").arg(command).current_dir(&cwd);
+            c
+        };
+
+        // Environment scrub: cleared, then a minimal safe set plus the
+        // explicitly pre-authorized action environment.
+        cmd.env_clear()
+            .env("PATH", host_path)
+            .env("HOME", workspace)
+            .env("LANG", "C.UTF-8");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let child = cmd.spawn().map_err(|e| KernelError::BackendUnavailable {
+            backend: "local".into(),
+            reason: format!("failed to spawn: {e}"),
+        })?;
+        let pid = child.id();
+
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => Ok(ExecResult {
+                exit_code: output.status.code().unwrap_or(-1),
+                stdout: cap(output.stdout, self.config.max_capture_bytes),
+                stderr: cap(output.stderr, self.config.max_capture_bytes),
+            }),
+            Ok(Err(e)) => Err(KernelError::Io(e)),
+            Err(_elapsed) => {
+                // The dropped future killed the direct child (kill_on_drop);
+                // also kill the whole process group where available.
+                #[cfg(unix)]
+                if let Some(pid) = pid {
+                    let _ = std::process::Command::new("kill")
+                        .arg("-KILL")
+                        .arg("--")
+                        .arg(format!("-{pid}"))
+                        .status();
+                }
+                Ok(ExecResult {
+                    exit_code: -1,
+                    stdout: Vec::new(),
+                    stderr: format!(
+                        "process killed: wall-clock timeout of {} ms exceeded",
+                        timeout.as_millis()
+                    )
+                    .into_bytes(),
+                })
+            }
+        }
+    }
+}

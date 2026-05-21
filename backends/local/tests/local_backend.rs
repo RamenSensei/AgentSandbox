@@ -111,3 +111,28 @@ async fn symlink_escape_rejected() {
     assert!(matches!(err, KernelError::Denied(_)));
     assert!(!outside.path().join("pwned.txt").exists());
 }
+
+#[tokio::test]
+async fn write_read_delete_round_trip_and_paths_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let out = b
+        .execute(req(ActionKind::WriteFile {
+            path: "sub/dir/hello.txt".into(),
+            contents_b64: b64::encode(b"payload"),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.paths_written, vec!["sub/dir/hello.txt".to_string()]);
+
+    let out = b.execute(req(ActionKind::ReadFile { path: "sub/dir/hello.txt".into() })).await.unwrap();
+    assert_eq!(out.stdout, b"payload");
+    assert!(out.paths_written.is_empty());
+
+    let out = b.execute(req(ActionKind::DeletePath { path: "sub".into() })).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+
+    let out = b.execute(req(ActionKind::ReadFile { path: "sub/dir/hello.txt".into() })).await.unwrap();
+    assert_eq!(out.exit_code, 1);
+}

@@ -52,3 +52,26 @@ async fn timeout_kills_the_process() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("timeout"));
     assert!(started.elapsed().as_secs() < 10, "process was not killed promptly");
 }
+
+#[tokio::test]
+async fn zero_cpu_budget_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let mut r = req(shell("echo hi"));
+    r.budget.cpu_ms = 0;
+    assert!(matches!(b.execute(r).await, Err(KernelError::Denied(_))));
+}
+
+#[tokio::test]
+async fn env_is_scrubbed() {
+    std::env::set_var("AK_SECRET_CANARY", "leak-me");
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let out = b.execute(req(shell("env"))).await.unwrap();
+    let env_dump = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(!env_dump.contains("AK_SECRET_CANARY"), "secret leaked: {env_dump}");
+    assert!(env_dump.contains("PATH="));
+    // HOME points into the workspace, not at the real home directory.
+    let home_line = env_dump.lines().find(|l| l.starts_with("HOME=")).expect("HOME set");
+    assert!(home_line.contains("br-test"), "unexpected HOME: {home_line}");
+}

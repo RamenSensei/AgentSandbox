@@ -136,3 +136,31 @@ async fn write_read_delete_round_trip_and_paths_written() {
     let out = b.execute(req(ActionKind::ReadFile { path: "sub/dir/hello.txt".into() })).await.unwrap();
     assert_eq!(out.exit_code, 1);
 }
+
+#[tokio::test]
+async fn writable_prefixes_are_enforced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let mut r = req(ActionKind::WriteFile {
+        path: "src/main.rs".into(),
+        contents_b64: b64::encode(b"fn main() {}"),
+    });
+    r.writable_prefixes = vec!["docs/".into()];
+    assert!(matches!(b.execute(r).await, Err(KernelError::Denied(_))));
+
+    let mut r = req(ActionKind::WriteFile {
+        path: "docs/x.md".into(),
+        contents_b64: b64::encode(b"# hi"),
+    });
+    r.writable_prefixes = vec!["docs/".into()];
+    assert_eq!(b.execute(r).await.unwrap().exit_code, 0);
+}
+
+#[tokio::test]
+async fn shell_detects_paths_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let out = b.execute(req(shell("echo data > created.txt"))).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert!(out.paths_written.contains(&"created.txt".to_string()), "{:?}", out.paths_written);
+}

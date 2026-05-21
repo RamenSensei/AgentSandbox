@@ -75,3 +75,39 @@ async fn env_is_scrubbed() {
     let home_line = env_dump.lines().find(|l| l.starts_with("HOME=")).expect("HOME set");
     assert!(home_line.contains("br-test"), "unexpected HOME: {home_line}");
 }
+
+#[tokio::test]
+async fn path_escape_rejected_for_reads_writes_and_deletes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    for action in [
+        ActionKind::ReadFile { path: "../outside.txt".into() },
+        ActionKind::ReadFile { path: "/etc/passwd".into() },
+        ActionKind::WriteFile { path: "a/../../evil".into(), contents_b64: b64::encode(b"x") },
+        ActionKind::DeletePath { path: "..".into() },
+    ] {
+        let err = b.execute(req(action)).await.expect_err("should be denied");
+        assert!(matches!(err, KernelError::Denied(_)), "got {err:?}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_escape_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    // Materialize the workspace, then plant a symlink pointing outside it.
+    b.execute(req(shell("true"))).await.unwrap();
+    let ws = tmp.path().join("br-test");
+    std::os::unix::fs::symlink(outside.path(), ws.join("link")).unwrap();
+    let err = b
+        .execute(req(ActionKind::WriteFile {
+            path: "link/pwned.txt".into(),
+            contents_b64: b64::encode(b"x"),
+        }))
+        .await
+        .expect_err("symlink escape must be denied");
+    assert!(matches!(err, KernelError::Denied(_)));
+    assert!(!outside.path().join("pwned.txt").exists());
+}

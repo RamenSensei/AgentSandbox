@@ -26,3 +26,25 @@ Alternatives considered: trust the approval (status quo elsewhere; rejected —
 aggressively (rejected as the only mechanism — it converts drift into approval
 fatigue without removing the race); re-approve on every retry (rejected —
 punishes the human for network flakiness the kernel should absorb).
+
+## Decision
+
+Approval alone never authorizes commit. The broker revalidates every effect at
+commit time, atomically with the commit decision:
+
+1. **Contract hash**: the `EffectContract` hash equals the hash that was
+   approved — approving an effect means approving exactly that canonical
+   operation, resource and arguments. Any change requires re-approval.
+2. **Preconditions**: deterministic preconditions on the external world hold
+   now (e.g. `base_head_sha == abc123`), checked against the live system.
+3. **Lease validity**: the authorizing `CapabilityLease` is unrevoked,
+   unexpired, has remaining uses, and still passes `check()` for these
+   parameters on this branch.
+4. **Policy epoch**: the current policy epoch matches the epoch recorded at
+   approval; a policy change aborts with `STALE_AUTHORIZATION`.
+5. **Idempotency**: the `idempotency_key` has not already produced a Receipt;
+   duplicates return the existing Receipt instead of re-executing.
+
+Any failure aborts the effect with a machine-readable denial (ADR-0011); the
+Receipt of a successful commit records `contract_hash`, `policy_epoch` and the
+`authorization_witness`.

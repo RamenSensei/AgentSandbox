@@ -164,3 +164,26 @@ async fn shell_detects_paths_written() {
     assert_eq!(out.exit_code, 0);
     assert!(out.paths_written.contains(&"created.txt".to_string()), "{:?}", out.paths_written);
 }
+
+#[tokio::test]
+async fn discard_removes_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    b.execute(req(shell("touch f"))).await.unwrap();
+    let branch = BranchId("br-test".into());
+    assert!(tmp.path().join("br-test").exists());
+    b.discard(&branch).await.unwrap();
+    assert!(!tmp.path().join("br-test").exists());
+}
+
+#[test]
+fn profile_is_honest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    let p = b.profile();
+    assert_eq!(p.name, "local");
+    assert_eq!(p.isolation_strength, if b.uses_bwrap() { 35 } else { 20 });
+    assert!(p.full_linux);
+    assert!(!p.supports_fork);
+    assert!(!p.supports_gui);
+}

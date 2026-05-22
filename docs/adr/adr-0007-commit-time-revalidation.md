@@ -48,3 +48,26 @@ commit time, atomically with the commit decision:
 Any failure aborts the effect with a machine-readable denial (ADR-0011); the
 Receipt of a successful commit records `contract_hash`, `policy_epoch` and the
 `authorization_witness`.
+
+## Consequences
+
+Positive:
+
+- The classic agent failure modes — stale approval, TOCTOU against a moved base
+  branch, double-send on retry — become deterministic aborts or deduplicated
+  no-ops rather than incidents.
+- Receipts are strong evidence: they attest that revalidation passed at commit
+  time, not merely that someone once clicked approve.
+
+Negative:
+
+- Connectors must support a precondition read (or a conditional write) per
+  operation; connectors that cannot are pushed toward `opaque_external` handling.
+- Commit latency includes a live external read; the commit path cannot be
+  fully offline.
+
+Follow-ups:
+
+- Standardize precondition vocabulary per connector (GitHub first: head SHAs,
+  resource etags).
+- Adversarial-bench case: approve, mutate base branch, assert abort.

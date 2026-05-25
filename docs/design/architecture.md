@@ -83,3 +83,46 @@ Three properties of this layering are normative:
 - **Backends and connectors are pluggable.** They implement the `Backend` and
   `Connector` traits from `ak-core::traits` and carry no policy authority of
   their own.
+
+## 4. Agent Execution Protocol
+
+The protocol's core nouns are not containers, processes and files, but:
+
+```text
+Episode          one long-running task
+Step             one decision-and-execution unit
+Branch           one speculative world branch
+Principal        an agent, sub-agent, tool, or human identity
+CapabilityLease  time-bound, budgeted, attenuable authority
+Observation      a structured observation
+Effect           a proposed change to the external world
+Receipt          proof of a committed effect
+```
+
+### 4.1 Verb families
+
+Conformant kernels MUST expose the following verb families:
+
+```text
+episode.create        episode.describe
+
+step.execute          step.explain          step.retry
+
+branch.fork           branch.diff           branch.compare
+branch.merge          branch.discard
+
+capability.describe   capability.request
+capability.delegate   capability.revoke
+
+effect.propose        effect.prepare
+effect.commit         effect.compensate
+
+trace.query
+
+replay.audit          replay.sandbox        replay.live
+```
+
+`step.explain` and `trace.query` exist because agents SHOULD NOT have to guess
+their environment with `git status`, `find`, `ps`, and `netstat`; the causal
+ledger is directly queryable. `replay.*` is three distinct verbs because the
+three replay modes make deliberately different guarantees (see `replay.md`).

@@ -211,3 +211,16 @@ Derived from first principles in the founding design discussion; all normative.
    distinct `Principal` on its own branch; delegation is attenuation; agents
    exchange provenance-carrying artifacts, and merges combine artifacts, never
    process state or authority.
+
+## 7. Trust and non-goals
+
+The kernel trusts: its own code, the policy configuration, connectors (which
+hold credentials), and the receipt signing key. It does not trust: guest code,
+model outputs, intent hints (hints MAY optimize scheduling, MUST NOT
+authorize), backends beyond their declared `BackendProfile`, or any skill/MCP
+server prior to quarantine and promotion (see `threat-model.md`).
+
+Out of scope for v0.6: a new hypervisor, arbitrary full process-memory
+checkpointing, generic transactions over arbitrary SaaS, payment connectors,
+multi-cloud scheduling, and any marketing claim of fully deterministic replay
+of the open network.

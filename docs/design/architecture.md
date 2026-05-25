@@ -126,3 +126,37 @@ replay.audit          replay.sandbox        replay.live
 their environment with `git status`, `find`, `ps`, and `netstat`; the causal
 ledger is directly queryable. `replay.*` is three distinct verbs because the
 three replay modes make deliberately different guarantees (see `replay.md`).
+
+### 4.2 The execute() state transition
+
+The minimal execution abstraction is not `create_container()` / `exec()` /
+`kill()`, but a controlled state transition:
+
+```text
+execute(
+    state_id,
+    principal,
+    action,
+    capability_lease,
+    resource_budget
+) -> {
+    new_state_id,
+    observation,
+    local_delta,
+    pending_effects,
+    committed_receipts,
+    policy_decisions,
+    resource_usage,
+    replay_class
+}
+```
+
+Formally: `T(S_t, P, A_t, C_t, B_t) → (S_{t+1}, O_t, Δ_t, E_t^pending, R_t,
+K_t)`, where `S_t` is versioned world state, `P` the principal, `A_t` the
+structured action, `C_t` the current capability lease, `B_t` the
+CPU/memory/token/network/cost/risk budget, `Δ_t` the local delta,
+`E_t^pending` uncommitted external effects, `R_t` committed receipts, and
+`K_t` cost and causal record. In code, the request/response pair is
+`ExecutionRequest` / `ExecutionOutcome` (`ak-core::traits`), with the
+kernel-level result carrying `StateNode`, `StateDelta`, `Observation`,
+`PendingEffect`, `Receipt`, `ResourceBudget` usage, and `ReplayClass`.

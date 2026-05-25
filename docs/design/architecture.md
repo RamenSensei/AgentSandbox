@@ -160,3 +160,54 @@ CPU/memory/token/network/cost/risk budget, `Δ_t` the local delta,
 `ExecutionRequest` / `ExecutionOutcome` (`ak-core::traits`), with the
 kernel-level result carrying `StateNode`, `StateDelta`, `Observation`,
 `PendingEffect`, `Receipt`, `ResourceBudget` usage, and `ReplayClass`.
+
+## 5. Trusted Semantic Kernel components
+
+| Component | Responsibility | Crate |
+|---|---|---|
+| Identity & Policy | `Principal` registry, `TrustLevel`, deterministic typed policy rules, policy epochs | `kernel/identity`, `kernel/policy` |
+| Capability Compiler | Compiles semantic capability requests into concrete enforcement (Landlock, seccomp, cgroups, netns/egress proxy, connector constraints, secret-broker token exchange) | `kernel/policy` |
+| State DAG | Versioned world state: `StateNode`, `StateDelta`, fork/diff/merge/discard | `kernel/state_dag` |
+| Causal Ledger | Append-only record from objective → model response → intent → capability → policy decision → invocation → delta → observation → effect → receipt → next decision | `kernel/causal_ledger` |
+| Effect Broker | External-effect transaction pipeline and commit-time revalidation | `kernel/effect_broker` |
+| Secret Broker | Credential mediation; raw credentials never enter guests | `kernel/effect_broker` (broker side) + connectors |
+| Backend Router | Selects the cheapest `Backend` satisfying risk, compatibility, and reproducibility requirements | `kernel/scheduler` |
+| Scheduler | Step-level resource allocation, prewarming, fan-out budgets | `kernel/scheduler` |
+| Replay Engine | Audit/sandbox/live replay over the ledger and state DAG | `kernel/causal_ledger` + `kernel/state_dag` |
+| API surface | Protocol endpoint exposing the verb families | `kernel/api` |
+
+Shared semantic types live in `kernel/core` (`ak-core`), which performs no
+I/O. Backends live under `backends/{local,cube,forkd,gvisor,kubernetes}`;
+connectors under `connectors/{github,http,mcp}`. `conformance/` and
+`adversarial-bench/` validate protocol conformance and security behavior;
+`examples/coding-agent-github` is the reference MVP scenario.
+
+## 6. Design principles
+
+Derived from first principles in the founding design discussion; all normative.
+
+1. **The sandbox is not a box; it is a state-transition graph.** A VM is only
+   the physical carrier. What MUST be versioned is harness state, workspace,
+   process/runtime state, browser profile, tool/MCP sessions, externally-read
+   facts and their freshness, current capabilities, pending effects, and
+   committed receipts — the World State DAG (see `state-dag.md`).
+2. **Local change and external effect MUST be separated.** OS snapshots are
+   not a transaction for the external world; emails, PRs, deletions, and
+   payments cannot be undone by rolling back a VM (see
+   `effect-transactions.md`).
+3. **Authority is a lease, not a boolean.** Not `allow network` but a
+   principal-, operation-, parameter-, count-, time-, budget-, and
+   branch-bound `CapabilityLease` with preconditions (see
+   `capability-model.md`).
+4. **Failures and denials MUST be high-quality observations.** Not
+   `Permission denied`, but a structured `Denial` with a code, reason, safe
+   alternatives, and requestable scopes, so agents self-repair instead of
+   interrupting humans.
+5. **Each action selects its appropriate isolation backend.** The scheduler
+   chooses the cheapest backend satisfying risk, compatibility, and
+   reproducibility requirements — never "one maximum-privilege VM per task"
+   (see `scheduling.md`).
+6. **Multiple agents share evidence, not a mutable world.** Each agent is a
+   distinct `Principal` on its own branch; delegation is attenuation; agents
+   exchange provenance-carrying artifacts, and merges combine artifacts, never
+   process state or authority.

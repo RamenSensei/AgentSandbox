@@ -55,3 +55,30 @@ self-repair instead of human interrupts.
 | Divergence classification completeness | Divergences assigned a cause category (see `replay.md` §4) / divergences detected | Replay engine; an unclassified divergence files a recorder/classifier bug |
 | Consistency | Sandbox-replay runs whose per-step `workspace_root` and delta match the recording, within the recording's declared `ReplayClass` | Merkle-root comparison at step boundaries |
 | Merge conflict rate | `branch.merge` operations requiring conflict resolution / merges attempted | DAG service counters; tracked to tune fan-out strategies, not to zero |
+
+## 5. Group 3: Security
+
+Window for all security metrics: every environment, all time — these are not
+sampled.
+
+| Metric | Definition | Target |
+|---|---|---|
+| Unauthorized external effects | External effects observed (egress audit + connector logs) without a matching committed `Receipt` | 0, always; any occurrence is an incident |
+| Secrets-in-guest count | Raw credential values detected in guest memory, filesystem, or env by conformance probes and canary scans | **0** — the defining Secret Broker metric |
+| Exfiltration block rate | Credential/placeholder exfiltration attempts blocked / attempts made, in `adversarial-bench` scenarios | 100% on the bench; deployed attempts are incidents regardless of blocking |
+| SSRF / injection / malicious-skill block rate | Blocked / attempted, per the corresponding bench scenarios (SSRF & metadata, browser prompt injection, MCP tool poisoning) | 100% on the bench |
+| Child escalation block rate | Attenuation-widening and trust-cap-bypass attempts rejected / attempted (bench scenario: child-agent escalation) | 100%; the `attenuate` proof makes this structural |
+| Stale-authorization abort rate | Commits aborted by commit-time revalidation / commits attempted with stale contract, precondition, lease, or policy epoch (bench: stale-approval commit) | 100% of stale attempts aborted |
+| Duplicate commit rate | External effects executed more than once for one `idempotency_key` / commit attempts (bench: duplicate retry) | 0 |
+| Receipt completeness | Committed effects with a valid Ed25519-signed `Receipt` whose `authorization_witness` resolves / committed effects | 100% |
+
+## 6. Group 4: Resource efficiency
+
+| Metric | Definition | Measurement |
+|---|---|---|
+| Cold / warm start | Time from `step.execute` to first guest instruction, per backend, cold (no prewarm) vs warm (prewarmed/forked) | Router timers; reported P50/P99 per `BackendProfile.name` |
+| Tool-call idle time | Guest wall-clock spent waiting on model inference or approval while holding memory, per episode | cgroup freeze/thaw accounting; drives the idle-pause policy |
+| OOM rate | Steps killed for memory over budget / steps executed | Backend exit reporting |
+| Memory peak/avg ratio | Peak RSS / time-averaged RSS per step, aggregated per action type | cgroup memory stats; sizes the burst pool (`scheduling.md` §3) |
+| Parallel branch density | Concurrent branches sustainable per host while P99 step latency stays within budget | Load-test benchmark per backend |
+| Cost per successful rollout | CPU + memory + storage + network cost per successful branch outcome (a rollout = one branch attempt) | Unified `ResourceBudget` accounting divided by surviving-branch successes |

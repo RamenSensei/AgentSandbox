@@ -108,3 +108,31 @@ Reporting conventions:
 - Rates report numerator, denominator, and window explicitly; a rate without
   its population is not a result.
 - Security counts (§5) are absolute, never sampled or extrapolated.
+
+## 8. Benchmarks and conformance
+
+Three suites give these numbers teeth:
+
+- **AgentSandboxBench** (the capability/efficiency suite): fixed task sets
+  (starting from `examples/coding-agent-github`-class tasks) with acceptance
+  checks, run N-way and single-branch, producing Groups 1, 2, and 4. Runs are
+  themselves recorded episodes, so results are auditable via `replay.audit`.
+- **adversarial-bench/** (the security suite): the eleven standing attack
+  scenarios (malicious dependency credential read, browser prompt injection,
+  MCP tool poisoning, SSRF/metadata, child escalation, cross-branch leakage,
+  read-only mount bypass, stale-approval commit, duplicate retry
+  double-commit, inconsistent snapshot, live replay after world change),
+  producing Group 3. Every scenario maps to a mitigation row in
+  `threat-model.md` §6; a release MUST pass all scenarios.
+- **conformance/** (the protocol suite): verifies that an implementation —
+  including third-party backends and connectors — honors the verb families,
+  the four invariants, deterministic `check()` ordering, attenuation
+  rejection cases, commit-time revalidation, receipt signing, `redact_for`
+  behavior, and honest `ReplayClass` declarations. Conformance is what keeps
+  the protocol backend-neutral: a backend claims only what it passes.
+
+The bench and conformance suites are release gates and public artifacts:
+regressions in any Group 3 metric, or any conformance failure, block release.
+Groups 1, 2, and 4 are reported per release with the previous release as
+baseline; they inform, rather than gate, unless a target is explicitly set in
+the release plan.

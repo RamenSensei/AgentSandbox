@@ -82,3 +82,29 @@ sampled.
 | Memory peak/avg ratio | Peak RSS / time-averaged RSS per step, aggregated per action type | cgroup memory stats; sizes the burst pool (`scheduling.md` §3) |
 | Parallel branch density | Concurrent branches sustainable per host while P99 step latency stays within budget | Load-test benchmark per backend |
 | Cost per successful rollout | CPU + memory + storage + network cost per successful branch outcome (a rollout = one branch attempt) | Unified `ResourceBudget` accounting divided by surviving-branch successes |
+
+## 7. Measurement infrastructure
+
+All metrics derive from three instrumented sources, so no metric requires
+guest cooperation (guests are untrusted and MUST NOT be able to inflate or
+suppress measurements):
+
+1. **The causal ledger** — every step, denial, approval, effect phase
+   transition, and receipt is a ledger event with a timestamp and actor.
+   Groups 1 and 3 are ledger queries. Because the ledger is append-only and
+   receipts are signed, capability and security numbers are auditable after
+   the fact via `trace.query` and `replay.audit`.
+2. **Kernel-side timers and counters** — the Backend Router, DAG service, and
+   replay engine time their own operations (fork, rollback, materialize,
+   replay). Group 2 latencies come from here, never from guest clocks.
+3. **cgroup / backend accounting** — resource usage flows back in
+   `ExecutionOutcome.usage` as a `ResourceBudget` and is cross-checked
+   against host-side cgroup stats. Group 4 comes from here.
+
+Reporting conventions:
+
+- Latency metrics report P50 and P99, per backend and per workspace size
+  bucket; averages alone are not accepted in release reports.
+- Rates report numerator, denominator, and window explicitly; a rate without
+  its population is not a result.
+- Security counts (§5) are absolute, never sampled or extrapolated.

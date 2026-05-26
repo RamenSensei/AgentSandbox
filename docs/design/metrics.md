@@ -136,3 +136,22 @@ regressions in any Group 3 metric, or any conformance failure, block release.
 Groups 1, 2, and 4 are reported per release with the previous release as
 baseline; they inform, rather than gate, unless a target is explicitly set in
 the release plan.
+
+## 9. Anti-metrics
+
+Numbers this project deliberately does not compete on in isolation, because
+optimizing them alone reproduces existing sandboxes rather than an execution
+kernel:
+
+- raw cold-start milliseconds detached from per-action backend selection
+  (a WASI isolate will always "win" a microVM benchmark; the question is
+  whether the router picked the right backend);
+- approvals per task driven to zero by widening envelopes (only valid while
+  unauthorized external effects remain zero — §5 dominates §3);
+- replay success rate inflated by downgrading recordings to `AuditOnly`
+  (replay metrics MUST be reported per `ReplayClass`);
+- token savings achieved by discarding, rather than distilling, output
+  (`full_output` MUST remain addressable in the ledger).
+
+Any release note citing a Group 1/4 improvement SHOULD state which, if any,
+of these trade-offs were involved.

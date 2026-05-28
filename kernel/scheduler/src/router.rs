@@ -177,4 +177,10 @@ mod tests {
         let r = router();
         assert_eq!(r.route(RiskTier::Low, &Needs::default()).unwrap().profile().name, "local");
     }
+
+    #[test]
+    fn medium_risk_respects_the_floor() {
+        let r = router();
+        assert_eq!(r.route(RiskTier::Medium, &Needs::default()).unwrap().profile().name, "gvisor");
+    }
 }

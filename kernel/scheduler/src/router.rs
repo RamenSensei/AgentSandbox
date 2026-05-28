@@ -183,4 +183,11 @@ mod tests {
         let r = router();
         assert_eq!(r.route(RiskTier::Medium, &Needs::default()).unwrap().profile().name, "gvisor");
     }
+
+    #[test]
+    fn high_risk_picks_cheapest_above_85() {
+        // forkd: 15 + 900 = 915; cube: 250 + 900 = 1150.
+        let r = router();
+        assert_eq!(r.route(RiskTier::High, &Needs::default()).unwrap().profile().name, "forkd");
+    }
 }

@@ -122,3 +122,59 @@ impl BackendRouter {
             })
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ak_core::budget::ResourceBudget;
+    use ak_core::traits::{ExecutionOutcome, ExecutionRequest};
+    use async_trait::async_trait;
+
+    struct Fake(BackendProfile);
+
+    #[async_trait]
+    impl Backend for Fake {
+        fn profile(&self) -> BackendProfile {
+            self.0.clone()
+        }
+        async fn execute(&self, _req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+            Ok(ExecutionOutcome {
+                exit_code: 0,
+                stdout: self.0.name.clone().into_bytes(),
+                stderr: vec![],
+                usage: ResourceBudget::zero(),
+                paths_written: vec![],
+                replay_class: self.0.replay_class,
+            })
+        }
+    }
+
+    fn profile(name: &str, iso: u8, cold: u64, fork: bool) -> BackendProfile {
+        BackendProfile {
+            name: name.into(),
+            isolation_strength: iso,
+            cold_start_ms: cold,
+            replay_class: if fork {
+                ReplayClass::ProcessAndFilesystem
+            } else {
+                ReplayClass::FilesystemOnly
+            },
+            supports_fork: fork,
+            supports_gui: false,
+            full_linux: true,
+        }
+    }
+
+    fn router() -> BackendRouter {
+        let mut r = BackendRouter::new();
+        r.register(Arc::new(Fake(profile("local", 20, 5, false))));
+        r.register(Arc::new(Fake(profile("gvisor", 70, 120, false))));
+        r.register(Arc::new(Fake(profile("cube", 90, 250, true))));
+        r.register(Arc::new(Fake(profile("forkd", 90, 15, true))));
+        r
+    }
+    #[test]
+    fn low_risk_routes_to_cheapest_local() {
+        let r = router();
+        assert_eq!(r.route(RiskTier::Low, &Needs::default()).unwrap().profile().name, "local");
+    }
+}

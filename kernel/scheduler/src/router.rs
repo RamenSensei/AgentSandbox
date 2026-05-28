@@ -56,3 +56,69 @@ pub struct Needs {
     /// Requires at least this replay guarantee.
     pub replay_at_least: Option<ReplayClass>,
 }
+
+/// Registry of isolation backends plus the deterministic routing rule.
+#[derive(Default)]
+pub struct BackendRouter {
+    backends: Vec<Arc<dyn Backend>>,
+}
+
+impl BackendRouter {
+    pub fn new() -> Self {
+        Self { backends: Vec::new() }
+    }
+
+    /// Register a backend. Registration order does not affect routing.
+    pub fn register(&mut self, backend: Arc<dyn Backend>) {
+        self.backends.push(backend);
+    }
+
+    /// Profiles of all registered backends.
+    pub fn profiles(&self) -> Vec<BackendProfile> {
+        self.backends.iter().map(|b| b.profile()).collect()
+    }
+
+    /// Look up a registered backend by profile name.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Backend>> {
+        self.backends.iter().find(|b| b.profile().name == name).cloned()
+    }
+
+    /// Cost model: cold start plus a per-strength overhead term.
+    pub fn cost(profile: &BackendProfile) -> u64 {
+        profile.cold_start_ms + 10 * u64::from(profile.isolation_strength)
+    }
+
+    fn satisfies(profile: &BackendProfile, risk: RiskTier, needs: &Needs) -> bool {
+        profile.isolation_strength >= risk.isolation_floor()
+            && (!needs.full_linux || profile.full_linux)
+            && (!needs.gui || profile.supports_gui)
+            && (!needs.fork || profile.supports_fork)
+            && needs
+                .replay_at_least
+                .map(|floor| profile.replay_class >= floor)
+                .unwrap_or(true)
+    }
+
+    /// Choose the cheapest backend satisfying the floor and needs.
+    /// See the module docs for the exact rule.
+    pub fn route(&self, risk: RiskTier, needs: &Needs) -> KernelResult<Arc<dyn Backend>> {
+        self.backends
+            .iter()
+            .map(|b| (b.profile(), b))
+            .filter(|(p, _)| Self::satisfies(p, risk, needs))
+            .min_by(|(a, _), (b, _)| {
+                Self::cost(a).cmp(&Self::cost(b)).then_with(|| a.name.cmp(&b.name))
+            })
+            .map(|(_, b)| Arc::clone(b))
+            .ok_or_else(|| KernelError::BackendUnavailable {
+                backend: "router".into(),
+                reason: format!(
+                    "no registered backend satisfies isolation >= {} with needs {:?} \
+                     (registered: {:?})",
+                    risk.isolation_floor(),
+                    needs,
+                    self.backends.iter().map(|b| b.profile().name).collect::<Vec<_>>()
+                ),
+            })
+    }
+}

@@ -201,4 +201,15 @@ mod tests {
         };
         assert_eq!(r.route(RiskTier::Low, &needs).unwrap().profile().name, "forkd");
     }
+
+    #[test]
+    fn no_backend_satisfies_maps_to_backend_unavailable() {
+        let r = router();
+        let needs = Needs { gui: true, ..Needs::default() };
+        match r.route(RiskTier::Low, &needs) {
+            Err(KernelError::BackendUnavailable { .. }) => {}
+            Err(other) => panic!("expected BackendUnavailable, got {other:?}"),
+            Ok(b) => panic!("unexpectedly routed to {}", b.profile().name),
+        }
+    }
 }

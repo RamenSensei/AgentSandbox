@@ -122,6 +122,7 @@ impl BackendRouter {
             })
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +173,7 @@ mod tests {
         r.register(Arc::new(Fake(profile("forkd", 90, 15, true))));
         r
     }
+
     #[test]
     fn low_risk_routes_to_cheapest_local() {
         let r = router();
@@ -211,5 +213,13 @@ mod tests {
             Err(other) => panic!("expected BackendUnavailable, got {other:?}"),
             Ok(b) => panic!("unexpectedly routed to {}", b.profile().name),
         }
+    }
+
+    #[test]
+    fn ties_break_deterministically_by_name() {
+        let mut r = BackendRouter::new();
+        r.register(Arc::new(Fake(profile("bbb", 50, 100, false))));
+        r.register(Arc::new(Fake(profile("aaa", 50, 100, false))));
+        assert_eq!(r.route(RiskTier::Low, &Needs::default()).unwrap().profile().name, "aaa");
     }
 }

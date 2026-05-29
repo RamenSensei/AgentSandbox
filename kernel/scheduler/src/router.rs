@@ -190,4 +190,15 @@ mod tests {
         let r = router();
         assert_eq!(r.route(RiskTier::High, &Needs::default()).unwrap().profile().name, "forkd");
     }
+
+    #[test]
+    fn fork_and_replay_needs_filter_candidates() {
+        let r = router();
+        let needs = Needs {
+            fork: true,
+            replay_at_least: Some(ReplayClass::ProcessAndFilesystem),
+            ..Needs::default()
+        };
+        assert_eq!(r.route(RiskTier::Low, &needs).unwrap().profile().name, "forkd");
+    }
 }

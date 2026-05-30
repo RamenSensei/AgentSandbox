@@ -105,3 +105,26 @@ impl WarmPool {
         self.pool.lock().await.len()
     }
 }
+
+fn budget_denial(op: &str, reason: String) -> KernelError {
+    KernelError::Denied(Box::new(Denial {
+        code: DenialCode::BudgetExhausted,
+        attempted_operation: Operation::new(op),
+        reason,
+        safe_alternatives: Vec::new(),
+        requestable_scopes: Vec::new(),
+        escalation_allowed: true,
+    }))
+}
+
+/// The step scheduler: routes each step through the [`BackendRouter`],
+/// enforces the episode budget at step boundaries, bounds concurrent branch
+/// fan-out with a semaphore, and records accounting for the ledger.
+pub struct StepScheduler {
+    router: BackendRouter,
+    fanout: Arc<Semaphore>,
+    remaining: Mutex<ResourceBudget>,
+    records: Mutex<Vec<StepRecord>>,
+    paused: Mutex<HashSet<BranchId>>,
+    warm_pool: Option<WarmPool>,
+}

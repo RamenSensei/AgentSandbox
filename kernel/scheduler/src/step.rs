@@ -35,3 +35,28 @@ pub struct StepRecord {
     pub usage: ResourceBudget,
     pub recorded_at: DateTime<Utc>,
 }
+
+/// A prewarm suggestion produced by [`StepScheduler::hint`].
+///
+/// **Hints optimize, never authorize**: a plan may warm a backend or local
+/// workspaces ahead of need, but it is *not* consulted by
+/// [`BackendRouter::route`] and cannot lower any isolation floor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrewarmPlan {
+    /// Backend worth warming (must already be registered), if any.
+    pub warm_backend: Option<String>,
+    /// Number of idle local workspaces to keep ready.
+    pub warm_workspaces: usize,
+    /// Human-readable rationale, for the ledger.
+    pub note: String,
+}
+
+/// Scheduler configuration.
+#[derive(Debug, Clone)]
+pub struct SchedulerConfig {
+    /// Maximum number of steps executing concurrently across branches
+    /// (the branch fan-out budget).
+    pub max_concurrent_branches: usize,
+    /// Total budget for the episode; every step's usage is charged here.
+    pub episode_budget: ResourceBudget,
+}

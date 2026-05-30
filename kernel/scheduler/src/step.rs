@@ -60,3 +60,48 @@ pub struct SchedulerConfig {
     /// Total budget for the episode; every step's usage is charged here.
     pub episode_budget: ResourceBudget,
 }
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self { max_concurrent_branches: 8, episode_budget: ResourceBudget::step_default() }
+    }
+}
+
+/// A simple warm pool of pre-created idle local workspace directories.
+///
+/// `fill(n)` creates directories ahead of need; `take()` hands one out. This
+/// only trades directory-creation latency — it grants no authority.
+pub struct WarmPool {
+    root: PathBuf,
+    pool: Mutex<Vec<PathBuf>>,
+    seq: AtomicU64,
+}
+
+impl WarmPool {
+    pub fn new(root: impl Into<PathBuf>) -> KernelResult<Self> {
+        let root = root.into();
+        std::fs::create_dir_all(&root)?;
+        Ok(Self { root, pool: Mutex::new(Vec::new()), seq: AtomicU64::new(0) })
+    }
+
+    /// Ensure at least `n` idle workspaces exist in the pool.
+    pub async fn fill(&self, n: usize) -> KernelResult<()> {
+        let mut pool = self.pool.lock().await;
+        while pool.len() < n {
+            let dir = self.root.join(format!("warm-{}", self.seq.fetch_add(1, Ordering::Relaxed)));
+            std::fs::create_dir_all(&dir)?;
+            pool.push(dir);
+        }
+        Ok(())
+    }
+
+    /// Take a pre-created workspace, if one is available.
+    pub async fn take(&self) -> Option<PathBuf> {
+        self.pool.lock().await.pop()
+    }
+
+    /// Number of idle workspaces currently pooled.
+    pub async fn idle(&self) -> usize {
+        self.pool.lock().await.len()
+    }
+}

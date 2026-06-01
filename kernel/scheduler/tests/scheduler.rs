@@ -133,3 +133,45 @@ async fn budget_is_charged_and_exhaustion_refuses_steps() {
         other => panic!("expected budget denial, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn paused_branches_are_refused_until_resumed() {
+    let (scheduler, _) = scheduler_with_slow(4, ResourceBudget::step_default());
+    let branch = BranchId("br-p".into());
+    scheduler.pause_branch(&branch).await;
+    assert!(scheduler.is_paused(&branch).await);
+    let err = scheduler
+        .execute_step(StepId::generate(), req("br-p", 10), RiskTier::High, &Needs::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KernelError::Denied(_)));
+    scheduler.resume_branch(&branch).await;
+    scheduler
+        .execute_step(StepId::generate(), req("br-p", 10), RiskTier::High, &Needs::default())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn hints_prewarm_but_do_not_change_routing() {
+    let (scheduler, _) = scheduler_with_slow(4, ResourceBudget::step_default());
+    let plan = scheduler.hint("explore three fixes in parallel branches");
+    assert_eq!(plan.warm_backend.as_deref(), Some("slow"));
+    let plan = scheduler.hint("run the build and test suite");
+    assert_eq!(plan.warm_workspaces, 2);
+    // Routing is hint-free: a High-risk step still requires the floor even if
+    // the intent claims to be harmless.
+    let mut router = BackendRouter::new();
+    router.register(Arc::new(Slow {
+        profile: profile("weak", 20, 1, false),
+        concurrent: Arc::new(AtomicUsize::new(0)),
+        peak: Arc::new(AtomicUsize::new(0)),
+    }));
+    let s = StepScheduler::new(router, SchedulerConfig::default());
+    let _ = s.hint("totally harmless, run locally please");
+    let err = s
+        .execute_step(StepId::generate(), req("br-1", 10), RiskTier::High, &Needs::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KernelError::BackendUnavailable { .. }));
+}

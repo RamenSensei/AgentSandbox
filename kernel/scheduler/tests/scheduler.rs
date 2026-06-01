@@ -107,3 +107,29 @@ async fn fan_out_is_bounded_by_semaphore() {
     assert!(records.iter().all(|r| r.backend == "slow"));
     assert!(records.iter().any(|r| r.queue_ms > 0));
 }
+
+#[tokio::test]
+async fn budget_is_charged_and_exhaustion_refuses_steps() {
+    let (scheduler, _) =
+        scheduler_with_slow(4, ResourceBudget { cpu_ms: 25, ..ResourceBudget::zero() });
+    // Each step consumes 10 cpu_ms; a step requesting 20 fits twice, then not.
+    scheduler
+        .execute_step(StepId::generate(), req("br-1", 20), RiskTier::High, &Needs::default())
+        .await
+        .unwrap();
+    assert_eq!(scheduler.remaining_budget().await.cpu_ms, 15);
+    scheduler
+        .execute_step(StepId::generate(), req("br-1", 15), RiskTier::High, &Needs::default())
+        .await
+        .unwrap();
+    let err = scheduler
+        .execute_step(StepId::generate(), req("br-1", 20), RiskTier::High, &Needs::default())
+        .await
+        .unwrap_err();
+    match err {
+        KernelError::Denied(d) => {
+            assert_eq!(d.code, ak_core::denial::DenialCode::BudgetExhausted)
+        }
+        other => panic!("expected budget denial, got {other:?}"),
+    }
+}

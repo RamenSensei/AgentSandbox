@@ -81,3 +81,29 @@ fn scheduler_with_slow(max_branches: usize, budget: ResourceBudget) -> (StepSche
     );
     (scheduler, peak)
 }
+
+#[tokio::test]
+async fn fan_out_is_bounded_by_semaphore() {
+    let (scheduler, peak) = scheduler_with_slow(
+        2,
+        ResourceBudget { cpu_ms: 100_000, ..ResourceBudget::step_default() },
+    );
+    let scheduler = Arc::new(scheduler);
+    let mut handles = Vec::new();
+    for i in 0..6 {
+        let s = Arc::clone(&scheduler);
+        handles.push(tokio::spawn(async move {
+            s.execute_step(StepId::generate(), req(&format!("br-{i}"), 100), RiskTier::High, &Needs::default())
+                .await
+        }));
+    }
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+    assert!(peak.load(Ordering::SeqCst) <= 2, "fan-out exceeded: {}", peak.load(Ordering::SeqCst));
+    // Queue time shows up in the accounting records.
+    let records = scheduler.records().await;
+    assert_eq!(records.len(), 6);
+    assert!(records.iter().all(|r| r.backend == "slow"));
+    assert!(records.iter().any(|r| r.queue_ms > 0));
+}

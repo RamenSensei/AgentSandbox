@@ -175,3 +175,38 @@ async fn hints_prewarm_but_do_not_change_routing() {
         .unwrap_err();
     assert!(matches!(err, KernelError::BackendUnavailable { .. }));
 }
+
+#[tokio::test]
+async fn warm_pool_fills_and_hands_out_workspaces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (scheduler, _) = scheduler_with_slow(4, ResourceBudget::step_default());
+    let scheduler = scheduler.with_warm_pool(WarmPool::new(tmp.path().join("pool")).unwrap());
+    let plan = scheduler.hint("compile the project");
+    scheduler.apply_prewarm(&plan).await.unwrap();
+    // Two idle workspaces exist on disk ahead of need.
+    let pool_dir = tmp.path().join("pool");
+    assert_eq!(std::fs::read_dir(&pool_dir).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn end_to_end_with_real_local_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let local = ak_backend_local::LocalBackend::new(ak_backend_local::LocalBackendConfig::new(
+        tmp.path(),
+    ))
+    .unwrap();
+    let mut router = BackendRouter::new();
+    router.register(Arc::new(local));
+    let scheduler = StepScheduler::new(router, SchedulerConfig::default());
+    let mut r = req("br-e2e", 5_000);
+    r.action = ActionKind::Shell { command: "echo routed".into(), cwd: None, env: BTreeMap::new() };
+    let out = scheduler
+        .execute_step(StepId::generate(), r, RiskTier::Low, &Needs { full_linux: true, ..Needs::default() })
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "routed");
+    let records = scheduler.records().await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].backend, "local");
+    assert!(records[0].usage.cpu_ms > 0);
+}

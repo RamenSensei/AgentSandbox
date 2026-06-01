@@ -9,6 +9,29 @@ and on-disk formats.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-01
+
+### Added
+- `kernel/scheduler`: step-level cgroup allocation, burst memory budgets, idle
+  pause, branch fan-out budgets, and intent-aware prewarm hints (hints affect
+  scheduling only, never authorization).
+- Backend adapters: `backends/local` (bubblewrap/sandbox-exec OS sandboxes),
+  `backends/cube` (microVM server), `backends/forkd` (warm-fork CoW branching),
+  `backends/gvisor`, and an experimental `backends/kubernetes` adapter.
+- Backend router: selects the lowest-cost backend satisfying a step's risk,
+  compatibility, and replay requirements; supports promotion/demotion between
+  backends within an episode.
+
+### Changed
+- `Backend` trait split into provisioning and execution halves so adapters can
+  share warm pools.
+- Resource budgets unified across CPU, memory, tokens, network, and cost in
+  `ResourceBudget`.
+
+### Fixed
+- Fork of a branch with live processes now records `processes_started` in the
+  child delta instead of silently dropping process state.
+
 ## [0.3.0] - 2026-05-04
 
 ### Added

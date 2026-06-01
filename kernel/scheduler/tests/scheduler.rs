@@ -19,3 +19,36 @@ struct Slow {
     concurrent: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
 }
+
+#[async_trait]
+impl Backend for Slow {
+    fn profile(&self) -> BackendProfile {
+        self.profile.clone()
+    }
+    async fn execute(&self, _req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        self.concurrent.fetch_sub(1, Ordering::SeqCst);
+        Ok(ExecutionOutcome {
+            exit_code: 0,
+            stdout: vec![],
+            stderr: vec![],
+            usage: ResourceBudget { cpu_ms: 10, ..ResourceBudget::zero() },
+            paths_written: vec![],
+            replay_class: ReplayClass::FilesystemOnly,
+        })
+    }
+}
+
+fn profile(name: &str, iso: u8, cold: u64, fork: bool) -> BackendProfile {
+    BackendProfile {
+        name: name.into(),
+        isolation_strength: iso,
+        cold_start_ms: cold,
+        replay_class: ReplayClass::FilesystemOnly,
+        supports_fork: fork,
+        supports_gui: false,
+        full_linux: true,
+    }
+}

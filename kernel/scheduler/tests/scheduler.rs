@@ -52,3 +52,32 @@ fn profile(name: &str, iso: u8, cold: u64, fork: bool) -> BackendProfile {
         full_linux: true,
     }
 }
+
+fn req(branch: &str, cpu_ms: u64) -> ExecutionRequest {
+    ExecutionRequest {
+        branch: BranchId(branch.into()),
+        base_state: StateId("st-0".into()),
+        actor: PrincipalId("pr-t".into()),
+        action: ActionKind::Shell { command: "true".into(), cwd: None, env: BTreeMap::new() },
+        budget: ResourceBudget { cpu_ms, ..ResourceBudget::zero() },
+        writable_prefixes: vec![],
+        readable_prefixes: vec![],
+        egress_domains: vec![],
+    }
+}
+
+fn scheduler_with_slow(max_branches: usize, budget: ResourceBudget) -> (StepScheduler, Arc<AtomicUsize>) {
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let mut router = BackendRouter::new();
+    router.register(Arc::new(Slow {
+        profile: profile("slow", 90, 10, true),
+        concurrent,
+        peak: peak.clone(),
+    }));
+    let scheduler = StepScheduler::new(
+        router,
+        SchedulerConfig { max_concurrent_branches: max_branches, episode_budget: budget },
+    );
+    (scheduler, peak)
+}

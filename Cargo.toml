@@ -8,6 +8,7 @@ members = [
     "kernel/effect_broker",
     "kernel/causal_ledger",
     "kernel/scheduler",
+    "kernel/api",
     "backends/local",
     "backends/cube",
     "backends/forkd",
@@ -19,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/agent-kernel/agent-kernel"

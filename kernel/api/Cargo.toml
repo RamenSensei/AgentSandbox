@@ -1,0 +1,37 @@
+[package]
+name = "ak-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ak-core = { workspace = true }
+ak-identity = { workspace = true }
+ak-policy = { workspace = true }
+ak-state-dag = { workspace = true }
+ak-effect-broker = { workspace = true }
+ak-causal-ledger = { workspace = true }
+ak-scheduler = { workspace = true }
+ak-backend-local = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true }
+tempfile = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+ak-connector-github = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+async-trait = { workspace = true }
+
+[[bin]]
+name = "agent-kernel-server"
+path = "src/bin/agent_kernel_server.rs"

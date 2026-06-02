@@ -19,3 +19,30 @@ use axum::{Json, Router};
 use indexmap::IndexMap;
 use serde::Deserialize;
 use std::sync::Arc;
+
+/// Kernel error → HTTP response with an [`ErrorEnvelope`].
+struct ApiError(KernelError);
+
+impl From<KernelError> for ApiError {
+    fn from(e: KernelError) -> Self {
+        Self(e)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self.0 {
+            KernelError::Denied(_) => StatusCode::FORBIDDEN,
+            KernelError::NotFound { .. } => StatusCode::NOT_FOUND,
+            KernelError::InvalidId { .. } | KernelError::Serde(_) => StatusCode::BAD_REQUEST,
+            KernelError::StaleAuthorization { .. }
+            | KernelError::DuplicateCommit { .. }
+            | KernelError::WrongEffectPhase { .. }
+            | KernelError::BranchDiscarded { .. }
+            | KernelError::MergeConflict { .. } => StatusCode::CONFLICT,
+            KernelError::BackendUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, Json(ErrorEnvelope::from(&self.0))).into_response()
+    }
+}

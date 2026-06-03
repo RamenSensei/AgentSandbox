@@ -46,3 +46,30 @@ impl IntoResponse for ApiError {
         (status, Json(ErrorEnvelope::from(&self.0))).into_response()
     }
 }
+
+type ApiResult<T> = Result<T, ApiError>;
+
+/// Build the kernel HTTP router.
+pub fn router(kernel: Arc<Kernel>) -> Router {
+    Router::new()
+        .route("/v1/episodes", post(create_episode))
+        .route("/v1/episodes/:id", get(describe_episode))
+        .route("/v1/steps/execute", post(execute_step))
+        .route("/v1/branches/:id/fork", post(fork_branch))
+        .route("/v1/branches/:id/diff", post(diff_branch))
+        .route("/v1/branches/:id/merge", post(merge_branch))
+        .route("/v1/branches/:id/discard", post(discard_branch))
+        .route("/v1/branches/:id/compare/:other", get(compare_branches))
+        .route("/v1/capabilities/request", post(request_capability))
+        .route("/v1/capabilities/delegate", post(delegate_capability))
+        .route("/v1/capabilities/revoke", post(revoke_capability))
+        .route("/v1/capabilities/:principal", get(list_capabilities))
+        .route("/v1/effects/:id", get(get_effect))
+        .route("/v1/effects/:id/prepare", post(prepare_effect))
+        .route("/v1/effects/:id/approve", post(approve_effect))
+        .route("/v1/effects/:id/commit", post(commit_effect))
+        .route("/v1/effects/:id/compensate", post(compensate_effect))
+        .route("/v1/trace/query", get(trace_query))
+        .route("/v1/receipts/:id", get(get_receipt))
+        .with_state(kernel)
+}

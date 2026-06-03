@@ -97,3 +97,42 @@ async fn create_episode(
         })),
     ))
 }
+
+async fn describe_episode(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let desc = k.describe_episode(&EpisodeId::parse(&id)?).await?;
+    Ok(Json(serde_json::to_value(&desc).map_err(KernelError::from)?))
+}
+
+#[derive(Deserialize)]
+struct ExecuteStepRequest {
+    principal: PrincipalId,
+    branch: BranchId,
+    action: Action,
+}
+
+async fn execute_step(
+    State(k): State<Arc<Kernel>>,
+    Json(req): Json<ExecuteStepRequest>,
+) -> ApiResult<Response> {
+    let result = k.execute_step(&req.principal, &req.branch, req.action).await?;
+    // Denials are full observations *and* HTTP 403 with the structured
+    // denial, per the protocol.
+    if let ak_core::Observation::Denied { denial } = &result.observation {
+        let envelope = ErrorEnvelope {
+            code: "DENIED".into(),
+            message: denial.reason.clone(),
+            denial: Some(denial.clone()),
+        };
+        return Ok((StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "step": result.step,
+            "state": result.state,
+            "observation": result.observation,
+            "error": envelope,
+        })))
+        .into_response());
+    }
+    Ok(Json(serde_json::to_value(&result).map_err(KernelError::from)?).into_response())
+}

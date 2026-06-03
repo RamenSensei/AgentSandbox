@@ -136,3 +136,26 @@ async fn execute_step(
     }
     Ok(Json(serde_json::to_value(&result).map_err(KernelError::from)?).into_response())
 }
+
+async fn fork_branch(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let branch = k.fork_branch(&BranchId::parse(&id)?)?;
+    Ok(Json(serde_json::to_value(&branch).map_err(KernelError::from)?))
+}
+
+#[derive(Deserialize, Default)]
+struct DiffRequest {
+    #[serde(default)]
+    since: Option<StateId>,
+}
+
+async fn diff_branch(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+    Json(req): Json<DiffRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let changes = k.branch_diff(&BranchId::parse(&id)?, req.since.as_ref())?;
+    Ok(Json(serde_json::to_value(&changes).map_err(KernelError::from)?))
+}

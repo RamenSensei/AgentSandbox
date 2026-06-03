@@ -73,3 +73,27 @@ pub fn router(kernel: Arc<Kernel>) -> Router {
         .route("/v1/receipts/:id", get(get_receipt))
         .with_state(kernel)
 }
+
+#[derive(Deserialize)]
+struct CreateEpisodeRequest {
+    principal: PrincipalId,
+    #[serde(default)]
+    objective: String,
+    #[serde(default)]
+    workspace: Option<std::path::PathBuf>,
+}
+
+async fn create_episode(
+    State(k): State<Arc<Kernel>>,
+    Json(req): Json<CreateEpisodeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let handle = k.create_episode(&req.principal, req.workspace.as_deref(), &req.objective)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "episode": handle.episode,
+            "branch": handle.branch,
+            "root_state": handle.root.id,
+        })),
+    ))
+}

@@ -159,3 +159,26 @@ async fn diff_branch(
     let changes = k.branch_diff(&BranchId::parse(&id)?, req.since.as_ref())?;
     Ok(Json(serde_json::to_value(&changes).map_err(KernelError::from)?))
 }
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    source: BranchId,
+    actor: PrincipalId,
+}
+
+async fn merge_branch(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+    Json(req): Json<MergeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let node = k.merge_branch(&BranchId::parse(&id)?, &req.source, &req.actor)?;
+    Ok(Json(serde_json::to_value(&node).map_err(KernelError::from)?))
+}
+
+async fn discard_branch(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    k.discard_branch(&BranchId::parse(&id)?).await?;
+    Ok(Json(serde_json::json!({ "discarded": id })))
+}

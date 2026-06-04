@@ -230,3 +230,32 @@ struct DelegateRequest {
     #[serde(default = "ResourceBudget::zero")]
     budget: ResourceBudget,
 }
+
+async fn delegate_capability(
+    State(k): State<Arc<Kernel>>,
+    Json(req): Json<DelegateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let lease = k.delegate(
+        &req.delegator,
+        &req.parent_lease,
+        &req.delegatee,
+        req.constraints,
+        req.uses,
+        req.expires_at,
+        req.budget,
+    )?;
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&lease).map_err(KernelError::from)?)))
+}
+
+#[derive(Deserialize)]
+struct RevokeRequest {
+    lease: LeaseId,
+}
+
+async fn revoke_capability(
+    State(k): State<Arc<Kernel>>,
+    Json(req): Json<RevokeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let revoked = k.revoke(&req.lease)?;
+    Ok(Json(serde_json::json!({ "revoked": revoked })))
+}

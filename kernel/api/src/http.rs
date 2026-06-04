@@ -182,3 +182,25 @@ async fn discard_branch(
     k.discard_branch(&BranchId::parse(&id)?).await?;
     Ok(Json(serde_json::json!({ "discarded": id })))
 }
+
+async fn compare_branches(
+    State(k): State<Arc<Kernel>>,
+    Path((a, b)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    let cmp = k.branch_compare(&BranchId::parse(&a)?, &BranchId::parse(&b)?)?;
+    Ok(Json(serde_json::json!({
+        "base": cmp.base,
+        "changed_in_a": cmp.changed_in_a,
+        "changed_in_b": cmp.changed_in_b,
+    })))
+}
+
+#[derive(Deserialize)]
+struct CapabilityRequest {
+    principal: PrincipalId,
+    operation: String,
+    #[serde(default)]
+    params: serde_json::Value,
+    #[serde(default)]
+    branch: Option<BranchId>,
+}

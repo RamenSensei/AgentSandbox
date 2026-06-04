@@ -259,3 +259,33 @@ async fn revoke_capability(
     let revoked = k.revoke(&req.lease)?;
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
+
+async fn list_capabilities(
+    State(k): State<Arc<Kernel>>,
+    Path(principal): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let leases = k
+        .leases()
+        .active_for_principal(&PrincipalId::parse(&principal)?, chrono::Utc::now())
+        .map_err(KernelError::from)?;
+    Ok(Json(serde_json::to_value(&leases).map_err(KernelError::from)?))
+}
+
+async fn get_effect(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let effect = k.effect(&EffectId::parse(&id)?)?;
+    Ok(Json(serde_json::to_value(&effect).map_err(KernelError::from)?))
+}
+
+async fn prepare_effect(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let prepared = k.prepare_effect(&EffectId::parse(&id)?).await?;
+    Ok(Json(serde_json::json!({
+        "preview": prepared.preview,
+        "observed_preconditions": prepared.observed_preconditions,
+    })))
+}

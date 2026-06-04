@@ -204,3 +204,29 @@ struct CapabilityRequest {
     #[serde(default)]
     branch: Option<BranchId>,
 }
+
+async fn request_capability(
+    State(k): State<Arc<Kernel>>,
+    Json(req): Json<CapabilityRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let lease = k.request_capability(
+        &req.principal,
+        &Operation::new(req.operation),
+        &req.params,
+        req.branch.as_ref(),
+    )?;
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(&lease).map_err(KernelError::from)?)))
+}
+
+#[derive(Deserialize)]
+struct DelegateRequest {
+    delegator: PrincipalId,
+    parent_lease: LeaseId,
+    delegatee: PrincipalId,
+    #[serde(default)]
+    constraints: IndexMap<String, Constraint>,
+    uses: u32,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default = "ResourceBudget::zero")]
+    budget: ResourceBudget,
+}

@@ -335,3 +335,28 @@ struct TraceParams {
     #[serde(default)]
     limit: Option<usize>,
 }
+
+async fn trace_query(
+    State(k): State<Arc<Kernel>>,
+    Query(p): Query<TraceParams>,
+) -> ApiResult<impl IntoResponse> {
+    let q = TraceQuery {
+        episode: p.episode.as_deref().map(EpisodeId::parse).transpose()?,
+        branch: p.branch.as_deref().map(BranchId::parse).transpose()?,
+        step: p.step.as_deref().map(ak_core::ids::StepId::parse).transpose()?,
+        principal: p.principal.as_deref().map(PrincipalId::parse).transpose()?,
+        kinds: p.kind.as_deref().and_then(EventKind::parse).into_iter().collect(),
+        limit: p.limit,
+        ..TraceQuery::default()
+    };
+    let events = k.trace_query(&q)?;
+    Ok(Json(serde_json::to_value(&events).map_err(KernelError::from)?))
+}
+
+async fn get_receipt(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let receipt = k.receipt(&ReceiptId::parse(&id)?)?;
+    Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+}

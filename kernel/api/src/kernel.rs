@@ -26,3 +26,25 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{info, instrument, warn};
+
+/// Configuration for [`Kernel::open`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelConfig {
+    /// Directory holding every durable store (DAG db, CAS, ledger, identity
+    /// db, effect store, signing key, secret vault, workspaces).
+    pub data_dir: PathBuf,
+    /// Optional YAML policy document; when absent an empty (default-deny)
+    /// document is used.
+    #[serde(default)]
+    pub policy_file: Option<PathBuf>,
+    /// Optional initial workspace snapshotted as episode roots when an
+    /// episode is created without an explicit workspace.
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
+    /// Episode budget enforced by the scheduler at step boundaries.
+    #[serde(default = "default_episode_budget")]
+    pub episode_budget: ResourceBudget,
+    /// Maximum concurrently executing steps across branches.
+    #[serde(default = "default_fanout")]
+    pub max_concurrent_branches: usize,
+}

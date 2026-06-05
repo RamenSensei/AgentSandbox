@@ -311,3 +311,27 @@ async fn commit_effect(
     let receipt = k.commit_effect(&EffectId::parse(&id)?).await?;
     Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
 }
+
+async fn compensate_effect(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let receipt = k.compensate_effect(&EffectId::parse(&id)?).await?;
+    Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+}
+
+#[derive(Deserialize, Default)]
+struct TraceParams {
+    #[serde(default)]
+    episode: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    principal: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}

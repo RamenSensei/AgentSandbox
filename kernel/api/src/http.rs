@@ -289,3 +289,25 @@ async fn prepare_effect(
         "observed_preconditions": prepared.observed_preconditions,
     })))
 }
+
+#[derive(Deserialize)]
+struct ApproveRequest {
+    approver: PrincipalId,
+}
+
+async fn approve_effect(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+    Json(req): Json<ApproveRequest>,
+) -> ApiResult<impl IntoResponse> {
+    k.approve_effect(&EffectId::parse(&id)?, &req.approver)?;
+    Ok(Json(serde_json::json!({ "approved": id })))
+}
+
+async fn commit_effect(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let receipt = k.commit_effect(&EffectId::parse(&id)?).await?;
+    Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+}

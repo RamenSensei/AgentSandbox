@@ -75,3 +75,32 @@ impl KernelConfig {
         }
     }
 }
+
+/// Per-episode bookkeeping the façade keeps in memory.
+#[derive(Debug, Clone)]
+struct EpisodeInfo {
+    root_branch: BranchId,
+    root_state: StateId,
+    branches: Vec<BranchId>,
+    created_by: PrincipalId,
+}
+
+/// Wire-friendly description of an episode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeDescription {
+    pub episode: EpisodeId,
+    pub root_branch: BranchId,
+    pub root_state: StateId,
+    pub branches: Vec<Branch>,
+    pub created_by: PrincipalId,
+    pub remaining_budget: ResourceBudget,
+}
+
+/// Result of one [`Kernel::execute_step`] call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepResult {
+    pub step: StepId,
+    /// Branch head after the step (unchanged when the step was denied).
+    pub state: StateId,
+    pub observation: Observation,
+}

@@ -104,3 +104,39 @@ pub struct StepResult {
     pub state: StateId,
     pub observation: Observation,
 }
+
+/// Report produced by [`Kernel::replay_sandbox`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplaySandboxReport {
+    pub step: StepId,
+    /// Exit code recorded in the original observation.
+    pub original_exit_code: Option<i32>,
+    /// Exit code of the re-execution.
+    pub rerun_exit_code: i32,
+    /// Whether the re-executed workspace tree hashed identically to the
+    /// recorded post-step state.
+    pub workspace_match: bool,
+    /// Replay class of the recorded state (sandbox replay requires at least
+    /// `filesystem_only`).
+    pub replay_class: ReplayClass,
+}
+
+/// The composed AgentKernel. See the crate docs for the replay guarantees
+/// and the module docs of every component crate for their invariants.
+pub struct Kernel {
+    config: KernelConfig,
+    dag: StateDag,
+    ledger: Arc<Ledger>,
+    delegation: DelegationService,
+    keypair: Arc<KernelKeypair>,
+    policy: RwLock<PolicyEngine>,
+    broker: Arc<EffectBroker>,
+    vault: Arc<SecretVault>,
+    scheduler: StepScheduler,
+    backend: Arc<LocalBackend>,
+    episodes: Mutex<HashMap<EpisodeId, EpisodeInfo>>,
+    /// Effect classes of registered connector operations, for contracts.
+    op_classes: Mutex<HashMap<String, EffectClass>>,
+    /// Registered connector names (routing prefixes).
+    connector_names: Mutex<Vec<String>>,
+}

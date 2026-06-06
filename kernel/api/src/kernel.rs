@@ -48,3 +48,30 @@ pub struct KernelConfig {
     #[serde(default = "default_fanout")]
     pub max_concurrent_branches: usize,
 }
+
+fn default_episode_budget() -> ResourceBudget {
+    ResourceBudget {
+        cpu_ms: 10 * 60 * 1000,
+        memory_bytes: 8 << 30,
+        network_bytes: 1 << 30,
+        tokens: 1_000_000,
+        cost_micro_usd: 10_000_000,
+        risk_units: 1000,
+    }
+}
+fn default_fanout() -> usize {
+    8
+}
+
+impl KernelConfig {
+    /// A config rooted at `data_dir` with defaults everywhere else.
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            policy_file: None,
+            workspace_root: None,
+            episode_budget: default_episode_budget(),
+            max_concurrent_branches: default_fanout(),
+        }
+    }
+}

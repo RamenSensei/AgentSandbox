@@ -140,3 +140,37 @@ pub struct Kernel {
     /// Registered connector names (routing prefixes).
     connector_names: Mutex<Vec<String>>,
 }
+
+impl std::fmt::Debug for Kernel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Kernel").field("data_dir", &self.config.data_dir).finish_non_exhaustive()
+    }
+}
+
+struct KeySigner(Arc<KernelKeypair>);
+
+impl ak_effect_broker::ReceiptSigner for KeySigner {
+    fn sign(&self, message: &[u8]) -> (String, String) {
+        (self.0.sign_bytes(message), self.0.key_id())
+    }
+}
+
+/// Extension: raw-byte signing over the identity keypair. The broker hands us
+/// canonical JSON bytes already, so we sign them as-is.
+trait SignBytes {
+    fn sign_bytes(&self, message: &[u8]) -> String;
+}
+
+impl SignBytes for KernelKeypair {
+    fn sign_bytes(&self, message: &[u8]) -> String {
+        // `sign_canonical` canonicalizes a serde value; the broker gives us
+        // the canonical bytes of a ReceiptBody. Signing the raw string value
+        // would double-encode, so we parse and re-sign the value: canonical
+        // JSON is a fixed point of canonicalization, so this signs exactly
+        // the bytes the broker hashed.
+        match serde_json::from_slice::<serde_json::Value>(message) {
+            Ok(v) => self.sign_canonical(&v),
+            Err(_) => self.sign_canonical(&String::from_utf8_lossy(message).into_owned()),
+        }
+    }
+}

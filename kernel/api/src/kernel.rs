@@ -1074,3 +1074,48 @@ impl Kernel {
         self.ledger.fetch_raw(hash)
     }
 }
+
+fn lock<'a, T>(m: &'a Mutex<T>) -> KernelResult<std::sync::MutexGuard<'a, T>> {
+    m.lock().map_err(|_| KernelError::Storage("kernel mutex poisoned".into()))
+}
+
+/// Map a deterministic lease-check failure to a machine-readable denial.
+fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure) -> Denial {
+    let (code, reason) = match failure {
+        LeaseCheckFailure::Revoked => {
+            (DenialCode::CapabilityDenied, "the presented lease has been revoked".to_string())
+        }
+        LeaseCheckFailure::Expired { expired_at } => (
+            DenialCode::CapabilityExpired,
+            format!("the presented lease expired at {expired_at}"),
+        ),
+        LeaseCheckFailure::Exhausted => (
+            DenialCode::CapabilityExhausted,
+            "the presented lease has no remaining uses".to_string(),
+        ),
+        LeaseCheckFailure::WrongPrincipal => (
+            DenialCode::CapabilityDenied,
+            "the presented lease belongs to a different principal".to_string(),
+        ),
+        LeaseCheckFailure::WrongOperation { granted } => (
+            DenialCode::CapabilityDenied,
+            format!("the presented lease grants `{}`, not this operation", granted.0),
+        ),
+        LeaseCheckFailure::WrongBranch { bound } => (
+            DenialCode::BranchMismatch,
+            format!("the presented lease is bound to branch `{bound}`; authority does not follow the agent across branches"),
+        ),
+        LeaseCheckFailure::ConstraintViolated { parameter } => (
+            DenialCode::ConstraintViolated,
+            format!("parameter `{parameter}` violates the lease constraints"),
+        ),
+    };
+    Denial {
+        code,
+        attempted_operation: operation.clone(),
+        reason,
+        safe_alternatives: Vec::new(),
+        requestable_scopes: Vec::new(),
+        escalation_allowed: true,
+    }
+}

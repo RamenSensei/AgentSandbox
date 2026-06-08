@@ -208,3 +208,33 @@ async fn denied_step_returns_structured_denial() {
         other => panic!("expected branch mismatch, got {other:?}"),
     }
 }
+
+/// A mock connector with a Compensatable operation and drift-free
+/// preconditions.
+struct MockConnector;
+
+#[async_trait]
+impl Connector for MockConnector {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn operations(&self) -> Vec<(String, EffectClass)> {
+        vec![("mock.create_widget".into(), EffectClass::Compensatable)]
+    }
+    fn canonicalize(&self, operation: &str, args: &serde_json::Value) -> KernelResult<serde_json::Value> {
+        assert_eq!(operation, "mock.create_widget");
+        Ok(args.clone())
+    }
+    async fn prepare(&self, _contract: &EffectContract) -> KernelResult<PreparedEffect> {
+        Ok(PreparedEffect {
+            preview: json!({ "action": "create a widget" }),
+            observed_preconditions: json!({ "widget_slot": "empty" }),
+        })
+    }
+    async fn commit(&self, contract: &EffectContract) -> KernelResult<CommitResult> {
+        Ok(CommitResult { response: json!({ "created": contract.arguments["name"] }) })
+    }
+    async fn compensate(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
+        Ok(CommitResult { response: json!({ "deleted": true }) })
+    }
+}

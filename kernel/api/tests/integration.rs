@@ -71,3 +71,31 @@ fn agent(kernel: &Kernel) -> Principal {
     kernel.register_principal(&p).expect("register");
     p
 }
+
+async fn shell(
+    kernel: &Kernel,
+    who: &Principal,
+    branch: &ak_core::ids::BranchId,
+    command: &str,
+) -> ak_api::StepResult {
+    let lease = kernel
+        .request_capability(&who.id, &Operation::new("proc.shell"), &json!({}), Some(branch))
+        .expect("shell lease");
+    kernel
+        .execute_step(
+            &who.id,
+            branch,
+            Action {
+                kind: ActionKind::Shell {
+                    command: command.into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
+                lease: lease.id,
+                intent_hint: None,
+                budget: ResourceBudget::step_default(),
+            },
+        )
+        .await
+        .expect("step executes")
+}

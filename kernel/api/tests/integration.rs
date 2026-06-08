@@ -20,3 +20,31 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+fn allow_rule(id: &str, ops: &[&str], uses: u32) -> PolicyRule {
+    PolicyRule {
+        id: id.into(),
+        principals: PrincipalSelector::default(),
+        operations: ops.iter().map(|s| s.to_string()).collect(),
+        effect: RuleEffect::Allow,
+        constraints: IndexMap::new(),
+        max_uses: uses,
+        ttl_seconds: 3600,
+        budget: None,
+        risk_weight: 0,
+        note: None,
+    }
+}
+
+fn test_policy() -> PolicyDocument {
+    PolicyDocument {
+        rules: vec![
+            allow_rule("shell", &["proc.shell"], 100),
+            allow_rule("fs", &["fs.*"], 100),
+            allow_rule("mock", &["mock.*"], 10),
+            allow_rule("meta", &["trace.query", "state.diff"], 100),
+        ],
+        egress_domains: vec!["api.github.com".into()],
+        ..PolicyDocument::default()
+    }
+}

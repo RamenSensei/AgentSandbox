@@ -145,3 +145,66 @@ async fn full_lifecycle_fork_compare_merge_discard() {
     let desc = kernel.describe_episode(&ep.episode).await.unwrap();
     assert_eq!(desc.branches.len(), 3);
 }
+
+#[tokio::test]
+async fn denied_step_returns_structured_denial() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let who = agent(&kernel);
+    let ep = kernel.create_episode(&who.id, None, "denial test").unwrap();
+
+    // No lease at all → structured denial, not an error.
+    let result = kernel
+        .execute_step(
+            &who.id,
+            &ep.branch,
+            Action {
+                kind: ActionKind::Shell { command: "id".into(), cwd: None, env: BTreeMap::new() },
+                lease: LeaseId::generate(),
+                intent_hint: None,
+                budget: ResourceBudget::step_default(),
+            },
+        )
+        .await
+        .expect("denial is an observation, not an Err");
+    match &result.observation {
+        Observation::Denied { denial } => {
+            assert_eq!(denial.code, DenialCode::CapabilityDenied);
+            assert_eq!(denial.attempted_operation.0, "proc.shell");
+            assert!(!denial.reason.is_empty());
+        }
+        other => panic!("expected denial, got {other:?}"),
+    }
+    // A DenialIssued event is in the ledger.
+    let events = kernel
+        .trace_query(&ak_causal_ledger::TraceQuery {
+            episode: Some(ep.episode.clone()),
+            kinds: vec![ak_causal_ledger::EventKind::DenialIssued],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(events.len(), 1);
+
+    // Lease bound to a different branch → BranchMismatch.
+    let other = kernel.fork_branch(&ep.branch).unwrap();
+    let lease = kernel
+        .request_capability(&who.id, &Operation::new("proc.shell"), &json!({}), Some(&other.id))
+        .unwrap();
+    let result = kernel
+        .execute_step(
+            &who.id,
+            &ep.branch,
+            Action {
+                kind: ActionKind::Shell { command: "id".into(), cwd: None, env: BTreeMap::new() },
+                lease: lease.id,
+                intent_hint: None,
+                budget: ResourceBudget::step_default(),
+            },
+        )
+        .await
+        .unwrap();
+    match &result.observation {
+        Observation::Denied { denial } => assert_eq!(denial.code, DenialCode::BranchMismatch),
+        other => panic!("expected branch mismatch, got {other:?}"),
+    }
+}

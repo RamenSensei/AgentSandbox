@@ -48,3 +48,26 @@ fn test_policy() -> PolicyDocument {
         ..PolicyDocument::default()
     }
 }
+
+fn kernel_in(tmp: &tempfile::TempDir) -> Arc<Kernel> {
+    let mut config = KernelConfig::new(tmp.path().join("data"));
+    config.episode_budget = ResourceBudget {
+        cpu_ms: 10 * 60 * 1000,
+        memory_bytes: 8 << 30,
+        network_bytes: 1 << 30,
+        tokens: 1_000_000,
+        cost_micro_usd: 10_000_000,
+        risk_units: 1000,
+    };
+    let kernel = Kernel::open(config).expect("kernel opens");
+    kernel
+        .with_policy_mut(|p| *p.document_mut() = test_policy())
+        .expect("policy set");
+    Arc::new(kernel)
+}
+
+fn agent(kernel: &Kernel) -> Principal {
+    let p = Principal::new_agent("test-agent");
+    kernel.register_principal(&p).expect("register");
+    p
+}

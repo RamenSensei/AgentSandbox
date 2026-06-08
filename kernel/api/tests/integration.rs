@@ -99,3 +99,49 @@ async fn shell(
         .await
         .expect("step executes")
 }
+
+#[tokio::test]
+async fn full_lifecycle_fork_compare_merge_discard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let who = agent(&kernel);
+
+    let ep = kernel.create_episode(&who.id, None, "fix the widget").unwrap();
+    let r = shell(&kernel, &who, &ep.branch, "printf base > base.txt").await;
+    assert!(matches!(r.observation, Observation::Success { .. }));
+
+    // Fork two candidate branches and apply different edits.
+    let a = kernel.fork_branch(&ep.branch).unwrap();
+    let b = kernel.fork_branch(&ep.branch).unwrap();
+    let ra = shell(&kernel, &who, &a.id, "printf fix-a > fix_a.txt").await;
+    assert!(matches!(ra.observation, Observation::Success { .. }));
+    let rb = shell(&kernel, &who, &b.id, "printf fix-b > fix_b.txt").await;
+    assert!(matches!(rb.observation, Observation::Success { .. }));
+
+    // Compare: each branch changed exactly its own file.
+    let cmp = kernel.branch_compare(&a.id, &b.id).unwrap();
+    assert_eq!(cmp.changed_in_a.len(), 1);
+    assert_eq!(cmp.changed_in_b.len(), 1);
+    assert_eq!(cmp.changed_in_a[0].path(), "fix_a.txt");
+    assert_eq!(cmp.changed_in_b[0].path(), "fix_b.txt");
+
+    // Merge the winner (a) into main, discard the loser (b).
+    let merged = kernel.merge_branch(&ep.branch, &a.id, &who.id).unwrap();
+    assert!(merged.merge_parent.is_some());
+    kernel.discard_branch(&b.id).await.unwrap();
+    assert!(kernel.discard_branch(&b.id).await.is_err(), "double discard fails");
+
+    // The merged workspace contains both base and the winning fix.
+    let read = shell(&kernel, &who, &ep.branch, "cat base.txt fix_a.txt").await;
+    match &read.observation {
+        Observation::Success { stdout_head: Some(head), .. } => {
+            assert!(head.contains("base") && head.contains("fix-a"), "got {head}")
+        }
+        other => panic!("expected success, got {other:?}"),
+    }
+
+    // Ledger chain is intact and the episode describes correctly.
+    kernel.ledger().verify_chain().unwrap();
+    let desc = kernel.describe_episode(&ep.episode).await.unwrap();
+    assert_eq!(desc.branches.len(), 3);
+}

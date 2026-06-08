@@ -238,3 +238,78 @@ impl Connector for MockConnector {
         Ok(CommitResult { response: json!({ "deleted": true }) })
     }
 }
+
+#[tokio::test]
+async fn effect_lifecycle_with_signed_receipt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    kernel.register_connector(Arc::new(MockConnector)).unwrap();
+    let who = agent(&kernel);
+    let ep = kernel.create_episode(&who.id, None, "effect test").unwrap();
+
+    let lease = kernel
+        .request_capability(
+            &who.id,
+            &Operation::new("mock.create_widget"),
+            &json!({ "name": "w1" }),
+            Some(&ep.branch),
+        )
+        .unwrap();
+    let result = kernel
+        .execute_step(
+            &who.id,
+            &ep.branch,
+            Action {
+                kind: ActionKind::ConnectorOp {
+                    connector: "mock".into(),
+                    operation: "create_widget".into(),
+                    params: json!({ "name": "w1" }),
+                },
+                lease: lease.id,
+                intent_hint: Some("create the widget".into()),
+                budget: ResourceBudget::step_default(),
+            },
+        )
+        .await
+        .unwrap();
+    let effect_id = match &result.observation {
+        Observation::EffectPending { effect, class, .. } => {
+            assert_eq!(*class, EffectClass::Compensatable);
+            effect.clone()
+        }
+        other => panic!("expected pending effect, got {other:?}"),
+    };
+
+    let prepared = kernel.prepare_effect(&effect_id).await.unwrap();
+    assert_eq!(prepared.observed_preconditions["widget_slot"], "empty");
+    kernel.approve_effect(&effect_id, &who.id).unwrap();
+    let receipt = kernel.commit_effect(&effect_id).await.unwrap();
+    assert_eq!(receipt.body.operation, "mock.create_widget");
+
+    // Verify the Ed25519 signature against the kernel public key.
+    assert!(kernel.verify_receipt(&receipt).unwrap());
+    assert_eq!(receipt.key_id, kernel.keypair().key_id());
+    let mut tampered = receipt.clone();
+    tampered.body.resource = "someone/else".into();
+    assert!(!kernel.verify_receipt(&tampered).unwrap());
+
+    // Full effect chain is in the ledger.
+    let kinds: Vec<_> = kernel
+        .trace_query(&ak_causal_ledger::TraceQuery {
+            episode: Some(ep.episode.clone()),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    use ak_causal_ledger::EventKind as K;
+    for k in [K::EffectProposed, K::EffectPrepared, K::EffectApproved, K::EffectCommitted] {
+        assert!(kinds.contains(&k), "missing {k:?} in {kinds:?}");
+    }
+
+    // Compensation produces a second signed receipt.
+    let comp = kernel.compensate_effect(&effect_id).await.unwrap();
+    assert!(comp.body.operation.ends_with(".compensate"));
+    assert!(kernel.verify_receipt(&comp).unwrap());
+}

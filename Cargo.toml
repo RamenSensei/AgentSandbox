@@ -17,6 +17,7 @@ members = [
     "connectors/github",
     "connectors/http",
     "connectors/mcp",
+    "conformance",
 ]
 
 [workspace.package]

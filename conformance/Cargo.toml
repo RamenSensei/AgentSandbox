@@ -1,0 +1,21 @@
+[package]
+name = "ak-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ak-core = { workspace = true }
+ak-policy = { workspace = true }
+ak-causal-ledger = { workspace = true }
+ak-api = { path = "../kernel/api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+indexmap = { workspace = true }
+chrono = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }

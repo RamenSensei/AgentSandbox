@@ -313,3 +313,43 @@ async fn effect_lifecycle_with_signed_receipt() {
     assert!(comp.body.operation.ends_with(".compensate"));
     assert!(kernel.verify_receipt(&comp).unwrap());
 }
+
+#[tokio::test]
+async fn sandbox_replay_reproduces_a_recorded_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let who = agent(&kernel);
+    let ep = kernel.create_episode(&who.id, None, "replay test").unwrap();
+    let r = shell(&kernel, &who, &ep.branch, "printf deterministic > out.txt").await;
+    let report = kernel.replay_sandbox(&r.step).await.unwrap();
+    assert_eq!(report.rerun_exit_code, 0);
+    assert_eq!(report.original_exit_code, Some(0));
+    assert!(report.workspace_match, "deterministic step must replay byte-identically");
+}
+
+// ---------------------------------------------------------------- HTTP layer
+
+async fn req_json(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    let body = match body {
+        Some(v) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&v).unwrap())
+        }
+        None => Body::empty(),
+    };
+    let resp = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, value)
+}

@@ -353,3 +353,90 @@ async fn req_json(
     };
     (status, value)
 }
+
+#[tokio::test]
+async fn http_smoke_lifecycle_and_denial() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let who = agent(&kernel);
+    let app = http::router(kernel.clone());
+
+    // Create an episode.
+    let (status, ep) = req_json(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some(json!({ "principal": who.id, "objective": "http smoke" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let episode = ep["episode"].as_str().unwrap().to_string();
+    let branch = ep["branch"].as_str().unwrap().to_string();
+
+    // Describe it.
+    let (status, desc) = req_json(&app, "GET", &format!("/v1/episodes/{episode}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(desc["branches"].as_array().unwrap().len(), 1);
+
+    // Request a capability over HTTP and execute a step with it.
+    let (status, lease) = req_json(
+        &app,
+        "POST",
+        "/v1/capabilities/request",
+        Some(json!({ "principal": who.id, "operation": "proc.shell", "params": {}, "branch": branch })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, step) = req_json(
+        &app,
+        "POST",
+        "/v1/steps/execute",
+        Some(json!({
+            "principal": who.id,
+            "branch": branch,
+            "action": {
+                "kind": { "kind": "shell", "command": "printf via-http > http.txt" },
+                "lease": lease["id"],
+                "budget": ResourceBudget::step_default(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "step response: {step}");
+    assert_eq!(step["observation"]["kind"], "success");
+
+    // Denial path: unknown lease → HTTP 403 with the full Denial JSON.
+    let (status, denied) = req_json(
+        &app,
+        "POST",
+        "/v1/steps/execute",
+        Some(json!({
+            "principal": who.id,
+            "branch": branch,
+            "action": {
+                "kind": { "kind": "shell", "command": "id" },
+                "lease": "lease-nonexistent",
+                "budget": ResourceBudget::step_default(),
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denied["error"]["code"], "DENIED");
+    assert_eq!(denied["error"]["denial"]["code"], "CAPABILITY_DENIED");
+    assert_eq!(denied["observation"]["kind"], "denied");
+
+    // Unknown episode → 404 error envelope.
+    let (status, err) = req_json(&app, "GET", "/v1/episodes/ep-missing", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(err["code"], "NOT_FOUND");
+
+    // Fork over HTTP, then compare.
+    let (status, forked) = req_json(&app, "POST", &format!("/v1/branches/{branch}/fork"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let other = forked["id"].as_str().unwrap();
+    let (status, cmp) =
+        req_json(&app, "GET", &format!("/v1/branches/{branch}/compare/{other}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cmp["changed_in_a"].as_array().unwrap().is_empty());
+}

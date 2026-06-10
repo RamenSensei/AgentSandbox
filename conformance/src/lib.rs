@@ -127,3 +127,111 @@ fn allow_rule(id: &str, ops: &[&str], uses: u32, ttl: u64) -> PolicyRule {
         note: None,
     }
 }
+
+impl Fixture {
+    /// Build a fixture. `shell_uses` bounds the compiled shell lease and
+    /// `episode_budget` overrides the scheduler budget when given.
+    pub async fn build(
+        shell_uses: u32,
+        episode_budget: Option<ResourceBudget>,
+        mock_class: EffectClass,
+    ) -> Result<Self, String> {
+        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let mut config = KernelConfig::new(tmp.path().join("data"));
+        if let Some(b) = episode_budget {
+            config.episode_budget = b;
+        }
+        let kernel = Kernel::open(config).map_err(|e| e.to_string())?;
+        kernel
+            .with_policy_mut(|p| {
+                *p.document_mut() = PolicyDocument {
+                    rules: vec![
+                        allow_rule("shell", &["proc.shell"], shell_uses, 3600),
+                        allow_rule("fs", &["fs.*"], 100, 3600),
+                        allow_rule("mock", &["mock.*"], 10, 3600),
+                    ],
+                    ..PolicyDocument::default()
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        let mock = Arc::new(DriftableConnector::new(mock_class));
+        let mock_world = Arc::clone(&mock.world);
+        kernel.register_connector(mock).map_err(|e| e.to_string())?;
+        let agent = Principal::new_agent("conformance-agent");
+        kernel.register_principal(&agent).map_err(|e| e.to_string())?;
+        let ep = kernel.create_episode(&agent.id, None, "conformance").map_err(|e| e.to_string())?;
+        Ok(Self {
+            kernel: Arc::new(kernel),
+            agent,
+            episode: ep.episode,
+            branch: ep.branch,
+            mock_world,
+            _tmp: tmp,
+        })
+    }
+
+    /// Request a branch-bound lease for `operation`.
+    pub fn lease(&self, operation: &str, branch: &BranchId) -> Result<LeaseId, String> {
+        self.kernel
+            .request_capability(&self.agent.id, &Operation::new(operation), &json!({}), Some(branch))
+            .map(|l| l.id)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Execute a shell step on `branch` with `lease` and `budget`.
+    pub async fn shell_with(
+        &self,
+        branch: &BranchId,
+        lease: LeaseId,
+        command: &str,
+        budget: ResourceBudget,
+    ) -> Result<ak_api::StepResult, String> {
+        self.kernel
+            .execute_step(
+                &self.agent.id,
+                branch,
+                Action {
+                    kind: ActionKind::Shell { command: command.into(), cwd: None, env: BTreeMap::new() },
+                    lease,
+                    intent_hint: None,
+                    budget,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Convenience: fresh lease + default step budget.
+    pub async fn shell(&self, branch: &BranchId, command: &str) -> Result<ak_api::StepResult, String> {
+        let lease = self.lease("proc.shell", branch)?;
+        self.shell_with(branch, lease, command, ResourceBudget::step_default()).await
+    }
+
+    /// Propose a mock effect through a full kernel step.
+    pub async fn propose_mock(&self) -> Result<ak_core::ids::EffectId, String> {
+        let lease = self.lease("mock.poke", &self.branch)?;
+        let world = self.mock_world.lock().map(|w| w.clone()).unwrap_or_default();
+        let result = self
+            .kernel
+            .execute_step(
+                &self.agent.id,
+                &self.branch,
+                Action {
+                    kind: ActionKind::ConnectorOp {
+                        connector: "mock".into(),
+                        operation: "poke".into(),
+                        params: json!({ "preconditions": { "world": world } }),
+                    },
+                    lease,
+                    intent_hint: None,
+                    budget: ResourceBudget::step_default(),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        match result.observation {
+            Observation::EffectPending { effect, .. } => Ok(effect),
+            other => Err(format!("expected pending effect, got {other:?}")),
+        }
+    }
+}

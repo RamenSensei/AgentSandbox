@@ -26,3 +26,34 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// One conformance case loaded from YAML.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Case {
+    /// Human-readable case name.
+    pub name: String,
+    /// What protocol requirement this case checks.
+    pub description: String,
+    /// Driver key; see [`run_case`] for the supported kinds.
+    pub kind: String,
+    /// Driver-specific parameters.
+    #[serde(default)]
+    pub params: Value,
+}
+
+/// Load every `*.yaml` case in `dir`, sorted by file name.
+pub fn load_cases(dir: &Path) -> Result<Vec<Case>, String> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("read {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "yaml" || x == "yml").unwrap_or(false))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|p| {
+            let raw = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            serde_yaml::from_str(&raw).map_err(|e| format!("{}: {e}", p.display()))
+        })
+        .collect()
+}

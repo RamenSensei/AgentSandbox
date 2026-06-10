@@ -57,3 +57,47 @@ pub fn load_cases(dir: &Path) -> Result<Vec<Case>, String> {
         })
         .collect()
 }
+
+// ---------------------------------------------------------------- fixture
+
+/// A mock connector whose observed precondition value is externally mutable
+/// (to simulate external-world drift) and whose single operation's effect
+/// class is configurable.
+pub struct DriftableConnector {
+    class: EffectClass,
+    /// The externally observable state (compared against contract
+    /// preconditions at prepare/commit time by the broker).
+    pub world: Arc<Mutex<String>>,
+}
+
+impl DriftableConnector {
+    pub fn new(class: EffectClass) -> Self {
+        Self { class, world: Arc::new(Mutex::new("state-1".into())) }
+    }
+}
+
+#[async_trait]
+impl Connector for DriftableConnector {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn operations(&self) -> Vec<(String, EffectClass)> {
+        vec![("mock.poke".into(), self.class)]
+    }
+    fn canonicalize(&self, _operation: &str, args: &Value) -> KernelResult<Value> {
+        Ok(args.clone())
+    }
+    async fn prepare(&self, _contract: &EffectContract) -> KernelResult<PreparedEffect> {
+        let world = self.world.lock().map(|w| w.clone()).unwrap_or_default();
+        Ok(PreparedEffect {
+            preview: json!({ "action": "poke", "world": world }),
+            observed_preconditions: json!({ "world": world }),
+        })
+    }
+    async fn commit(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
+        Ok(CommitResult { response: json!({ "poked": true }) })
+    }
+    async fn compensate(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
+        Ok(CommitResult { response: json!({ "unpoked": true }) })
+    }
+}

@@ -101,3 +101,29 @@ impl Connector for DriftableConnector {
         Ok(CommitResult { response: json!({ "unpoked": true }) })
     }
 }
+
+/// A conformance fixture: a fresh kernel in a temp dir with a permissive
+/// test policy, a registered agent, an episode, and a mock connector.
+pub struct Fixture {
+    pub kernel: Arc<Kernel>,
+    pub agent: Principal,
+    pub episode: ak_core::ids::EpisodeId,
+    pub branch: BranchId,
+    pub mock_world: Arc<Mutex<String>>,
+    _tmp: tempfile::TempDir,
+}
+
+fn allow_rule(id: &str, ops: &[&str], uses: u32, ttl: u64) -> PolicyRule {
+    PolicyRule {
+        id: id.into(),
+        principals: PrincipalSelector::default(),
+        operations: ops.iter().map(|s| s.to_string()).collect(),
+        effect: RuleEffect::Allow,
+        constraints: IndexMap::new(),
+        max_uses: uses,
+        ttl_seconds: ttl,
+        budget: None,
+        risk_weight: 0,
+        note: None,
+    }
+}

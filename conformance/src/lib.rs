@@ -391,3 +391,69 @@ async fn lease_exhaustion(params: &Value) -> Result<(), String> {
     let r = f.shell_with(&f.branch, lease, "true", ResourceBudget::step_default()).await?;
     expect_denial(&r.observation, DenialCode::CapabilityExhausted)
 }
+
+async fn lease_branch_binding(_params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let other = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
+    let lease = f.lease("proc.shell", &other.id)?;
+    // Presenting a lease bound to `other` on the main branch must fail.
+    let r = f.shell_with(&f.branch, lease, "true", ResourceBudget::step_default()).await?;
+    expect_denial(&r.observation, DenialCode::BranchMismatch)
+}
+
+async fn attenuation_no_widening(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let child = f.agent.spawn_child(ak_core::PrincipalKind::SubAgent, "worker");
+    f.kernel.register_principal(&child).map_err(|e| e.to_string())?;
+    let parent = f.lease("proc.shell", &f.branch)?;
+    let parent_lease = f.kernel.leases().get(&parent).map_err(|e| e.to_string())?;
+    // Widen the use count beyond the parent's — must be rejected.
+    let extra_uses = p_u64(params, "extra_uses", 1000) as u32;
+    match f.kernel.delegate(
+        &f.agent.id,
+        &parent,
+        &child.id,
+        IndexMap::new(),
+        parent_lease.remaining_uses + extra_uses,
+        parent_lease.expires_at,
+        ResourceBudget::zero(),
+    ) {
+        Err(_) => {}
+        Ok(l) => return Err(format!("widened delegation must be rejected, got lease {}", l.id)),
+    }
+    // Also: widening a constraint must be rejected at the capability layer.
+    let mut constraints = IndexMap::new();
+    constraints.insert("command".into(), Constraint::Prefix { prefix: "cargo ".into() });
+    let mut narrow = parent_lease.clone();
+    narrow.constraints = constraints;
+    let mut widened = IndexMap::new();
+    widened.insert("command".into(), Constraint::Prefix { prefix: "".into() });
+    match narrow.attenuate(
+        child.id.clone(),
+        widened,
+        1,
+        narrow.expires_at,
+        ResourceBudget::zero(),
+        Utc::now(),
+    ) {
+        Err(ak_core::capability::AttenuationError::ConstraintWidened { .. }) => {}
+        other => return Err(format!("expected ConstraintWidened, got {other:?}")),
+    }
+    // A proper narrowing succeeds and records lineage.
+    let ok = f
+        .kernel
+        .delegate(
+            &f.agent.id,
+            &parent,
+            &child.id,
+            IndexMap::new(),
+            1,
+            parent_lease.expires_at,
+            ResourceBudget::zero(),
+        )
+        .map_err(|e| e.to_string())?;
+    if ok.parent_lease.as_ref() != Some(&parent) {
+        return Err("attenuated lease must record its parent".into());
+    }
+    Ok(())
+}

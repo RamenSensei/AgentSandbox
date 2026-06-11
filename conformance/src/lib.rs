@@ -235,3 +235,45 @@ impl Fixture {
         }
     }
 }
+
+fn expect_denial(obs: &Observation, code: DenialCode) -> Result<(), String> {
+    match obs {
+        Observation::Denied { denial } if denial.code == code => Ok(()),
+        Observation::Denied { denial } => {
+            Err(format!("expected denial code {code:?}, got {:?}", denial.code))
+        }
+        other => Err(format!("expected a denial, got {other:?}")),
+    }
+}
+
+fn p_str<'a>(params: &'a Value, key: &str, default: &'a str) -> &'a str {
+    params.get(key).and_then(Value::as_str).unwrap_or(default)
+}
+fn p_u64(params: &Value, key: &str, default: u64) -> u64 {
+    params.get(key).and_then(Value::as_u64).unwrap_or(default)
+}
+
+// ------------------------------------------------------------------ drivers
+
+/// Run one conformance case. Returns `Err` with a diagnostic on failure.
+pub async fn run_case(case: &Case) -> Result<(), String> {
+    let params = &case.params;
+    match case.kind.as_str() {
+        "episode_lifecycle" => episode_lifecycle(params).await,
+        "step_observation_shape" => step_observation_shape(params).await,
+        "denial_machine_readable" => denial_machine_readable(params).await,
+        "lease_expiry" => lease_expiry(params).await,
+        "lease_exhaustion" => lease_exhaustion(params).await,
+        "lease_branch_binding" => lease_branch_binding(params).await,
+        "attenuation_no_widening" => attenuation_no_widening(params).await,
+        "effect_phase_machine" => effect_phase_machine(params).await,
+        "irreversible_requires_approval" => irreversible_requires_approval(params).await,
+        "duplicate_idempotency" => duplicate_idempotency(params).await,
+        "stale_precondition_abort" => stale_precondition_abort(params).await,
+        "merge_conflict_reporting" => merge_conflict_reporting(params).await,
+        "replay_class_honesty" => replay_class_honesty(params).await,
+        "budget_refusal" => budget_refusal(params).await,
+        "trace_causality" => trace_causality(params).await,
+        other => Err(format!("unknown case kind `{other}`")),
+    }
+}

@@ -361,3 +361,33 @@ async fn denial_machine_readable(_params: &Value) -> Result<(), String> {
         other => Err(format!("expected structured denial, got {other:?}")),
     }
 }
+
+async fn lease_expiry(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let lease_id = f.lease("proc.shell", &f.branch)?;
+    let lease = f.kernel.leases().get(&lease_id).map_err(|e| e.to_string())?;
+    let skew = Duration::seconds(p_u64(params, "skew_seconds", 7200) as i64);
+    // Deterministic clock: the same lease refuses once past its expiry.
+    let future = Utc::now() + skew;
+    match lease.check(&f.agent.id, &Operation::new("proc.shell"), &json!({}), Some(&f.branch), future)
+    {
+        Err(ak_core::capability::LeaseCheckFailure::Expired { .. }) => Ok(()),
+        other => Err(format!("expected Expired at now+{skew}, got {other:?}")),
+    }
+}
+
+async fn lease_exhaustion(params: &Value) -> Result<(), String> {
+    let uses = p_u64(params, "uses", 1) as u32;
+    let f = Fixture::build(uses, None, EffectClass::Compensatable).await?;
+    let lease = f.lease("proc.shell", &f.branch)?;
+    for _ in 0..uses {
+        let r = f
+            .shell_with(&f.branch, lease.clone(), "true", ResourceBudget::step_default())
+            .await?;
+        if !matches!(r.observation, Observation::Success { .. }) {
+            return Err(format!("in-budget use must succeed: {:?}", r.observation));
+        }
+    }
+    let r = f.shell_with(&f.branch, lease, "true", ResourceBudget::step_default()).await?;
+    expect_denial(&r.observation, DenialCode::CapabilityExhausted)
+}

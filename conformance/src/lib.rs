@@ -326,3 +326,38 @@ async fn step_observation_shape(params: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+
+async fn denial_machine_readable(_params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    // Unknown lease → denial observation with every required field.
+    let r = f
+        .shell_with(&f.branch, LeaseId::generate(), "id", ResourceBudget::step_default())
+        .await?;
+    let Observation::Denied { denial } = &r.observation else {
+        return Err(format!("expected denial, got {:?}", r.observation));
+    };
+    let v = serde_json::to_value(denial).map_err(|e| e.to_string())?;
+    for key in ["code", "attempted_operation", "reason", "escalation_allowed"] {
+        if v.get(key).is_none() {
+            return Err(format!("denial must carry `{key}`: {v}"));
+        }
+    }
+    if denial.reason.is_empty() {
+        return Err("denial reason must be non-empty".into());
+    }
+    // Default-deny operations are denied with a structured error too.
+    match f.kernel.request_capability(
+        &f.agent.id,
+        &Operation::new("net.raw_socket"),
+        &json!({}),
+        Some(&f.branch),
+    ) {
+        Err(KernelError::Denied(d)) => {
+            if d.code != DenialCode::CapabilityDenied {
+                return Err(format!("default deny must be CAPABILITY_DENIED, got {:?}", d.code));
+            }
+            Ok(())
+        }
+        other => Err(format!("expected structured denial, got {other:?}")),
+    }
+}

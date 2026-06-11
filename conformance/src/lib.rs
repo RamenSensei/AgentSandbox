@@ -277,3 +277,52 @@ pub async fn run_case(case: &Case) -> Result<(), String> {
         other => Err(format!("unknown case kind `{other}`")),
     }
 }
+
+async fn episode_lifecycle(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let file = p_str(params, "file", "hello.txt");
+    let r = f.shell(&f.branch, &format!("printf hi > {file}")).await?;
+    if !matches!(r.observation, Observation::Success { .. }) {
+        return Err(format!("step failed: {:?}", r.observation));
+    }
+    let desc = f.kernel.describe_episode(&f.episode).await.map_err(|e| e.to_string())?;
+    if desc.branches.len() != 1 {
+        return Err(format!("expected 1 branch, got {}", desc.branches.len()));
+    }
+    let head = f.kernel.dag().head(&f.branch).map_err(|e| e.to_string())?;
+    if head.id != r.state {
+        return Err("branch head must advance to the step's state".into());
+    }
+    if !head.delta.files.iter().any(|c| c.path() == file) {
+        return Err(format!("delta must record `{file}`: {:?}", head.delta.files));
+    }
+    Ok(())
+}
+
+async fn step_observation_shape(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let text = p_str(params, "text", "observable-output");
+    let r = f.shell(&f.branch, &format!("printf {text}")).await?;
+    let Observation::Success { summary, stdout_head, exit_code, full_output, truncated, .. } =
+        &r.observation
+    else {
+        return Err(format!("expected success, got {:?}", r.observation));
+    };
+    if summary.is_empty() {
+        return Err("summary must be non-empty".into());
+    }
+    if *exit_code != 0 || *truncated {
+        return Err("small output must not truncate".into());
+    }
+    if stdout_head.as_deref() != Some(text) {
+        return Err(format!("stdout_head must carry the head bytes, got {stdout_head:?}"));
+    }
+    if !full_output.as_str().starts_with("sha256:") {
+        return Err("full_output must be a sha256 content hash".into());
+    }
+    let raw = f.kernel.fetch_raw(full_output).map_err(|e| e.to_string())?;
+    if raw != text.as_bytes() {
+        return Err("full output blob must be addressable in the ledger raw store".into());
+    }
+    Ok(())
+}

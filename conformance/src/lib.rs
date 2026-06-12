@@ -554,3 +554,45 @@ async fn stale_precondition_abort(params: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+
+async fn merge_conflict_reporting(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let file = p_str(params, "file", "conflict.txt");
+    f.shell(&f.branch, &format!("printf base > {file}")).await?;
+    let a = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
+    let b = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
+    f.shell(&a.id, &format!("printf edit-a > {file}")).await?;
+    f.shell(&b.id, &format!("printf edit-b > {file}")).await?;
+    f.kernel.merge_branch(&f.branch, &a.id, &f.agent.id).map_err(|e| e.to_string())?;
+    match f.kernel.merge_branch(&f.branch, &b.id, &f.agent.id) {
+        Err(KernelError::MergeConflict { paths }) => {
+            if paths != vec![file.to_string()] {
+                return Err(format!("conflict must name `{file}`, got {paths:?}"));
+            }
+            Ok(())
+        }
+        other => Err(format!("expected MergeConflict, got {other:?}")),
+    }
+}
+
+async fn replay_class_honesty(_params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let r = f.shell(&f.branch, "printf replayable > r.txt").await?;
+    let head = f.kernel.dag().head(&f.branch).map_err(|e| e.to_string())?;
+    // The local backend must record FilesystemOnly — no over-claiming.
+    if head.replay_class != ReplayClass::FilesystemOnly {
+        return Err(format!("local steps must record FilesystemOnly, got {:?}", head.replay_class));
+    }
+    if !head.replay_class.supports(ReplayMode::Audit) {
+        return Err("every class must support audit replay".into());
+    }
+    if ReplayClass::AuditOnly.supports(ReplayMode::Sandbox) {
+        return Err("AuditOnly must not claim sandbox replay".into());
+    }
+    // Sandbox replay of a deterministic step reproduces the workspace.
+    let report = f.kernel.replay_sandbox(&r.step).await.map_err(|e| e.to_string())?;
+    if !report.workspace_match {
+        return Err("deterministic step must replay byte-identically".into());
+    }
+    Ok(())
+}

@@ -483,3 +483,51 @@ async fn effect_phase_machine(_params: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+
+async fn irreversible_requires_approval(_params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Irreversible).await?;
+    let effect = f.propose_mock().await?;
+    f.kernel.prepare_effect(&effect).await.map_err(|e| e.to_string())?;
+    // Irreversible effects can never commit straight from Prepared.
+    match f.kernel.commit_effect(&effect).await {
+        Err(KernelError::WrongEffectPhase { expected, .. }) if expected == "approved" => {}
+        other => return Err(format!("expected WrongEffectPhase(approved), got {other:?}")),
+    }
+    f.kernel.approve_effect(&effect, &f.agent.id).map_err(|e| e.to_string())?;
+    f.kernel.commit_effect(&effect).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn duplicate_idempotency(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let key = p_str(params, "idempotency_key", "conformance-dup-1");
+    let contract = |world: &str| EffectContract {
+        operation: "mock.poke".into(),
+        resource: "mock".into(),
+        arguments: json!({}),
+        preconditions: json!({ "world": world }),
+        idempotency_key: key.to_string(),
+        class: EffectClass::Compensatable,
+    };
+    let world = f.mock_world.lock().map(|w| w.clone()).unwrap_or_default();
+    let step = StepId::generate();
+    let lease = f.lease("mock.poke", &f.branch)?;
+    let broker = f.kernel.broker();
+    let e1 = broker
+        .propose(contract(&world), f.agent.id.clone(), f.branch.clone(), step.clone(), lease.clone())
+        .map_err(|e| e.to_string())?;
+    f.kernel.prepare_effect(&e1.id).await.map_err(|e| e.to_string())?;
+    f.kernel.approve_effect(&e1.id, &f.agent.id).map_err(|e| e.to_string())?;
+    f.kernel.commit_effect(&e1.id).await.map_err(|e| e.to_string())?;
+    // A retried proposal under the same key must be refused with the
+    // original receipt named.
+    match broker.propose(contract(&world), f.agent.id.clone(), f.branch.clone(), step, lease) {
+        Err(KernelError::DuplicateCommit { key: k, receipt }) => {
+            if k != key || receipt.is_empty() {
+                return Err("duplicate must name the key and the original receipt".into());
+            }
+            Ok(())
+        }
+        other => Err(format!("expected DuplicateCommit, got {other:?}")),
+    }
+}

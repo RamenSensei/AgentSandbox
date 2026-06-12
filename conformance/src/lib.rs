@@ -531,3 +531,26 @@ async fn duplicate_idempotency(params: &Value) -> Result<(), String> {
         other => Err(format!("expected DuplicateCommit, got {other:?}")),
     }
 }
+
+async fn stale_precondition_abort(params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let effect = f.propose_mock().await?;
+    f.kernel.prepare_effect(&effect).await.map_err(|e| e.to_string())?;
+    f.kernel.approve_effect(&effect, &f.agent.id).map_err(|e| e.to_string())?;
+    // The world drifts between approval and commit.
+    let drifted = p_str(params, "drifted_value", "state-2");
+    *f.mock_world.lock().map_err(|e| e.to_string())? = drifted.to_string();
+    match f.kernel.commit_effect(&effect).await {
+        Err(KernelError::StaleAuthorization { reason }) => {
+            if reason.is_empty() {
+                return Err("stale abort must carry a reason".into());
+            }
+        }
+        other => return Err(format!("expected StaleAuthorization, got {other:?}")),
+    }
+    let e = f.kernel.effect(&effect).map_err(|e| e.to_string())?;
+    if !matches!(e.phase, EffectPhase::Aborted { .. }) {
+        return Err(format!("stale effect must be Aborted, got {:?}", e.phase));
+    }
+    Ok(())
+}

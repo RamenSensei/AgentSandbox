@@ -457,3 +457,29 @@ async fn attenuation_no_widening(params: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+
+async fn effect_phase_machine(_params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let effect = f.propose_mock().await?;
+    // approve before prepare → refused.
+    if f.kernel.approve_effect(&effect, &f.agent.id).is_ok() {
+        return Err("approve before prepare must be refused".into());
+    }
+    f.kernel.prepare_effect(&effect).await.map_err(|e| e.to_string())?;
+    // prepare twice → refused.
+    if f.kernel.prepare_effect(&effect).await.is_ok() {
+        return Err("double prepare must be refused".into());
+    }
+    f.kernel.approve_effect(&effect, &f.agent.id).map_err(|e| e.to_string())?;
+    let receipt = f.kernel.commit_effect(&effect).await.map_err(|e| e.to_string())?;
+    let e = f.kernel.effect(&effect).map_err(|e| e.to_string())?;
+    match e.phase {
+        EffectPhase::Committed { receipt: r } if r == receipt.id => {}
+        other => return Err(format!("expected Committed phase, got {other:?}")),
+    }
+    // commit twice → refused (already committed).
+    if f.kernel.commit_effect(&effect).await.is_ok() {
+        return Err("double commit must be refused".into());
+    }
+    Ok(())
+}

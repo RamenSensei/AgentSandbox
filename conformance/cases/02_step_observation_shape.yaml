@@ -1,0 +1,8 @@
+name: step observation shape
+description: >
+  Success observations carry a non-empty summary, exit code, bounded
+  stdout head, truncation flag, and a sha256 content hash addressing the
+  full output blob in the ledger raw store.
+kind: step_observation_shape
+params:
+  text: observable-output

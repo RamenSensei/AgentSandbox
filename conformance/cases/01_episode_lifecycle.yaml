@@ -1,0 +1,7 @@
+name: episode lifecycle
+description: >
+  An episode creates a root state and an initial branch; a successful step
+  advances the branch head and records the file delta.
+kind: episode_lifecycle
+params:
+  file: hello.txt

@@ -1,0 +1,6 @@
+name: denial machine-readability
+description: >
+  Every denial is machine-readable and carries at least code,
+  attempted_operation, a non-empty reason, and escalation_allowed. Default
+  deny yields CAPABILITY_DENIED.
+kind: denial_machine_readable

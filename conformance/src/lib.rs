@@ -596,3 +596,49 @@ async fn replay_class_honesty(_params: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+
+async fn budget_refusal(params: &Value) -> Result<(), String> {
+    let tiny = ResourceBudget {
+        cpu_ms: p_u64(params, "episode_cpu_ms", 500),
+        ..ResourceBudget::step_default()
+    };
+    let f = Fixture::build(100, Some(tiny), EffectClass::Compensatable).await?;
+    let lease = f.lease("proc.shell", &f.branch)?;
+    // A step requesting more than the episode has left is refused *before*
+    // spending anything, with a machine-readable budget denial.
+    let big = ResourceBudget { cpu_ms: 10_000, ..ResourceBudget::zero() };
+    let r = f.shell_with(&f.branch, lease, "true", big).await?;
+    expect_denial(&r.observation, DenialCode::BudgetExhausted)?;
+    // The refusal did not advance the branch head.
+    let head = f.kernel.dag().head(&f.branch).map_err(|e| e.to_string())?;
+    if head.produced_by.is_some() {
+        return Err("refused step must not append state".into());
+    }
+    Ok(())
+}
+
+async fn trace_causality(_params: &Value) -> Result<(), String> {
+    let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
+    let r = f.shell(&f.branch, "printf traced > t.txt").await?;
+    let events = f
+        .kernel
+        .trace_query(&ak_causal_ledger::TraceQuery {
+            step: Some(r.step.clone()),
+            ..Default::default()
+        })
+        .map_err(|e| e.to_string())?;
+    use ak_causal_ledger::EventKind as K;
+    let find = |k: K| events.iter().find(|e| e.kind == k).ok_or(format!("missing {k:?}"));
+    let tool = find(K::ToolInvocation)?;
+    let delta = find(K::StateDeltaRecorded)?;
+    let obs = find(K::ObservationEmitted)?;
+    if !delta.caused_by.contains(&tool.seq) {
+        return Err("StateDeltaRecorded must cite ToolInvocation as its cause".into());
+    }
+    if !obs.caused_by.contains(&delta.seq) {
+        return Err("ObservationEmitted must cite StateDeltaRecorded as its cause".into());
+    }
+    // The hash chain must verify end to end.
+    f.kernel.ledger().verify_chain().map_err(|e| e.to_string())?;
+    Ok(())
+}

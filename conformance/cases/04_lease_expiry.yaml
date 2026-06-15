@@ -1,0 +1,7 @@
+name: lease expiry
+description: >
+  A lease deterministically refuses invocations at or past its expiry time
+  with an Expired failure naming the expiry.
+kind: lease_expiry
+params:
+  skew_seconds: 7200

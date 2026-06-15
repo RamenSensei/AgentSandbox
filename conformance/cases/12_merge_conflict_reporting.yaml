@@ -1,0 +1,7 @@
+name: merge conflict reporting
+description: >
+  A three-way merge with divergent edits to the same path aborts with
+  MERGE_CONFLICT naming exactly the conflicting paths and writes nothing.
+kind: merge_conflict_reporting
+params:
+  file: conflict.txt

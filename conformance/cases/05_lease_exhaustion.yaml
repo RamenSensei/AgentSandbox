@@ -1,0 +1,7 @@
+name: lease exhaustion
+description: >
+  A lease with N uses authorizes exactly N steps; the (N+1)th is denied
+  with CAPABILITY_EXHAUSTED.
+kind: lease_exhaustion
+params:
+  uses: 2

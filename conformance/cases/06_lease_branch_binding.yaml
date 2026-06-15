@@ -1,0 +1,5 @@
+name: lease branch binding
+description: >
+  Authority does not follow the agent across branches: a lease bound to one
+  branch is denied with BRANCH_MISMATCH when presented on another.
+kind: lease_branch_binding

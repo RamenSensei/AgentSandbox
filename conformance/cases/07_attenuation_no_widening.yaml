@@ -1,0 +1,7 @@
+name: attenuation cannot widen
+description: >
+  Delegation is attenuation only. Widening use counts or constraints is
+  rejected; a valid narrowing records the parent lease for audit.
+kind: attenuation_no_widening
+params:
+  extra_uses: 1000

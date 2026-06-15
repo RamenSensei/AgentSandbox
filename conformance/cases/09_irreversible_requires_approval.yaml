@@ -1,0 +1,5 @@
+name: irreversible effects require approval
+description: >
+  Irreversible (and opaque-external) effects can never be committed
+  straight from Prepared; an explicit approval is mandatory.
+kind: irreversible_requires_approval

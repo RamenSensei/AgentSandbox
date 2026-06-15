@@ -1,0 +1,7 @@
+name: duplicate idempotency key
+description: >
+  Once an idempotency key has committed, any retried proposal under the
+  same key is refused with DUPLICATE_COMMIT naming the original receipt.
+kind: duplicate_idempotency
+params:
+  idempotency_key: conformance-dup-1

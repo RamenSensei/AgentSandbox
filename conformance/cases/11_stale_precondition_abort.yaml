@@ -1,0 +1,8 @@
+name: stale precondition abort
+description: >
+  Commit-time revalidation re-observes the external world; when a declared
+  precondition has drifted since approval the commit aborts with
+  STALE_AUTHORIZATION and the effect moves to Aborted.
+kind: stale_precondition_abort
+params:
+  drifted_value: state-2

@@ -1,0 +1,7 @@
+name: replay class honesty
+description: >
+  Backends declare honest replay classes: local steps record
+  filesystem_only, every class supports audit replay, audit_only never
+  claims sandbox replay, and deterministic steps sandbox-replay
+  byte-identically.
+kind: replay_class_honesty

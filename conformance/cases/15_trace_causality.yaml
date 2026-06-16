@@ -1,0 +1,6 @@
+name: trace causality
+description: >
+  Every step writes the causal chain ToolInvocation -> StateDeltaRecorded
+  -> ObservationEmitted with explicit caused_by links, and the ledger hash
+  chain verifies end to end.
+kind: trace_causality

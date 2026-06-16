@@ -1,0 +1,7 @@
+name: budget refusal
+description: >
+  A step whose requested budget exceeds the remaining episode budget is
+  refused before execution with BUDGET_EXHAUSTED and no state is appended.
+kind: budget_refusal
+params:
+  episode_cpu_ms: 500

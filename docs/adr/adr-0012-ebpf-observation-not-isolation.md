@@ -33,3 +33,44 @@ kernel modules for observation (rejected: worse safety and portability than the
 eBPF verifier); userspace-only observation via ptrace/FUSE interposition
 (rejected as primary: high overhead on hot paths, easy for a root guest to
 evade — though it remains the fallback where eBPF is unavailable, e.g. macOS).
+
+## Decision
+
+eBPF is used in AgentKernel for:
+
+- observation: process exec/exit, file access, and network flow events feeding
+  the causal ledger and `StateDelta` verification;
+- accounting: per-step, per-branch resource usage in the unified
+  CPU/memory/network/cost budget model;
+- supplementary enforcement: defense-in-depth egress filtering and anomaly
+  cutoffs *behind* a primary boundary, never as the boundary.
+
+Multi-tenant isolation relies on microVMs (Firecracker/Kata-class), application
+kernels (gVisor), or otherwise verified OS boundaries (Landlock/seccomp/
+bubblewrap for low-risk local workloads, per the backend router's risk tiers).
+No AgentKernel deployment mode may advertise eBPF-only confinement for
+untrusted or multi-tenant workloads. Observation gaps (backends without eBPF)
+degrade the recorded `ReplayClass` and ledger fidelity, not the security claim.
+
+## Consequences
+
+Positive:
+
+- The ledger records what actually happened at the OS level, so "no invisible
+  state transition" is verified against kernel events, not inferred from
+  well-behaved tooling.
+- Layered enforcement: an egress anomaly can be cut inside the boundary even
+  when the microVM would eventually contain it.
+
+Negative:
+
+- eBPF availability varies by host kernel version and configuration; feature
+  detection and graceful degradation add a support matrix.
+- Running collectors on the host per guest adds operational complexity to
+  backends that would otherwise be pure VMM drivers.
+
+Follow-ups:
+
+- CO-RE builds to tolerate kernel version drift.
+- Reconciliation job: diff eBPF-observed file events against reported
+  `StateDelta`s and flag divergence as a backend bug.

@@ -188,3 +188,20 @@ Normative rule: **intent hints never authorize.** An agent-declared intent MAY
 inform scheduling and prewarming; final enforcement MUST be the deterministic
 lease check plus compiled confinement. The LLM may explain, request, and
 recommend; it MUST NOT issue, self-clear, or bypass.
+
+## 8. Approval envelopes, not per-command approvals
+
+Humans SHOULD approve autonomy envelopes once, not each command. Example
+envelope, compiled to a set of leases:
+
+```text
+Allow:  read org/repo · unlimited local branches · install open-source deps
+        run tests · create at most 1 draft PR
+Forbid: merge · repo settings · other repos · org-wide secrets · any cloud spend
+```
+
+Inside the envelope the agent acts autonomously; on a boundary it receives a
+`Denial` with `requestable_scopes` describing narrower grants it may request
+(some flagged `requires_human`). Per-command popups (`npm install`, `git
+commit`, every network access) are an anti-pattern this model exists to
+eliminate.

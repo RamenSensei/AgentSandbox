@@ -147,3 +147,44 @@ explicit · attenuated · time-bound · branch-bound · revocable · auditable
 
 There is no other delegation path. Sub-agents and tools never implicitly
 inherit parental authority.
+
+## 6. Principals and trust
+
+```rust
+pub enum PrincipalKind { Agent, SubAgent, Tool, Human, Kernel }
+pub enum TrustLevel   { Quarantined, Untrusted, Limited, Standard, Elevated }
+```
+
+A `Principal` has `id`, `kind`, `display_name`, optional `parent`, and
+`trust`. `Principal::spawn_child(kind, name)` creates a child with `trust =
+parent.trust.min(TrustLevel::Limited)` — children are capped at `Limited`
+regardless of the parent — and with **no leases**; authority arrives only via
+`attenuate`. `TrustLevel` controls the *granularity of policy explanations*
+(`Denial::redact_for`, see `threat-model.md`), never whether enforcement
+applies.
+
+## 7. The Capability Compiler
+
+Agents request semantic capabilities ("read this repo", "run tests", "create
+one PR", "let this sub-agent query prod logs read-only"). The Capability
+Compiler (`kernel/policy`) compiles a granted lease into concrete,
+deterministic enforcement:
+
+| Semantic dimension | Enforcement mechanism |
+|---|---|
+| File paths | Landlock/LSM policies; `writable_prefixes` / `readable_prefixes` in `ExecutionRequest` |
+| Syscalls | seccomp profiles |
+| CPU/memory | cgroup limits from `ResourceBudget` |
+| Network | network namespace + egress proxy; `egress_domains` in `ExecutionRequest` |
+| Tools/MCP | tool RBAC on `mcp.invoke` constraints |
+| External APIs | connector parameter constraints (`Connector::canonicalize` + lease check) |
+| Credentials | Secret-broker token exchange (see `secret-broker.md`) |
+| Counts, time, budget, risk | `remaining_uses`, `expires_at`, `budget`, `risk_units` |
+
+Backends receive only the compiled confinement — `ExecutionRequest` carries
+prefixes, egress domains, and a budget, never leases or secrets.
+
+Normative rule: **intent hints never authorize.** An agent-declared intent MAY
+inform scheduling and prewarming; final enforcement MUST be the deterministic
+lease check plus compiled confinement. The LLM may explain, request, and
+recommend; it MUST NOT issue, self-clear, or bypass.

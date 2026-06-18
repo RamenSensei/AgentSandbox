@@ -68,3 +68,41 @@ This is the shape used by `capability.rs`'s own tests: the lease authorizes
 the same call with `"merge": true` (`ConstraintViolated {parameter:
 "merge"}`), on the wrong branch (`WrongBranch`), or one minute late
 (`Expired`).
+
+## 3. Constraints and attenuation proof
+
+### 3.1 Constraint kinds
+
+```rust
+pub enum Constraint {
+    Equals   { value: serde_json::Value }, // exact JSON equality
+    OneOf    { values: Vec<serde_json::Value> },
+    Glob     { pattern: String },          // '*'-only globs, no regex engine
+    Prefix   { prefix: String },           // path/branch scoping
+    Max      { max: f64 },                 // numeric upper bound
+    Forbidden,                             // absent or JSON false
+}
+```
+
+`Constraint::allows(value: Option<&Value>) -> bool` evaluates one candidate.
+A missing parameter (`None`) satisfies only `Forbidden`. The glob matcher
+(`glob_match`) is deterministic and supports only `*` — no regex, no
+backtracking surprises.
+
+### 3.2 narrows(): the attenuation relation
+
+`child.narrows(parent)` answers: *is the child at least as restrictive as the
+parent for every possible value?* It is conservative — when the relationship
+cannot be proven, it MUST return `false`. Provable narrowings:
+
+- identical constraints;
+- `Equals{v}` narrows `OneOf`/`Glob`/`Prefix`/`Max` iff `v` satisfies the
+  parent;
+- `OneOf{values}` narrows any parent iff *every* value satisfies the parent;
+- `Prefix{child}` narrows `Prefix{parent}` iff `child` starts with `parent`;
+- `Max{child}` narrows `Max{parent}` iff `child <= parent`;
+- `Forbidden` narrows everything.
+
+All other pairs (e.g. `Glob` vs `Glob`) are unproven and rejected. This is a
+soundness-over-completeness choice: delegation MAY be refused for a
+technically-safe narrowing, but MUST NOT be accepted for a widening.

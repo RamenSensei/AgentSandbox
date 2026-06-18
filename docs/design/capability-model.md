@@ -106,3 +106,44 @@ cannot be proven, it MUST return `false`. Provable narrowings:
 All other pairs (e.g. `Glob` vs `Glob`) are unproven and rejected. This is a
 soundness-over-completeness choice: delegation MAY be refused for a
 technically-safe narrowing, but MUST NOT be accepted for a widening.
+
+## 4. Deterministic check()
+
+`CapabilityLease::check(principal, operation, params, branch, now)` evaluates
+in a fixed order and returns the *first* failure as a `LeaseCheckFailure`:
+
+1. `Revoked`
+2. `Expired { expired_at }` (`now >= expires_at`)
+3. `Exhausted` (`remaining_uses == 0`)
+4. `WrongPrincipal`
+5. `WrongOperation { granted }`
+6. `WrongBranch { bound }` (only if `bound_branch` is set)
+7. `ConstraintViolated { parameter }` — constraints checked in insertion order
+
+The order is normative: implementations MUST report the same failure for the
+same inputs, so denials are reproducible and testable. `LeaseCheckFailure`
+values map to `DenialCode`s in the structured `Denial` returned to the agent.
+
+## 5. Delegation is attenuation only
+
+`CapabilityLease::attenuate(child, constraints, uses, expires_at, budget,
+now)` derives a child lease and fails with a typed `AttenuationError` unless
+every dimension is no broader than the parent:
+
+- `ParentUnusable` — parent revoked or expired;
+- `UsesExceedParent` — `uses > remaining_uses`;
+- `ExpiryExceedsParent`;
+- `BudgetExceedsParent` — checked via `ResourceBudget::fits_within`
+  (dimension-wise `<=`);
+- `ConstraintWidened { parameter }` — every parent constraint MUST be present
+  in the child and MUST `narrows()` it.
+
+The child records `parent_lease: Some(parent.id)`, forming an auditable
+attenuation chain. Delegation is therefore, by construction:
+
+```text
+explicit · attenuated · time-bound · branch-bound · revocable · auditable
+```
+
+There is no other delegation path. Sub-agents and tools never implicitly
+inherit parental authority.

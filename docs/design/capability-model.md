@@ -43,3 +43,28 @@ pub struct CapabilityLease {
   `{"repo_head_sha": "abc123"}`) revalidated at effect commit time.
 - `budget` is a `ResourceBudget` (cpu_ms, memory_bytes, network_bytes,
   tokens, cost_micro_usd, risk_units).
+
+### 2.1 Canonical example: one GitHub PR
+
+The lease that authorizes "create exactly one draft-able PR" and nothing more:
+
+```text
+principal:       pr-agent
+operation:       github.create_pull_request
+constraints:
+  repository:    Equals "org/repo"
+  base:          Equals "main"
+  head:          Prefix "sandbox/"
+  merge:         Forbidden
+remaining_uses:  1
+expires_at:      issued_at + 10 minutes
+bound_branch:    br-42
+budget:          $0 (cost_micro_usd = 0)
+preconditions:   { "repo_head_sha": "abc123" }
+```
+
+This is the shape used by `capability.rs`'s own tests: the lease authorizes
+`{"repository":"org/repo","base":"main","head":"sandbox/fix-1"}`, and rejects
+the same call with `"merge": true` (`ConstraintViolated {parameter:
+"merge"}`), on the wrong branch (`WrongBranch`), or one minute late
+(`Expired`).

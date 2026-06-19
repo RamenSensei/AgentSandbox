@@ -57,3 +57,52 @@ arguments, resource, or preconditions changes the hash and invalidates the
 approval. Arguments MUST first pass `Connector::canonicalize`, so
 semantically-equal requests hash equally and constraint checks see canonical
 parameter names.
+
+## 4. Lifecycle
+
+```text
+propose → canonicalize → prepare → approve → commit-time revalidation → commit → signed receipt
+                                     │                    │
+                                     └── abort ◄──────────┘        compensate (post-commit)
+```
+
+Tracked by `EffectPhase` on the `PendingEffect`:
+
+```rust
+pub enum EffectPhase {
+    Proposed,
+    Prepared    { preview: serde_json::Value },
+    Approved    { approver: PrincipalId, approved_at: DateTime<Utc>, policy_epoch: u64 },
+    Committed   { receipt: ReceiptId },
+    Aborted     { reason: String },
+    Compensated { compensating_receipt: ReceiptId },
+}
+```
+
+A `PendingEffect` binds the contract to its provenance: `id`, `contract`,
+`contract_hash`, `proposer: PrincipalId`, `branch: BranchId`, `step: StepId`,
+`lease: LeaseId`, `phase`, `proposed_at`.
+
+Stage semantics:
+
+1. **propose** (`effect.propose`): the agent submits operation + arguments
+   under a lease. The lease `check()` runs here; failure yields a `Denial`.
+2. **canonicalize**: the connector validates and canonicalizes arguments; the
+   contract and its hash are fixed.
+3. **prepare** (`effect.prepare` → `Connector::prepare`): a dry-run against
+   the live external system producing a `PreparedEffect { preview,
+   observed_preconditions }`. Prepare MUST NOT cause any external side effect.
+4. **approve**: policy auto-approval or human approval of the contract hash.
+   The decision records the approver, timestamp, and `policy_epoch`.
+5. **commit-time revalidation** (§5): immediately before commit, the broker
+   re-checks everything. Any failure aborts with a machine-readable reason
+   (`StaleAuthorization`, `PreconditionFailed`, `DuplicateCommit`, ...).
+6. **commit** (`effect.commit` → `Connector::commit`): the single point where
+   the world changes. Produces a `CommitResult { response }` and a signed
+   `Receipt`.
+7. **abort**: allowed from any pre-commit phase; records a reason.
+8. **compensate** (`effect.compensate` → `Connector::compensate`): best-effort
+   post-commit reversal for `Compensatable` effects, producing its own
+   receipt (`Compensated { compensating_receipt }`). Connectors without
+   compensation return `KernelError::Connector("operation is not
+   compensatable")`.

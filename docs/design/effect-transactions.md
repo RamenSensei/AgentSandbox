@@ -34,3 +34,26 @@ The `Ord` derive is semantic: `Pure < ... < Irreversible < OpaqueExternal`,
 so policy can express "auto-approve up to `RemoteReversible`" as a comparison.
 Each `Connector` declares `operations() -> Vec<(String, EffectClass)>`; an
 operation without a declared class is `OpaqueExternal`.
+
+## 3. EffectContract and the contract hash
+
+The canonical, immutable description of what will be done to the world:
+
+```rust
+pub struct EffectContract {
+    pub operation: String,               // "github.create_pull_request"
+    pub resource: String,                // "org/repo"
+    pub arguments: serde_json::Value,    // full canonical arguments
+    pub preconditions: serde_json::Value,// e.g. {"base_head_sha": "abc123"}
+    pub idempotency_key: String,         // "episode-<n>-step-<m>" by convention
+    pub class: EffectClass,
+}
+```
+
+`EffectContract::contract_hash()` is `hash_canonical(self)` — a hash over the
+canonical JSON serialization. **The contract hash is the unit of approval.**
+Approving an effect means approving *exactly this* contract; any change to
+arguments, resource, or preconditions changes the hash and invalidates the
+approval. Arguments MUST first pass `Connector::canonicalize`, so
+semantically-equal requests hash equally and constraint checks see canonical
+parameter names.

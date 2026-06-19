@@ -106,3 +106,51 @@ Stage semantics:
    receipt (`Compensated { compensating_receipt }`). Connectors without
    compensation return `KernelError::Connector("operation is not
    compensatable")`.
+
+## 5. Commit-time revalidation checklist
+
+Approval decays; the world moves. Immediately before commit the broker MUST
+verify all of the following, aborting on any failure:
+
+1. **Contract unchanged**: the `contract_hash` equals the approved hash.
+2. **Preconditions hold**: each entry in `contract.preconditions` (e.g.
+   `base_head_sha == "abc123"`) matches the live world, re-observed now.
+3. **Lease still valid**: not expired, not revoked, uses remaining, branch
+   still live — the full `CapabilityLease::check` at commit time.
+4. **Policy epoch unchanged**: the current epoch equals the
+   `Approved.policy_epoch`; a policy change since approval voids it.
+5. **Idempotency key not already committed**: the ledger contains no receipt
+   for this `idempotency_key`. Retries of a committed effect MUST return the
+   existing receipt, not re-execute (duplicate-commit protection).
+
+## 6. Receipts
+
+```rust
+pub struct Receipt {
+    pub id: ReceiptId,
+    pub body: ReceiptBody,
+    pub signature: String,   // Ed25519 over canonical_json(body), hex-encoded
+    pub key_id: String,
+}
+
+pub struct ReceiptBody {
+    pub effect: EffectId,
+    pub who: PrincipalId,
+    pub operation: String,
+    pub resource: String,
+    pub contract_hash: ContentHash,
+    pub branch: BranchId,
+    pub step: StepId,
+    pub policy_epoch: u64,
+    pub authorization_witness: ContentHash,     // hash of the approval decision
+    pub external_response_digest: ContentHash,  // digest of the external response
+    pub committed_at: DateTime<Utc>,
+}
+```
+
+The signature is Ed25519 over the canonical JSON of `body`, signed with the
+kernel's receipt key (identified by `key_id`). `authorization_witness` hashes
+the approval decision — who approved what, when — making the receipt a proof
+of *authorized* execution, not merely execution. Receipts are immutable ledger
+facts: they survive branch discard, are never merged or copied, and their
+completeness rate is a security metric.

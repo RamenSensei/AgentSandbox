@@ -154,3 +154,29 @@ the approval decision — who approved what, when — making the receipt a proof
 of *authorized* execution, not merely execution. Receipts are immutable ledger
 facts: they survive branch discard, are never merged or copied, and their
 completeness rate is a security metric.
+
+## 7. APIs without a real prepare
+
+Many external APIs cannot dry-run. Strategies, in order of preference:
+
+1. **Draft**: create in a draft/unpublished state; publishing is the commit
+   (GitHub draft PRs).
+2. **Shadow resource**: create a parallel resource and swap on commit.
+3. **Temporary branch**: stage on a scratch branch; the merge/rename is the
+   commit.
+4. **Escrow**: hand the effect to a holding system that releases on commit.
+5. **Single call + idempotency key**: when the API is one-shot, collapse
+   prepare/commit into one guarded, deduplicated call.
+6. **Explicit `Irreversible` label**: when none of the above applies, the
+   contract MUST carry `class: Irreversible` (or `OpaqueExternal`) and clear
+   the corresponding stricter approval bar. Pretending is forbidden.
+
+## 8. GET is not automatically pure
+
+HTTP method is not effect semantics: a GET can trigger side effects
+(analytics, one-time links, state machines behind "read" endpoints). The
+kernel MUST NOT infer `EffectClass` from HTTP verbs. The unit of trust is the
+**connector's semantic contract**: each operation's declared class in
+`Connector::operations()`. The generic `connectors/http` connector classifies
+reads through its proxy conservatively; anything it cannot vouch for is
+`OpaqueExternal`.

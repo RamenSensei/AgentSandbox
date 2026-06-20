@@ -1,0 +1,23 @@
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run conformance suite
+        run: cargo test -p ak-conformance -- --nocapture
+      - name: Run adversarial bench
+        run: cargo run -p ak-adversarial-bench -- --report target/adversarial-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-report
+          path: target/adversarial-report.json

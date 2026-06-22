@@ -59,3 +59,28 @@ class ResourceBudget:
             cost_micro_usd=int(d.get("cost_micro_usd", 0)),
             risk_units=int(d.get("risk_units", 0)),
         )
+
+
+# ---------------------------------------------------------------------------
+# Actions (tagged with "kind")
+# ---------------------------------------------------------------------------
+
+
+class ActionKind:
+    """Base class for the action taxonomy. Subclasses emit tagged wire JSON."""
+
+    kind: str
+
+    def to_wire(self) -> Dict[str, Json]:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class Shell(ActionKind):
+    command: str
+    cwd: Optional[str] = None
+    env: Dict[str, str] = field(default_factory=dict)
+    kind = "shell"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "shell", "command": self.command, "cwd": self.cwd, "env": self.env}

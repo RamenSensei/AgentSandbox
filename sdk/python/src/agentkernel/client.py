@@ -380,3 +380,90 @@ class BranchHandle:
             raise DenialError(Denial.from_wire(resp["denial"]))
         effect = PendingEffect.from_wire(resp.get("effect", resp))
         return EffectHandle(self._kernel, effect)
+
+
+class EpisodeHandle(BranchHandle):
+    """An episode handle. Acts on the main branch by default:
+    ``obs = ep.execute(Shell("pytest")).observation``."""
+
+    def __init__(self, kernel: Kernel, episode: Episode, main_branch: Branch) -> None:
+        super().__init__(kernel, episode, main_branch)
+
+    @property
+    def episode_id(self) -> str:
+        return self.episode.id
+
+    def describe(self) -> Dict[str, Json]:
+        return self._kernel._request("GET", f"/v1/episodes/{self.episode.id}")
+
+
+class EffectHandle:
+    """Context-managed pending effect:
+
+    with ep.propose_effect(contract) as fx:
+        fx.prepare()
+        fx.commit()
+
+    Leaving the block without a successful commit aborts the effect
+    (invariant: no irreversible effect before commit).
+    """
+
+    def __init__(self, kernel: Kernel, effect: PendingEffect) -> None:
+        self._kernel = kernel
+        self.effect = effect
+        self.receipt: Optional[Receipt] = None
+
+    @property
+    def id(self) -> str:
+        return self.effect.id
+
+    @property
+    def contract_hash(self) -> str:
+        return self.effect.contract_hash
+
+    def prepare(self) -> EffectPreview:
+        resp = self._kernel._request("POST", f"/v1/effects/{self.effect.id}/prepare")
+        preview = EffectPreview.from_wire(resp)
+        self.effect = preview.effect
+        return preview
+
+    def approve(self, approver: str, contract_hash: Optional[str] = None) -> PendingEffect:
+        resp = self._kernel._request(
+            "POST",
+            f"/v1/effects/{self.effect.id}/approve",
+            {"approver": approver, "contract_hash": contract_hash or self.effect.contract_hash},
+        )
+        self.effect = PendingEffect.from_wire(resp)
+        return self.effect
+
+    def commit(self, expected_contract_hash: Optional[str] = None) -> Receipt:
+        resp = self._kernel._request(
+            "POST",
+            f"/v1/effects/{self.effect.id}/commit",
+            {"expected_contract_hash": expected_contract_hash or self.effect.contract_hash},
+        )
+        if "denial" in resp:
+            raise DenialError(Denial.from_wire(resp["denial"]))
+        self.receipt = Receipt.from_wire(resp.get("receipt", resp))
+        return self.receipt
+
+    def compensate(self, reason: str = "") -> Receipt:
+        resp = self._kernel._request(
+            "POST", f"/v1/effects/{self.effect.id}/compensate", {"reason": reason}
+        )
+        return Receipt.from_wire(resp)
+
+    def abort(self, reason: str = "abandoned by client") -> None:
+        try:
+            self._kernel._request(
+                "POST", f"/v1/effects/{self.effect.id}/abort", {"reason": reason}
+            )
+        except KernelError:
+            pass  # best-effort; the kernel garbage-collects stale effects
+
+    def __enter__(self) -> "EffectHandle":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self.receipt is None:
+            self.abort()

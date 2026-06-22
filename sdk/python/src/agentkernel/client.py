@@ -272,3 +272,111 @@ class Kernel:
 
     def get_effect(self, effect_id: str) -> PendingEffect:
         return PendingEffect.from_wire(self._request("GET", f"/v1/effects/{effect_id}"))
+
+
+class BranchHandle:
+    """A handle to one branch, bound to a client and an episode."""
+
+    def __init__(self, kernel: Kernel, episode: Episode, branch: Branch) -> None:
+        self._kernel = kernel
+        self.episode = episode
+        self.branch = branch
+
+    @property
+    def id(self) -> str:
+        return self.branch.id
+
+    def execute(
+        self,
+        action: ActionKind,
+        *,
+        actor: Optional[str] = None,
+        lease: str = "",
+        intent_hint: Optional[str] = None,
+        budget: Optional[ResourceBudget] = None,
+    ) -> StepResult:
+        """Execute one action on this branch.
+
+        A policy denial recorded as a step is returned as an Observation of
+        kind "denied"; a request rejected outright raises DenialError.
+        """
+        action_body: Dict[str, Any] = {
+            "kind": action.to_wire(),
+            "lease": lease,
+            "budget": (budget or ResourceBudget.step_default()).to_wire(),
+        }
+        if intent_hint is not None:
+            action_body["intent_hint"] = intent_hint
+        resp = self._kernel._request(
+            "POST",
+            "/v1/steps/execute",
+            {
+                "branch": self.branch.id,
+                "actor": actor or self.episode.owner,
+                "action": action_body,
+            },
+        )
+        return StepResult.from_wire(resp)
+
+    def fork(self, count: int = 1, from_state: Optional[str] = None) -> List["BranchHandle"]:
+        body: Dict[str, Any] = {"count": count}
+        if from_state is not None:
+            body["from_state"] = from_state
+        resp = self._kernel._request("POST", f"/v1/branches/{self.branch.id}/fork", body)
+        return [
+            BranchHandle(self._kernel, self.episode, Branch.from_wire(b))
+            for b in resp.get("branches", [])
+        ]
+
+    def diff(self, since: Optional[str] = None) -> BranchDiff:
+        body = {"since": since} if since is not None else {}
+        resp = self._kernel._request("POST", f"/v1/branches/{self.branch.id}/diff", body)
+        return BranchDiff.from_wire(resp)
+
+    def compare(self, other: Union["BranchHandle", str]) -> BranchComparison:
+        other_id = other.id if isinstance(other, BranchHandle) else other
+        resp = self._kernel._request(
+            "GET", f"/v1/branches/{self.branch.id}/compare/{other_id}"
+        )
+        return BranchComparison.from_wire(resp)
+
+    def merge(
+        self, into: Union["BranchHandle", str], *, require_clean: bool = False
+    ) -> Dict[str, Json]:
+        into_id = into.id if isinstance(into, BranchHandle) else into
+        return self._kernel._request(
+            "POST",
+            f"/v1/branches/{self.branch.id}/merge",
+            {"into": into_id, "require_clean": require_clean},
+        )
+
+    def discard(self, reason: str = "") -> Branch:
+        resp = self._kernel._request(
+            "POST", f"/v1/branches/{self.branch.id}/discard", {"reason": reason}
+        )
+        self.branch = Branch.from_wire(resp)
+        return self.branch
+
+    def propose_effect(
+        self,
+        contract: EffectContract,
+        *,
+        proposer: Optional[str] = None,
+        step: str = "",
+        lease: str = "",
+    ) -> "EffectHandle":
+        resp = self._kernel._request(
+            "POST",
+            "/v1/effects",
+            {
+                "contract": contract.to_wire(),
+                "proposer": proposer or self.episode.owner,
+                "branch": self.branch.id,
+                "step": step,
+                "lease": lease,
+            },
+        )
+        if "denial" in resp:
+            raise DenialError(Denial.from_wire(resp["denial"]))
+        effect = PendingEffect.from_wire(resp.get("effect", resp))
+        return EffectHandle(self._kernel, effect)

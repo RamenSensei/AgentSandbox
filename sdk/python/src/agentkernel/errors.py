@@ -46,3 +46,11 @@ class DenialError(KernelError):
     @property
     def escalation_allowed(self) -> bool:
         return self.denial.escalation_allowed
+
+
+class TransportError(KernelError):
+    """The kernel could not be reached (after retries)."""
+
+    def __init__(self, message: str, cause: Optional[BaseException] = None) -> None:
+        super().__init__("TRANSPORT", message, 0)
+        self.__cause__ = cause

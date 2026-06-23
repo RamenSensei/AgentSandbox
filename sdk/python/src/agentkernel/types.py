@@ -84,3 +84,31 @@ class Shell(ActionKind):
 
     def to_wire(self) -> Dict[str, Json]:
         return {"kind": "shell", "command": self.command, "cwd": self.cwd, "env": self.env}
+
+
+@dataclass(frozen=True)
+class ReadFile(ActionKind):
+    path: str
+    kind = "read_file"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "read_file", "path": self.path}
+
+
+@dataclass(frozen=True)
+class WriteFile(ActionKind):
+    path: str
+    contents_b64: str
+    kind = "write_file"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "write_file", "path": self.path, "contents_b64": self.contents_b64}
+
+
+@dataclass(frozen=True)
+class DeletePath(ActionKind):
+    path: str
+    kind = "delete_path"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "delete_path", "path": self.path}

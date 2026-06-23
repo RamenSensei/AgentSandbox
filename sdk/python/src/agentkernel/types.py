@@ -137,3 +137,28 @@ class McpInvoke(ActionKind):
             "tool": self.tool,
             "arguments": self.arguments,
         }
+
+
+@dataclass(frozen=True)
+class ConnectorOp(ActionKind):
+    connector: str
+    operation: str
+    params: Json = None
+    kind = "connector_op"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {
+            "kind": "connector_op",
+            "connector": self.connector,
+            "operation": self.operation,
+            "params": self.params,
+        }
+
+
+@dataclass(frozen=True)
+class TraceQueryAction(ActionKind):
+    query: str
+    kind = "trace_query"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "trace_query", "query": self.query}

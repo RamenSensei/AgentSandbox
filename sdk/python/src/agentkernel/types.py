@@ -162,3 +162,32 @@ class TraceQueryAction(ActionKind):
 
     def to_wire(self) -> Dict[str, Json]:
         return {"kind": "trace_query", "query": self.query}
+
+
+@dataclass(frozen=True)
+class BranchDiffAction(ActionKind):
+    since: str  # "st-..."
+    kind = "branch_diff"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "branch_diff", "since": self.since}
+
+
+# ---------------------------------------------------------------------------
+# Denials
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RequestableScope:
+    operation: str
+    constraints: Json
+    requires_human: bool
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "RequestableScope":
+        return cls(
+            operation=d["operation"],
+            constraints=d.get("constraints"),
+            requires_human=bool(d.get("requires_human", False)),
+        )

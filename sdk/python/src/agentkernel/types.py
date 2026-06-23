@@ -112,3 +112,28 @@ class DeletePath(ActionKind):
 
     def to_wire(self) -> Dict[str, Json]:
         return {"kind": "delete_path", "path": self.path}
+
+
+@dataclass(frozen=True)
+class HttpRead(ActionKind):
+    url: str
+    kind = "http_read"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "http_read", "url": self.url}
+
+
+@dataclass(frozen=True)
+class McpInvoke(ActionKind):
+    server: str
+    tool: str
+    arguments: Json = None
+    kind = "mcp_invoke"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {
+            "kind": "mcp_invoke",
+            "server": self.server,
+            "tool": self.tool,
+            "arguments": self.arguments,
+        }

@@ -307,3 +307,26 @@ class Episode:
             budget=ResourceBudget.from_wire(d.get("budget", {})),
             created_at=d.get("created_at", ""),
         )
+
+
+@dataclass(frozen=True)
+class Branch:
+    id: str  # "br-..."
+    episode: str  # "ep-..."
+    forked_from: str  # "st-..."
+    head: str  # "st-..."
+    discarded: bool
+    created_at: str
+    parent_branch: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "Branch":
+        return cls(
+            id=d["id"],
+            episode=d.get("episode", ""),
+            forked_from=d.get("forked_from", ""),
+            head=d.get("head", ""),
+            discarded=bool(d.get("discarded", False)),
+            created_at=d.get("created_at", ""),
+            parent_branch=d.get("parent_branch"),
+        )

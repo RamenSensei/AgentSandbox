@@ -191,3 +191,26 @@ class RequestableScope:
             constraints=d.get("constraints"),
             requires_human=bool(d.get("requires_human", False)),
         )
+
+
+@dataclass(frozen=True)
+class Denial:
+    code: str  # SCREAMING_SNAKE_CASE, e.g. "CAPABILITY_DENIED"
+    attempted_operation: str
+    reason: str
+    safe_alternatives: List[str] = field(default_factory=list)
+    requestable_scopes: List[RequestableScope] = field(default_factory=list)
+    escalation_allowed: bool = False
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "Denial":
+        return cls(
+            code=d["code"],
+            attempted_operation=d.get("attempted_operation", ""),
+            reason=d.get("reason", ""),
+            safe_alternatives=list(d.get("safe_alternatives", [])),
+            requestable_scopes=[
+                RequestableScope.from_wire(s) for s in d.get("requestable_scopes", [])
+            ],
+            escalation_allowed=bool(d.get("escalation_allowed", False)),
+        )

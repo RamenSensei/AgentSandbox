@@ -279,3 +279,31 @@ class Observation:
     @classmethod
     def from_wire(cls, d: Mapping[str, Any]) -> "Observation":
         return cls(kind=d["kind"], raw=dict(d))
+
+
+# ---------------------------------------------------------------------------
+# Episodes / branches / steps
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Episode:
+    id: str  # "ep-..."
+    title: str
+    owner: str  # "pr-..."
+    root_state: str  # "st-..."
+    main_branch: str  # "br-..."
+    budget: ResourceBudget
+    created_at: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "Episode":
+        return cls(
+            id=d["id"],
+            title=d.get("title", ""),
+            owner=d.get("owner", ""),
+            root_state=d.get("root_state", ""),
+            main_branch=d.get("main_branch", ""),
+            budget=ResourceBudget.from_wire(d.get("budget", {})),
+            created_at=d.get("created_at", ""),
+        )

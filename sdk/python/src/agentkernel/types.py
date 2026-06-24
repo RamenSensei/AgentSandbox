@@ -330,3 +330,43 @@ class Branch:
             created_at=d.get("created_at", ""),
             parent_branch=d.get("parent_branch"),
         )
+
+
+@dataclass(frozen=True)
+class StepResult:
+    step: str  # "step-..."
+    observation: Observation
+    usage: ResourceBudget
+    produced_state: Optional[str] = None  # "st-..."
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "StepResult":
+        return cls(
+            step=d["step"],
+            observation=Observation.from_wire(d["observation"]),
+            usage=ResourceBudget.from_wire(d.get("usage", {})),
+            produced_state=d.get("produced_state"),
+        )
+
+
+@dataclass(frozen=True)
+class StateDelta:
+    files: List[Dict[str, Json]] = field(default_factory=list)
+    processes_started: List[str] = field(default_factory=list)
+    processes_exited: List[str] = field(default_factory=list)
+    tool_sessions: List[str] = field(default_factory=list)
+    policy_epoch: int = 0
+    effects_proposed: List[str] = field(default_factory=list)
+    effects_committed: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "StateDelta":
+        return cls(
+            files=list(d.get("files", [])),
+            processes_started=list(d.get("processes_started", [])),
+            processes_exited=list(d.get("processes_exited", [])),
+            tool_sessions=list(d.get("tool_sessions", [])),
+            policy_epoch=int(d.get("policy_epoch", 0)),
+            effects_proposed=list(d.get("effects_proposed", [])),
+            effects_committed=list(d.get("effects_committed", [])),
+        )

@@ -214,3 +214,68 @@ class Denial:
             ],
             escalation_allowed=bool(d.get("escalation_allowed", False)),
         )
+
+
+# ---------------------------------------------------------------------------
+# Observations (tagged with "kind")
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Observation:
+    """One observation, kept close to the wire; `kind` discriminates."""
+
+    kind: str  # "success" | "failure" | "denied" | "effect_pending" | "effect_committed"
+    raw: Dict[str, Json]
+
+    # success / failure
+    @property
+    def summary(self) -> Optional[str]:
+        return self.raw.get("summary")
+
+    @property
+    def exit_code(self) -> Optional[int]:
+        return self.raw.get("exit_code")
+
+    @property
+    def stdout_head(self) -> Optional[str]:
+        return self.raw.get("stdout_head")
+
+    @property
+    def data(self) -> Json:
+        return self.raw.get("data")
+
+    @property
+    def full_output(self) -> Optional[str]:
+        return self.raw.get("full_output")
+
+    # denied
+    @property
+    def denial(self) -> Optional[Denial]:
+        d = self.raw.get("denial")
+        return Denial.from_wire(d) if d else None
+
+    # effect_pending / effect_committed
+    @property
+    def effect(self) -> Optional[str]:
+        return self.raw.get("effect")
+
+    @property
+    def contract_hash(self) -> Optional[str]:
+        return self.raw.get("contract_hash")
+
+    @property
+    def receipt(self) -> Optional[str]:
+        return self.raw.get("receipt")
+
+    @property
+    def is_success(self) -> bool:
+        return self.kind == "success"
+
+    @property
+    def is_denied(self) -> bool:
+        return self.kind == "denied"
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "Observation":
+        return cls(kind=d["kind"], raw=dict(d))

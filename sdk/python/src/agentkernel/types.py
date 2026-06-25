@@ -480,3 +480,30 @@ class EffectContract:
             idempotency_key=d.get("idempotency_key", ""),
             class_=d.get("class", "opaque_external"),
         )
+
+
+@dataclass(frozen=True)
+class PendingEffect:
+    id: str  # "fx-..."
+    contract: EffectContract
+    contract_hash: str
+    proposer: str
+    branch: str
+    step: str
+    lease: str
+    phase: Dict[str, Json]  # tagged with "phase"
+    proposed_at: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "PendingEffect":
+        return cls(
+            id=d["id"],
+            contract=EffectContract.from_wire(d.get("contract", {"operation": ""})),
+            contract_hash=d.get("contract_hash", ""),
+            proposer=d.get("proposer", ""),
+            branch=d.get("branch", ""),
+            step=d.get("step", ""),
+            lease=d.get("lease", ""),
+            phase=dict(d.get("phase", {"phase": "proposed"})),
+            proposed_at=d.get("proposed_at", ""),
+        )

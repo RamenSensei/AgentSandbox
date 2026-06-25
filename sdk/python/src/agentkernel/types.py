@@ -370,3 +370,30 @@ class StateDelta:
             effects_proposed=list(d.get("effects_proposed", [])),
             effects_committed=list(d.get("effects_committed", [])),
         )
+
+
+@dataclass(frozen=True)
+class BranchDiff:
+    delta: StateDelta
+    summary: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "BranchDiff":
+        return cls(delta=StateDelta.from_wire(d.get("delta", {})), summary=d.get("summary", ""))
+
+
+@dataclass(frozen=True)
+class BranchComparison:
+    common_ancestor: str
+    left_delta: StateDelta
+    right_delta: StateDelta
+    conflicting_paths: List[str]
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "BranchComparison":
+        return cls(
+            common_ancestor=d.get("common_ancestor", ""),
+            left_delta=StateDelta.from_wire(d.get("left_delta", {})),
+            right_delta=StateDelta.from_wire(d.get("right_delta", {})),
+            conflicting_paths=list(d.get("conflicting_paths", [])),
+        )

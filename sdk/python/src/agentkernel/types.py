@@ -397,3 +397,41 @@ class BranchComparison:
             right_delta=StateDelta.from_wire(d.get("right_delta", {})),
             conflicting_paths=list(d.get("conflicting_paths", [])),
         )
+
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapabilityLease:
+    id: str  # "lease-..."
+    principal: str  # "pr-..."
+    operation: str
+    constraints: Dict[str, Json]
+    remaining_uses: int
+    issued_at: str
+    expires_at: str
+    budget: ResourceBudget
+    revoked: bool
+    bound_branch: Optional[str] = None
+    parent_lease: Optional[str] = None
+    preconditions: Dict[str, Json] = field(default_factory=dict)
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "CapabilityLease":
+        return cls(
+            id=d["id"],
+            principal=d.get("principal", ""),
+            operation=d.get("operation", ""),
+            constraints=dict(d.get("constraints", {})),
+            remaining_uses=int(d.get("remaining_uses", 0)),
+            issued_at=d.get("issued_at", ""),
+            expires_at=d.get("expires_at", ""),
+            budget=ResourceBudget.from_wire(d.get("budget", {})),
+            revoked=bool(d.get("revoked", False)),
+            bound_branch=d.get("bound_branch"),
+            parent_lease=d.get("parent_lease"),
+            preconditions=dict(d.get("preconditions", {})),
+        )

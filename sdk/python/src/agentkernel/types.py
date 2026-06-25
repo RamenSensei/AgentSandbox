@@ -435,3 +435,48 @@ class CapabilityLease:
             parent_lease=d.get("parent_lease"),
             preconditions=dict(d.get("preconditions", {})),
         )
+
+
+# ---------------------------------------------------------------------------
+# Effects
+# ---------------------------------------------------------------------------
+
+EFFECT_CLASSES = (
+    "pure",
+    "local_reversible",
+    "remote_reversible",
+    "compensatable",
+    "irreversible",
+    "opaque_external",
+)
+
+
+@dataclass(frozen=True)
+class EffectContract:
+    operation: str
+    resource: str
+    arguments: Json
+    preconditions: Json
+    idempotency_key: str
+    class_: str  # one of EFFECT_CLASSES; wire name "class"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {
+            "operation": self.operation,
+            "resource": self.resource,
+            "arguments": self.arguments,
+            "preconditions": self.preconditions,
+            "idempotency_key": self.idempotency_key,
+            "class": self.class_,
+        }
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EffectContract":
+        return cls(
+            operation=d["operation"],
+            resource=d.get("resource", ""),
+            arguments=d.get("arguments"),
+            preconditions=d.get("preconditions"),
+            idempotency_key=d.get("idempotency_key", ""),
+            class_=d.get("class", "opaque_external"),
+        )

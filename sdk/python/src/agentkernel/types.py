@@ -507,3 +507,35 @@ class PendingEffect:
             phase=dict(d.get("phase", {"phase": "proposed"})),
             proposed_at=d.get("proposed_at", ""),
         )
+
+
+@dataclass(frozen=True)
+class Receipt:
+    id: str  # "rcpt-..."
+    body: Dict[str, Json]
+    signature: str
+    key_id: str
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "Receipt":
+        return cls(
+            id=d["id"],
+            body=dict(d.get("body", {})),
+            signature=d.get("signature", ""),
+            key_id=d.get("key_id", ""),
+        )
+
+
+@dataclass(frozen=True)
+class EffectPreview:
+    preview: Json
+    observed_preconditions: Json
+    effect: PendingEffect
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EffectPreview":
+        return cls(
+            preview=d.get("preview"),
+            observed_preconditions=d.get("observed_preconditions"),
+            effect=PendingEffect.from_wire(d["effect"]),
+        )

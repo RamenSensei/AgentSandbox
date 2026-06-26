@@ -85,3 +85,19 @@ report = kernel.replay("audit", ep.episode.id)   # "audit" | "sandbox" | "live"
 ```
 
 Live replay guarantees the *contract*, not the outcome.
+
+## Reliability
+
+- Automatic retry with exponential backoff on connection errors and
+  502/503/504 (`max_retries`, `backoff_base` constructor args).
+- All wire types are dataclasses with full type hints; the package ships
+  `py.typed`.
+
+## Tests
+
+```bash
+python3 -m unittest discover sdk/python     # stdlib only
+python3 -m pytest sdk/python                # if pytest is installed
+```
+
+Tests run against an in-process mock kernel built on stdlib `http.server`.

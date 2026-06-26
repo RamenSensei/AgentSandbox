@@ -45,3 +45,43 @@ with ep.propose_effect(contract, lease="lease-abc") as fx:
     fx.approve("pr-human")          # approves exactly this contract hash
     receipt = fx.commit()           # commit-time revalidation, signed receipt
 print(receipt.id)                   # "rcpt-..."
+# Leaving the `with` block without committing aborts the effect.
+```
+
+## Denials are recoverable, not fatal
+
+```python
+try:
+    kernel.request_capability("pr-agent", "net.raw_socket")
+except DenialError as e:
+    print(e.denial_code)            # "CAPABILITY_DENIED"
+    print(e.safe_alternatives)      # ["github.create_pull_request"]
+    for scope in e.requestable_scopes:
+        print(scope.operation, scope.constraints, scope.requires_human)
+    if e.escalation_allowed:
+        ...  # request one of the suggested scopes instead
+```
+
+A denial that was *recorded as a step* comes back as a normal observation
+(`res.observation.is_denied`, `res.observation.denial`) so the causal
+ledger stays complete.
+
+## Capabilities, trace, replay
+
+```python
+lease = kernel.request_capability(
+    "pr-agent", "github.create_pull_request",
+    constraints={"repository": {"kind": "equals", "value": "org/repo"},
+                 "head": {"kind": "prefix", "prefix": "sandbox/"},
+                 "merge": {"kind": "forbidden"}},
+    uses=1, bound_branch=ep.branch.id,
+)
+child = kernel.delegate_capability(lease.id, "pr-child",
+                                   constraints=..., uses=1, expires_at=lease.expires_at)
+kernel.revoke_capability(lease.id, cascade=True)
+
+kernel.trace_query('effects where class >= compensatable and branch = "br-42"')
+report = kernel.replay("audit", ep.episode.id)   # "audit" | "sandbox" | "live"
+```
+
+Live replay guarantees the *contract*, not the outcome.

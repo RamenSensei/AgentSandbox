@@ -447,3 +447,12 @@ class Handler(BaseHTTPRequestHandler):
             "phase": {"phase": "proposed"},
             "proposed_at": "2026-01-01T00:00:00Z",
         }
+
+
+def make_server() -> Tuple[ThreadingHTTPServer, MockKernelState, str]:
+    state = MockKernelState()
+    handler = type("BoundHandler", (Handler,), {"state": state})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, state, f"http://127.0.0.1:{server.server_address[1]}"

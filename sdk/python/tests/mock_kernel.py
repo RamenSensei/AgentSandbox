@@ -23,3 +23,28 @@ class MockKernelState:
     def next_id(self, prefix: str) -> str:
         self.counter += 1
         return f"{prefix}-{self.counter}"
+
+
+DENIAL = {
+    "code": "CAPABILITY_DENIED",
+    "attempted_operation": "net.raw_socket",
+    "reason": "credential may only be used by the typed GitHub connector",
+    "safe_alternatives": ["github.create_pull_request"],
+    "requestable_scopes": [
+        {
+            "operation": "net.http_read",
+            "constraints": {"domain": "api.github.com"},
+            "requires_human": False,
+        }
+    ],
+    "escalation_allowed": True,
+}
+
+BUDGET = {
+    "cpu_ms": 1000,
+    "memory_bytes": 0,
+    "network_bytes": 0,
+    "tokens": 5,
+    "cost_micro_usd": 0,
+    "risk_units": 0,
+}

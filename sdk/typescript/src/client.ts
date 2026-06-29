@@ -368,3 +368,95 @@ export class BranchHandle {
     return new EffectHandle(this.kernel, resp.effect);
   }
 }
+
+/** Acts on the episode's main branch by default. */
+export class EpisodeHandle extends BranchHandle {
+  get episodeId(): string {
+    return this.episode.id;
+  }
+
+  async describe(): Promise<EpisodeDescribeResponse> {
+    return this.kernel.request<EpisodeDescribeResponse>(
+      "GET",
+      `/v1/episodes/${this.episode.id}`,
+    );
+  }
+}
+
+/**
+ * A pending effect: prepare -> approve -> commit -> (compensate).
+ * `run(fn)` aborts the effect if `fn` returns without a successful commit
+ * (invariant: no irreversible effect before commit).
+ */
+export class EffectHandle {
+  receipt?: Receipt;
+
+  constructor(
+    private readonly kernel: Kernel,
+    public effect: PendingEffect,
+  ) {}
+
+  get id(): string {
+    return this.effect.id;
+  }
+
+  get contractHash(): string {
+    return this.effect.contract_hash;
+  }
+
+  async prepare(): Promise<EffectPrepareResponse> {
+    const resp = await this.kernel.request<EffectPrepareResponse>(
+      "POST",
+      `/v1/effects/${this.effect.id}/prepare`,
+    );
+    this.effect = resp.effect;
+    return resp;
+  }
+
+  async approve(approver: string, contractHash?: string): Promise<PendingEffect> {
+    this.effect = await this.kernel.request<PendingEffect>(
+      "POST",
+      `/v1/effects/${this.effect.id}/approve`,
+      { approver, contract_hash: contractHash ?? this.effect.contract_hash },
+    );
+    return this.effect;
+  }
+
+  async commit(expectedContractHash?: string): Promise<Receipt> {
+    const resp = await this.kernel.request<{
+      receipt?: Receipt;
+      denial?: import("./types.js").Denial;
+    }>("POST", `/v1/effects/${this.effect.id}/commit`, {
+      expected_contract_hash: expectedContractHash ?? this.effect.contract_hash,
+    });
+    if (resp.denial) throw new DenialError(resp.denial);
+    const receipt = resp.receipt ?? (resp as unknown as Receipt);
+    this.receipt = receipt;
+    return receipt;
+  }
+
+  async compensate(reason = ""): Promise<Receipt> {
+    return this.kernel.request<Receipt>(
+      "POST",
+      `/v1/effects/${this.effect.id}/compensate`,
+      { reason },
+    );
+  }
+
+  async abort(reason = "abandoned by client"): Promise<void> {
+    try {
+      await this.kernel.request("POST", `/v1/effects/${this.effect.id}/abort`, { reason });
+    } catch {
+      // best-effort; the kernel garbage-collects stale effects
+    }
+  }
+
+  /** Scoped use; aborts on exit unless a commit succeeded. */
+  async run<T>(fn: (fx: EffectHandle) => Promise<T>): Promise<T> {
+    try {
+      return await fn(this);
+    } finally {
+      if (!this.receipt) await this.abort();
+    }
+  }
+}

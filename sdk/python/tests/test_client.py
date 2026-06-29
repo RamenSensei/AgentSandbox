@@ -195,3 +195,7 @@ class ClientTest(unittest.TestCase):
             self.kernel.get_episode("ep-nope")
         self.assertEqual(ctx.exception.code, "NOT_FOUND")
         self.assertEqual(ctx.exception.status, 404)
+
+
+if __name__ == "__main__":
+    unittest.main()

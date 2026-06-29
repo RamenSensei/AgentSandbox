@@ -460,3 +460,5 @@ export class EffectHandle {
     }
   }
 }
+
+export type { Json };

@@ -259,3 +259,112 @@ export class Kernel {
     return this.request<PendingEffect>("GET", `/v1/effects/${effectId}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Handles
+// ---------------------------------------------------------------------------
+
+export class BranchHandle {
+  constructor(
+    protected readonly kernel: Kernel,
+    readonly episode: Episode,
+    public branch: Branch,
+  ) {}
+
+  get id(): string {
+    return this.branch.id;
+  }
+
+  /** Execute one action on this branch. Denied-but-recorded steps come back
+   * as an Observation of kind "denied"; outright rejections throw
+   * DenialError. */
+  async execute(
+    action: ActionKind,
+    opts: {
+      actor?: string;
+      lease?: string;
+      intentHint?: string;
+      budget?: ResourceBudget;
+    } = {},
+  ): Promise<StepResult> {
+    const actionBody: Record<string, unknown> = {
+      kind: action,
+      lease: opts.lease ?? "",
+      budget: opts.budget ?? stepDefaultBudget(),
+    };
+    if (opts.intentHint !== undefined) actionBody.intent_hint = opts.intentHint;
+    return this.kernel.request<StepResult>("POST", "/v1/steps/execute", {
+      branch: this.branch.id,
+      actor: opts.actor ?? this.episode.owner,
+      action: actionBody,
+    });
+  }
+
+  async fork(count = 1, fromState?: string): Promise<BranchHandle[]> {
+    const body: Record<string, unknown> = { count };
+    if (fromState !== undefined) body.from_state = fromState;
+    const resp = await this.kernel.request<{ branches: Branch[] }>(
+      "POST",
+      `/v1/branches/${this.branch.id}/fork`,
+      body,
+    );
+    return resp.branches.map((b) => new BranchHandle(this.kernel, this.episode, b));
+  }
+
+  async diff(since?: string): Promise<BranchDiffResponse> {
+    return this.kernel.request<BranchDiffResponse>(
+      "POST",
+      `/v1/branches/${this.branch.id}/diff`,
+      since !== undefined ? { since } : {},
+    );
+  }
+
+  async compare(other: BranchHandle | string): Promise<BranchCompareResponse> {
+    const otherId = typeof other === "string" ? other : other.id;
+    return this.kernel.request<BranchCompareResponse>(
+      "GET",
+      `/v1/branches/${this.branch.id}/compare/${otherId}`,
+    );
+  }
+
+  async merge(
+    into: BranchHandle | string,
+    opts: { requireClean?: boolean } = {},
+  ): Promise<BranchMergeResponse> {
+    const intoId = typeof into === "string" ? into : into.id;
+    return this.kernel.request<BranchMergeResponse>(
+      "POST",
+      `/v1/branches/${this.branch.id}/merge`,
+      { into: intoId, require_clean: opts.requireClean ?? false },
+    );
+  }
+
+  async discard(reason = ""): Promise<Branch> {
+    const b = await this.kernel.request<Branch>(
+      "POST",
+      `/v1/branches/${this.branch.id}/discard`,
+      { reason },
+    );
+    this.branch = b;
+    return b;
+  }
+
+  async proposeEffect(
+    contract: EffectContract,
+    opts: { proposer?: string; step?: string; lease?: string } = {},
+  ): Promise<EffectHandle> {
+    const resp = await this.kernel.request<{
+      effect?: PendingEffect;
+      denial?: import("./types.js").Denial;
+    }>("POST", "/v1/effects", {
+      contract,
+      proposer: opts.proposer ?? this.episode.owner,
+      branch: this.branch.id,
+      step: opts.step ?? "",
+      lease: opts.lease ?? "",
+    });
+    if (resp.denial) throw new DenialError(resp.denial);
+    if (!resp.effect) throw new KernelError("OTHER", "malformed effect response");
+    return new EffectHandle(this.kernel, resp.effect);
+  }
+}

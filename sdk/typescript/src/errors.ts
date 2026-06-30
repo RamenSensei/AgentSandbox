@@ -44,3 +44,12 @@ export class DenialError extends KernelError {
     return this.denial.escalation_allowed;
   }
 }
+
+/** The kernel could not be reached (after retries). */
+export class TransportError extends KernelError {
+  constructor(message: string, cause?: unknown) {
+    super("TRANSPORT", message, 0);
+    this.name = "TransportError";
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}

@@ -129,3 +129,32 @@ export interface ErrorEnvelope {
 // ---------------------------------------------------------------------------
 // Observations (tagged with "kind")
 // ---------------------------------------------------------------------------
+
+export type EffectClass =
+  | "pure"
+  | "local_reversible"
+  | "remote_reversible"
+  | "compensatable"
+  | "irreversible"
+  | "opaque_external";
+
+export type Observation =
+  | {
+      kind: "success";
+      summary: string;
+      data?: Json;
+      stdout_head?: string;
+      exit_code: number;
+      full_output: string;
+      truncated: boolean;
+    }
+  | {
+      kind: "failure";
+      summary: string;
+      exit_code: number;
+      first_causal_failure?: string;
+      full_output: string;
+    }
+  | { kind: "denied"; denial: Denial }
+  | { kind: "effect_pending"; effect: string; contract_hash: string; class: EffectClass }
+  | { kind: "effect_committed"; receipt: string };

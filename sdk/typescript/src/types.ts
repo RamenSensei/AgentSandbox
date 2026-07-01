@@ -104,3 +104,28 @@ export type DenialCode =
   | "DUPLICATE_COMMIT"
   | "BACKEND_UNAVAILABLE"
   | "POLICY_FORBIDDEN";
+
+export interface RequestableScope {
+  operation: string;
+  constraints: Json;
+  requires_human: boolean;
+}
+
+export interface Denial {
+  code: DenialCode;
+  attempted_operation: string;
+  reason: string;
+  safe_alternatives?: string[];
+  requestable_scopes?: RequestableScope[];
+  escalation_allowed: boolean;
+}
+
+export interface ErrorEnvelope {
+  code: string;
+  message: string;
+  denial?: Denial;
+}
+
+// ---------------------------------------------------------------------------
+// Observations (tagged with "kind")
+// ---------------------------------------------------------------------------

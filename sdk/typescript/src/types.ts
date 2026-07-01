@@ -73,3 +73,34 @@ export const WriteFile = (path: string, contents_b64: string): ActionKind => ({
   path,
   contents_b64,
 });
+export const DeletePath = (path: string): ActionKind => ({ kind: "delete_path", path });
+export const HttpRead = (url: string): ActionKind => ({ kind: "http_read", url });
+export const McpInvoke = (server: string, tool: string, args: Json = null): ActionKind => ({
+  kind: "mcp_invoke",
+  server,
+  tool,
+  arguments: args,
+});
+export const ConnectorOp = (
+  connector: string,
+  operation: string,
+  params: Json = null,
+): ActionKind => ({ kind: "connector_op", connector, operation, params });
+
+// ---------------------------------------------------------------------------
+// Denials
+// ---------------------------------------------------------------------------
+
+export type DenialCode =
+  | "CAPABILITY_DENIED"
+  | "CAPABILITY_EXPIRED"
+  | "CAPABILITY_EXHAUSTED"
+  | "BUDGET_EXHAUSTED"
+  | "CONSTRAINT_VIOLATED"
+  | "BRANCH_MISMATCH"
+  | "EFFECT_REQUIRES_APPROVAL"
+  | "STALE_AUTHORIZATION"
+  | "PRECONDITION_FAILED"
+  | "DUPLICATE_COMMIT"
+  | "BACKEND_UNAVAILABLE"
+  | "POLICY_FORBIDDEN";

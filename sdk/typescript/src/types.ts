@@ -158,3 +158,30 @@ export type Observation =
   | { kind: "denied"; denial: Denial }
   | { kind: "effect_pending"; effect: string; contract_hash: string; class: EffectClass }
   | { kind: "effect_committed"; receipt: string };
+
+// ---------------------------------------------------------------------------
+// Constraints (tagged with "kind")
+// ---------------------------------------------------------------------------
+
+export type Constraint =
+  | { kind: "equals"; value: Json }
+  | { kind: "one_of"; values: Json[] }
+  | { kind: "glob"; pattern: string }
+  | { kind: "prefix"; prefix: string }
+  | { kind: "max"; max: number }
+  | { kind: "forbidden" };
+
+export interface CapabilityLease {
+  id: string; // "lease-..."
+  principal: string; // "pr-..."
+  operation: string;
+  constraints: Record<string, Constraint>;
+  remaining_uses: number;
+  issued_at: string;
+  expires_at: string;
+  bound_branch?: string;
+  budget: ResourceBudget;
+  parent_lease?: string;
+  preconditions?: Record<string, Json>;
+  revoked: boolean;
+}

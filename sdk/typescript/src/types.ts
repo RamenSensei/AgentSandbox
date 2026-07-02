@@ -211,3 +211,31 @@ export type ReplayClass =
   | "process_and_filesystem"
   | "framework_host_calls"
   | "browser_profile";
+
+export interface StateNode {
+  id: string; // "st-..."
+  episode: string;
+  branch: string;
+  parent?: string;
+  produced_by?: string;
+  merge_parent?: string;
+  actor: string;
+  delta: StateDelta;
+  workspace_root: string;
+  replay_class: ReplayClass;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Episodes / branches / steps
+// ---------------------------------------------------------------------------
+
+export interface Episode {
+  id: string; // "ep-..."
+  title: string;
+  owner: string;
+  root_state: string;
+  main_branch: string;
+  budget: ResourceBudget;
+  created_at: string;
+}

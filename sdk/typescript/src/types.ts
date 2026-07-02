@@ -239,3 +239,26 @@ export interface Episode {
   budget: ResourceBudget;
   created_at: string;
 }
+
+export interface Branch {
+  id: string; // "br-..."
+  episode: string;
+  parent_branch?: string;
+  forked_from: string;
+  head: string;
+  discarded: boolean;
+  created_at: string;
+}
+
+export interface EpisodeCreateResponse {
+  episode: Episode;
+  main_branch: Branch;
+}
+
+export interface EpisodeDescribeResponse {
+  episode: Episode;
+  branches: Branch[];
+  step_count: number;
+  pending_effects: number;
+  budget_remaining: ResourceBudget;
+}

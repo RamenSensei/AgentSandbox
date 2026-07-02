@@ -185,3 +185,29 @@ export interface CapabilityLease {
   preconditions?: Record<string, Json>;
   revoked: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// State DAG
+// ---------------------------------------------------------------------------
+
+export type FileChange =
+  | { op: "added"; path: string; blob: string; mode: number }
+  | { op: "modified"; path: string; old_blob: string; new_blob: string }
+  | { op: "deleted"; path: string; old_blob: string };
+
+export interface StateDelta {
+  files?: FileChange[];
+  processes_started?: string[];
+  processes_exited?: string[];
+  tool_sessions?: string[];
+  policy_epoch: number;
+  effects_proposed?: string[];
+  effects_committed?: string[];
+}
+
+export type ReplayClass =
+  | "audit_only"
+  | "filesystem_only"
+  | "process_and_filesystem"
+  | "framework_host_calls"
+  | "browser_profile";

@@ -262,3 +262,27 @@ export interface EpisodeDescribeResponse {
   pending_effects: number;
   budget_remaining: ResourceBudget;
 }
+
+export interface StepResult {
+  step: string; // "step-..."
+  observation: Observation;
+  produced_state?: string;
+  usage: ResourceBudget;
+}
+
+export interface BranchDiffResponse {
+  delta: StateDelta;
+  summary: string;
+}
+
+export interface BranchCompareResponse {
+  common_ancestor: string;
+  left_delta: StateDelta;
+  right_delta: StateDelta;
+  conflicting_paths: string[];
+}
+
+export interface BranchMergeResponse {
+  merged?: StateNode;
+  conflict?: { paths: string[] };
+}

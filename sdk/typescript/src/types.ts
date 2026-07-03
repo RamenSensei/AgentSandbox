@@ -341,3 +341,27 @@ export interface Receipt {
   signature: string;
   key_id: string;
 }
+
+export interface EffectPrepareResponse {
+  preview: Json;
+  observed_preconditions: Json;
+  effect: PendingEffect;
+}
+
+// ---------------------------------------------------------------------------
+// Trace / replay
+// ---------------------------------------------------------------------------
+
+export interface TraceEntry {
+  step: string;
+  episode: string;
+  branch: string;
+  actor: string;
+  action: ActionKind;
+  lease: string;
+  observation: Observation;
+  produced_state?: string;
+  usage: ResourceBudget;
+  started_at: string;
+  finished_at: string;
+}

@@ -286,3 +286,36 @@ export interface BranchMergeResponse {
   merged?: StateNode;
   conflict?: { paths: string[] };
 }
+
+// ---------------------------------------------------------------------------
+// Effects
+// ---------------------------------------------------------------------------
+
+export interface EffectContract {
+  operation: string;
+  resource: string;
+  arguments: Json;
+  preconditions: Json;
+  idempotency_key: string;
+  class: EffectClass;
+}
+
+export type EffectPhase =
+  | { phase: "proposed" }
+  | { phase: "prepared"; preview: Json }
+  | { phase: "approved"; approver: string; approved_at: string; policy_epoch: number }
+  | { phase: "committed"; receipt: string }
+  | { phase: "aborted"; reason: string }
+  | { phase: "compensated"; compensating_receipt: string };
+
+export interface PendingEffect {
+  id: string; // "fx-..."
+  contract: EffectContract;
+  contract_hash: string;
+  proposer: string;
+  branch: string;
+  step: string;
+  lease: string;
+  phase: EffectPhase;
+  proposed_at: string;
+}

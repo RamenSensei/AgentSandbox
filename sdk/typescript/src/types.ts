@@ -319,3 +319,25 @@ export interface PendingEffect {
   phase: EffectPhase;
   proposed_at: string;
 }
+
+export interface ReceiptBody {
+  effect: string;
+  who: string;
+  operation: string;
+  resource: string;
+  contract_hash: string;
+  branch: string;
+  step: string;
+  policy_epoch: number;
+  authorization_witness: string;
+  external_response_digest: string;
+  committed_at: string;
+}
+
+export interface Receipt {
+  id: string; // "rcpt-..."
+  body: ReceiptBody;
+  /** Ed25519 over canonical_json(body), hex-encoded. */
+  signature: string;
+  key_id: string;
+}

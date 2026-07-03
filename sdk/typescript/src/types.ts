@@ -365,3 +365,28 @@ export interface TraceEntry {
   started_at: string;
   finished_at: string;
 }
+
+export interface TraceQueryResponse {
+  entries: TraceEntry[];
+  next_page_token?: string;
+}
+
+export type ReplayMode = "audit" | "sandbox" | "live";
+
+export interface ReplayDivergence {
+  step: string;
+  layer: "observation" | "state" | "effect_contract" | "effect_outcome";
+  recorded_digest: string;
+  replayed_digest: string;
+  detail: string;
+}
+
+export interface ReplayReport {
+  episode: string;
+  mode: ReplayMode;
+  effective_class: ReplayClass;
+  steps_replayed: number;
+  divergences: ReplayDivergence[];
+  receipts?: Receipt[];
+  completed_at: string;
+}

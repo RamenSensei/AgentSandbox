@@ -50,3 +50,49 @@ const receipt = await fx.run(async (fx) => {
 });
 // If run() exits without a successful commit, the effect is aborted.
 ```
+
+## Denials are recoverable
+
+```ts
+try {
+  await kernel.requestCapability({ principal: "pr-agent", operation: "net.raw_socket" });
+} catch (e) {
+  if (e instanceof DenialError) {
+    console.log(e.denialCode);          // "CAPABILITY_DENIED"
+    console.log(e.safeAlternatives);    // ["github.create_pull_request"]
+    console.log(e.requestableScopes);   // narrow scopes to request instead
+    console.log(e.escalationAllowed);
+  }
+}
+```
+
+Denied-but-recorded steps come back as a normal observation:
+`res.observation.kind === "denied"` with the full structured
+`res.observation.denial`.
+
+## Capabilities, trace, replay
+
+```ts
+const lease = await kernel.requestCapability({
+  principal: "pr-agent",
+  operation: "github.create_pull_request",
+  constraints: {
+    repository: { kind: "equals", value: "org/repo" },
+    head: { kind: "prefix", prefix: "sandbox/" },
+    merge: { kind: "forbidden" },
+  },
+  uses: 1,
+  boundBranch: ep.id,
+});
+const child = await kernel.delegateCapability({
+  parentLease: lease.id, childPrincipal: "pr-child",
+  constraints: { repository: { kind: "equals", value: "org/repo" } },
+  uses: 1, expiresAt: lease.expires_at,
+});
+await kernel.revokeCapability(lease.id, { cascade: true });
+
+await kernel.traceQuery('effects where class >= compensatable and branch = "br-42"');
+const report = await kernel.replay("audit", ep.episodeId); // "audit" | "sandbox" | "live"
+```
+
+Live replay guarantees the *contract*, not the outcome.

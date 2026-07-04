@@ -96,3 +96,17 @@ const report = await kernel.replay("audit", ep.episodeId); // "audit" | "sandbox
 ```
 
 Live replay guarantees the *contract*, not the outcome.
+
+## Reliability
+
+Automatic retry with exponential backoff on network errors and
+502/503/504 (`maxRetries`, `backoffMs` options; `fetch` and `sleep` are
+injectable for tests).
+
+## Development
+
+```bash
+npm install --no-audit --no-fund
+npx tsc --noEmit     # typecheck
+npm test             # tsc build + node:test against a mock kernel (node:http)
+```

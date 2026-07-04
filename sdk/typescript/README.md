@@ -1,0 +1,52 @@
+# @agentkernel/sdk
+
+Typed, zero-runtime-dependency TypeScript client for the AgentKernel
+Execution Protocol HTTP API (`agentkernel.v1`). Uses global `fetch`
+(Node >= 18, browsers). ESM with full type declarations; wire objects are
+exhaustive discriminated unions matching the kernel's serde tags exactly
+(`ActionKind`/`Observation` by `kind`, `EffectPhase` by `phase`,
+`FileChange` by `op`, `Constraint` by `kind`).
+
+```bash
+npm install @agentkernel/sdk
+```
+
+## Quick start
+
+```ts
+import { Kernel, Shell, ConnectorOp, DenialError } from "@agentkernel/sdk";
+
+const kernel = new Kernel("http://localhost:7411", { token: "..." });
+
+// Episodes and steps
+const ep = await kernel.createEpisode({ title: "fix issue 42", owner: "pr-agent" });
+const res = await ep.execute(Shell("pytest"), { lease: "lease-abc" });
+if (res.observation.kind === "success") {
+  console.log(res.observation.stdout_head); // "12 passed"
+}
+
+// Parallel speculation
+const branches = await ep.fork(3);
+await Promise.all(branches.map((br) => br.execute(Shell("python attempt.py"), { lease: "lease-abc" })));
+console.log((await branches[0].diff()).summary);
+console.log((await branches[0].compare(branches[1])).conflicting_paths);
+await branches[0].merge(ep);
+await branches[1].discard("lost the race");
+
+// Effects: two-phase commit against the real world
+const fx = await ep.proposeEffect({
+  operation: "github.create_pull_request",
+  resource: "org/repo",
+  arguments: { base: "main", head: "sandbox/fix", draft: true },
+  preconditions: { base_head_sha: "abc123" },
+  idempotency_key: "ep-7-step-98",
+  class: "compensatable",
+}, { lease: "lease-abc" });
+
+const receipt = await fx.run(async (fx) => {
+  await fx.prepare();          // dry-run; never a side effect
+  await fx.approve("pr-human"); // approves exactly this contract hash
+  return fx.commit();           // commit-time revalidation, signed receipt
+});
+// If run() exits without a successful commit, the effect is aborted.
+```

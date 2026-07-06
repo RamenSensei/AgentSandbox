@@ -194,3 +194,15 @@ test("retries on 503, then surfaces KernelError when exhausted", async () => {
     state.flakyRemaining = 0;
   }
 });
+
+test("not found surfaces code and status", async () => {
+  await assert.rejects(
+    () => kernel.getEpisode("ep-nope"),
+    (e: unknown) => {
+      assert.ok(e instanceof KernelError);
+      assert.equal(e.code, "NOT_FOUND");
+      assert.equal(e.status, 404);
+      return true;
+    },
+  );
+});

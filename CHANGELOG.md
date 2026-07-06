@@ -9,6 +9,31 @@ and on-disk formats.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-06
+
+### Added
+- `sdk/python` and `sdk/typescript`: first-party SDKs covering episodes, steps,
+  branch fork/diff/merge/discard, capability requests, effect
+  propose/prepare/commit, and trace queries.
+- `conformance/`: protocol conformance suite that any backend or connector must
+  pass, including lease attenuation, denial shape, effect lifecycle ordering,
+  and receipt completeness checks.
+- `trace.query` API over the causal ledger: agents can ask what a step changed,
+  which capability an external request used, and which irreversible effects
+  exist since a checkpoint.
+- Delegation API: explicit, attenuated, time-bound, branch-bound, revocable
+  leases for sub-agents and tools.
+
+### Changed
+- `ExecutionOutcome` now includes `replay_class` and unified resource usage
+  (CPU, memory, tokens, network, cost) per step.
+- Observations are returned as structured, incremental summaries with full logs
+  available via `trace.query`, instead of raw stdout streams.
+
+### Fixed
+- Branch discard now revokes all leases bound to the branch instead of letting
+  them expire.
+
 ## [0.4.0] - 2026-06-01
 
 ### Added

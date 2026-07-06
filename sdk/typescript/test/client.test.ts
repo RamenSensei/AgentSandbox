@@ -104,3 +104,27 @@ test("effect lifecycle: prepare, approve, commit yields a signed receipt", async
   const fetched = await kernel.getReceipt(receipt.id);
   assert.equal(fetched.id, receipt.id);
 });
+
+test("uncommitted effect is aborted when run() exits", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const fx = await ep.proposeEffect(contract);
+  await fx.run(async (fx) => {
+    await fx.prepare();
+  });
+  const effect = await kernel.getEffect(fx.id);
+  assert.equal(effect.phase.phase, "aborted");
+});
+
+test("stale contract hash throws DenialError with STALE_AUTHORIZATION", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const fx = await ep.proposeEffect(contract);
+  await assert.rejects(
+    () => fx.commit("sha256:wrong"),
+    (e: unknown) => {
+      assert.ok(e instanceof DenialError);
+      assert.equal(e.denial.code, "STALE_AUTHORIZATION");
+      return true;
+    },
+  );
+  await fx.abort();
+});

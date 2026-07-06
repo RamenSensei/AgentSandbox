@@ -164,3 +164,33 @@ test("capability grant, delegate (attenuate), cascade revoke", async () => {
   const revoked = await kernel.revokeCapability(lease.id, { cascade: true });
   assert.ok(revoked.includes(child.id));
 });
+
+test("replay modes and trace query", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const report = await kernel.replay("audit", ep.episodeId);
+  assert.equal(report.mode, "audit");
+  assert.equal(report.effective_class, "filesystem_only");
+  const out = await kernel.traceQuery("effects where class >= compensatable", { limit: 10 });
+  assert.deepEqual(out.entries, []);
+});
+
+test("retries on 503, then surfaces KernelError when exhausted", async () => {
+  state.flakyRemaining = 2;
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  assert.match(ep.episodeId, /^ep-/);
+
+  state.flakyRemaining = 10;
+  try {
+    await assert.rejects(
+      () => kernel.createEpisode({ title: "t", owner: "pr-agent" }),
+      (e: unknown) => {
+        assert.ok(e instanceof KernelError);
+        assert.equal(e.code, "BACKEND_UNAVAILABLE");
+        assert.equal(e.status, 503);
+        return true;
+      },
+    );
+  } finally {
+    state.flakyRemaining = 0;
+  }
+});

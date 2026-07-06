@@ -128,3 +128,39 @@ test("stale contract hash throws DenialError with STALE_AUTHORIZATION", async ()
   );
   await fx.abort();
 });
+
+test("capability denial carries safe alternatives and requestable scopes", async () => {
+  await assert.rejects(
+    () => kernel.requestCapability({ principal: "pr-agent", operation: "net.raw_socket" }),
+    (e: unknown) => {
+      assert.ok(e instanceof DenialError);
+      assert.equal(e.denialCode, "CAPABILITY_DENIED");
+      assert.deepEqual(e.safeAlternatives, ["github.create_pull_request"]);
+      assert.equal(e.requestableScopes[0]?.operation, "net.http_read");
+      assert.equal(e.escalationAllowed, true);
+      return true;
+    },
+  );
+});
+
+test("capability grant, delegate (attenuate), cascade revoke", async () => {
+  const lease = await kernel.requestCapability({
+    principal: "pr-agent",
+    operation: "github.create_pull_request",
+    constraints: { repository: { kind: "equals", value: "org/repo" } },
+    uses: 2,
+  });
+  assert.match(lease.id, /^lease-/);
+  const child = await kernel.delegateCapability({
+    parentLease: lease.id,
+    childPrincipal: "pr-child",
+    constraints: { repository: { kind: "equals", value: "org/repo" } },
+    uses: 1,
+    expiresAt: lease.expires_at,
+  });
+  assert.equal(child.parent_lease, lease.id);
+  const held = await kernel.capabilities("pr-child");
+  assert.ok(held.some((l) => l.id === child.id));
+  const revoked = await kernel.revokeCapability(lease.id, { cascade: true });
+  assert.ok(revoked.includes(child.id));
+});

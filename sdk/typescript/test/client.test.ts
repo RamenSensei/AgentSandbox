@@ -48,3 +48,32 @@ test("create episode and execute a successful step", async () => {
   }
   assert.match(res.produced_state ?? "", /^st-/);
 });
+
+test("denied step returns a structured denial observation", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const res = await ep.execute(Shell("forbidden thing"), { lease: "lease-abc" });
+  assert.equal(res.observation.kind, "denied");
+  if (res.observation.kind === "denied") {
+    assert.equal(res.observation.denial.code, "CAPABILITY_DENIED");
+    assert.deepEqual(res.observation.denial.safe_alternatives, [
+      "github.create_pull_request",
+    ]);
+  }
+  assert.equal(res.produced_state, undefined); // no invisible state transition
+});
+
+test("fork, diff, compare, merge, discard", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const branches = await ep.fork(3);
+  assert.equal(branches.length, 3);
+  assert.ok(branches.every((b) => b.branch.parent_branch === ep.id));
+  const diff = await branches[0]!.diff();
+  assert.equal(diff.summary, "1 file changed");
+  assert.equal(diff.delta.files?.[0]?.op, "modified");
+  const cmp = await branches[0]!.compare(branches[1]!);
+  assert.deepEqual(cmp.conflicting_paths, ["a.py"]);
+  const merged = await branches[0]!.merge(ep);
+  assert.ok(merged.merged);
+  const discarded = await branches[2]!.discard("lost the race");
+  assert.equal(discarded.discarded, true);
+});

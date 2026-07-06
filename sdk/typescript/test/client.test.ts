@@ -77,3 +77,30 @@ test("fork, diff, compare, merge, discard", async () => {
   const discarded = await branches[2]!.discard("lost the race");
   assert.equal(discarded.discarded, true);
 });
+
+test("connector op becomes a pending effect", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const res = await ep.execute(ConnectorOp("github", "create_pull_request", { base: "main" }), {
+    lease: "lease-abc",
+  });
+  assert.equal(res.observation.kind, "effect_pending");
+  if (res.observation.kind === "effect_pending") {
+    assert.match(res.observation.effect, /^fx-/);
+    assert.equal(res.observation.class, "compensatable");
+  }
+});
+
+test("effect lifecycle: prepare, approve, commit yields a signed receipt", async () => {
+  const ep = await kernel.createEpisode({ title: "t", owner: "pr-agent" });
+  const fx = await ep.proposeEffect(contract, { lease: "lease-abc" });
+  const receipt = await fx.run(async (fx) => {
+    const preview = await fx.prepare();
+    assert.deepEqual(preview.preview, { will: "create PR" });
+    await fx.approve("pr-human");
+    return fx.commit();
+  });
+  assert.match(receipt.id, /^rcpt-/);
+  assert.equal(receipt.body.contract_hash, "sha256:deadbeef");
+  const fetched = await kernel.getReceipt(receipt.id);
+  assert.equal(fetched.id, receipt.id);
+});

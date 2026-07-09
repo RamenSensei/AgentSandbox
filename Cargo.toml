@@ -19,6 +19,7 @@ members = [
     "connectors/mcp",
     "conformance",
     "adversarial-bench",
+    "examples/coding-agent-github",
 ]
 
 [workspace.package]

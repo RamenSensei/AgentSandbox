@@ -75,3 +75,26 @@ All field names and enum spellings follow the kernel's serde output
 (`kernel/core/src`): IDs are plain strings with `ep-`/`step-`/`br-`/`st-`/
 `pr-`/`lease-`/`fx-`/`rcpt-` prefixes, enums are `snake_case`, and
 `DenialCode` is `SCREAMING_SNAKE_CASE`.
+
+## Demo data provenance
+
+`demo-data.json` is a hand-written trace of the flagship scenario from the
+founding design discussion: a coding agent fixes GitHub issue #42 (a race
+condition in a job scheduler). It clones and reproduces the failure, forks
+three branches from a checkpoint, and three sub-agents attempt fixes in
+parallel. Branch B pulls in a malicious dependency whose setup hook tries to
+open a raw socket carrying the GitHub token; the kernel returns a structured
+`CAPABILITY_DENIED` denial (the credential lives in the secret broker and is
+only usable through the typed GitHub connector), and the sub-agent recovers by
+itself. Branch A passes the full suite, a draft PR effect is proposed and
+prepared, a human approves the exact contract hash, commit-time revalidation
+re-checks `base_head_sha`, the PR commits with a signed receipt, the losing
+branches are discarded, and the winning branch is merged back to main.
+
+## The embedded fallback for `file://`
+
+Several browsers block `fetch()` of local JSON on `file://`. The app therefore
+tries to fetch `demo-data.json` first and falls back to `window.DEMO_DATA`, a
+copy of the same dataset embedded at the top of `app.js`. **`demo-data.json`
+is the canonical dataset; the constant in `app.js` mirrors it** — if you edit
+one, update the other (or re-embed with a one-line script).

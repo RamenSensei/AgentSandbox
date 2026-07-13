@@ -44,3 +44,34 @@ Vanilla HTML/CSS/JS. **No build step, no dependencies.**
    In demo mode the badge is driven by the dataset's `verified` field; a live
    deployment would verify the Ed25519 signature over the canonical JSON of
    `body` against the kernel's published receipt key.
+
+## API endpoints consumed (live mode)
+
+- `GET {base}/v1/episodes`
+
+  ```json
+  { "episodes": [ { "id": "ep-codefix-42", "title": "Fix GitHub issue #42..." } ] }
+  ```
+
+- `GET {base}/v1/trace/query?episode=<id>`
+
+  ```json
+  {
+    "episode": { "id": "ep-codefix-42", "title": "...", "status": "completed", "protocol_version": "0.6" },
+    "events": [ { "id": "ev-019", "ts": "2026-08-11T09:18:02Z", "step": "step-08",
+                  "branch": "br-b", "actor": "pr-sub-b", "kind": "denial",
+                  "summary": "...", "payload": { "code": "CAPABILITY_DENIED", "...": "..." } } ]
+  }
+  ```
+
+  If the response also carries `states` and `principals`, the branch graph and
+  actor names are populated from them.
+
+- `GET {base}/v1/episodes/<id>/branches` returning `{ "branches": [...] }`
+- `GET {base}/v1/episodes/<id>/leases` returning `{ "leases": [...] }`
+- `GET {base}/v1/episodes/<id>/receipts` returning `{ "receipts": [...] }`
+
+All field names and enum spellings follow the kernel's serde output
+(`kernel/core/src`): IDs are plain strings with `ep-`/`step-`/`br-`/`st-`/
+`pr-`/`lease-`/`fx-`/`rcpt-` prefixes, enums are `snake_case`, and
+`DenialCode` is `SCREAMING_SNAKE_CASE`.

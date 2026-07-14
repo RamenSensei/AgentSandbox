@@ -604,3 +604,27 @@ window.DEMO_DATA = {
     }
   ]
 };
+
+/* ------------------------------------------------------------------ */
+/* 2. App state                                                        */
+/* ------------------------------------------------------------------ */
+
+const LS_DEMO = "ak-ui-demo-mode";
+const LS_API = "ak-ui-api-base";
+
+const state = {
+  view: "timeline",
+  demoMode: localStorage.getItem(LS_DEMO) !== "off", // default ON
+  apiBase: localStorage.getItem(LS_API) || "http://127.0.0.1:7411",
+  episodes: [],          // [{id, title}] for the selector
+  currentEpisode: null,  // selected episode id
+  data: null,            // full dataset for the current episode
+  filters: { kind: "", branch: "" },
+  expandedEvents: new Set(),
+  selectedState: null,   // state node id selected in the graph
+};
+
+function persist() {
+  localStorage.setItem(LS_DEMO, state.demoMode ? "on" : "off");
+  localStorage.setItem(LS_API, state.apiBase);
+}

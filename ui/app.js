@@ -628,3 +628,26 @@ function persist() {
   localStorage.setItem(LS_DEMO, state.demoMode ? "on" : "off");
   localStorage.setItem(LS_API, state.apiBase);
 }
+
+/* ------------------------------------------------------------------ */
+/* 3. Data loading                                                     */
+/* ------------------------------------------------------------------ */
+
+/** Load the bundled demo dataset: fetch the canonical JSON file, and if
+ * that fails (typical on file://), use the embedded copy. */
+async function loadDemoData() {
+  try {
+    const res = await fetch("demo-data.json");
+    if (res.ok) return await res.json();
+  } catch (_e) {
+    /* fall through to the embedded copy */
+  }
+  return window.DEMO_DATA;
+}
+
+async function apiGet(path) {
+  const base = state.apiBase.replace(/\/+$/, "");
+  const res = await fetch(base + path, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
+  return res.json();
+}

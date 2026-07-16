@@ -651,3 +651,63 @@ async function apiGet(path) {
   if (!res.ok) throw new Error("HTTP " + res.status + " for " + path);
   return res.json();
 }
+
+/** Load one episode from a live kernel, assembling the same dataset shape
+ * the demo file uses. */
+async function loadLiveEpisode(episodeId) {
+  const trace = await apiGet("/v1/trace/query?episode=" + encodeURIComponent(episodeId));
+  const [branches, leases, receipts] = await Promise.all([
+    apiGet("/v1/episodes/" + encodeURIComponent(episodeId) + "/branches").catch(() => ({ branches: [] })),
+    apiGet("/v1/episodes/" + encodeURIComponent(episodeId) + "/leases").catch(() => ({ leases: [] })),
+    apiGet("/v1/episodes/" + encodeURIComponent(episodeId) + "/receipts").catch(() => ({ receipts: [] })),
+  ]);
+  return {
+    episode: trace.episode || {},
+    events: trace.events || [],
+    states: trace.states || (trace.episode && trace.episode.states) || [],
+    principals: trace.principals || [],
+    branches: branches.branches || [],
+    leases: leases.leases || [],
+    receipts: receipts.receipts || [],
+  };
+}
+
+async function reload() {
+  hideError();
+  try {
+    if (state.demoMode) {
+      const data = await loadDemoData();
+      state.episodes = [{ id: data.episode.id, title: data.episode.title }];
+      state.currentEpisode = data.episode.id;
+      state.data = data;
+    } else {
+      const list = await apiGet("/v1/episodes");
+      state.episodes = (list.episodes || []).map((e) =>
+        typeof e === "string" ? { id: e, title: e } : { id: e.id, title: e.title || e.id }
+      );
+      if (!state.episodes.length) {
+        state.data = null;
+        state.currentEpisode = null;
+        renderAll();
+        showError("The kernel returned no episodes. Run an episode first, or switch demo mode on to explore the bundled trace.");
+        return;
+      }
+      if (!state.currentEpisode || !state.episodes.some((e) => e.id === state.currentEpisode)) {
+        state.currentEpisode = state.episodes[0].id;
+      }
+      state.data = await loadLiveEpisode(state.currentEpisode);
+    }
+  } catch (err) {
+    state.data = state.demoMode ? window.DEMO_DATA : null;
+    if (!state.demoMode) {
+      showError(
+        "Could not reach the kernel at " + escapeHtml(state.apiBase) +
+        " (" + escapeHtml(String(err && err.message || err)) + "). " +
+        "Check that the trace API is running and CORS allows this origin, or switch demo mode on."
+      );
+    }
+  }
+  state.expandedEvents.clear();
+  state.selectedState = null;
+  renderAll();
+}

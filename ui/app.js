@@ -711,3 +711,28 @@ async function reload() {
   state.selectedState = null;
   renderAll();
 }
+
+/* ------------------------------------------------------------------ */
+/* 4. Utilities                                                        */
+/* ------------------------------------------------------------------ */
+
+function $(sel) { return document.querySelector(sel); }
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function showError(html) {
+  const el = $("#error-banner");
+  el.innerHTML = html;
+  el.classList.remove("hidden");
+}
+function hideError() { $("#error-banner").classList.add("hidden"); }
+
+/** "09:18:02" from an ISO timestamp. */
+function fmtTime(iso) {
+  const m = /T(\d\d:\d\d:\d\d)/.exec(iso || "");
+  return m ? m[1] : (iso || "");
+}

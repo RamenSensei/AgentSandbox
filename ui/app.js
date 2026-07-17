@@ -736,3 +736,27 @@ function fmtTime(iso) {
   const m = /T(\d\d:\d\d:\d\d)/.exec(iso || "");
   return m ? m[1] : (iso || "");
 }
+
+/** Relative expiry like "in 12m" / "3h ago". */
+function relTime(iso, now) {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  let d = Math.round((t - now) / 1000);
+  const past = d < 0;
+  d = Math.abs(d);
+  let s;
+  if (d < 90) s = d + "s";
+  else if (d < 5400) s = Math.round(d / 60) + "m";
+  else if (d < 129600) s = Math.round(d / 3600) + "h";
+  else s = Math.round(d / 86400) + "d";
+  return past ? s + " ago" : "in " + s;
+}
+
+/** Truncate a hash like "sha256:ab12f004..." keeping the scheme. */
+function shortHash(h, n) {
+  n = n || 10;
+  const s = String(h || "");
+  const i = s.indexOf(":");
+  if (i >= 0 && s.length > i + 1 + n) return s.slice(0, i + 1 + n) + "\u2026";
+  return s.length > n + 4 ? s.slice(0, n + 4) + "\u2026" : s;
+}

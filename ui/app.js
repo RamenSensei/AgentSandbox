@@ -786,3 +786,29 @@ function branchChip(branchId) {
   const label = b ? b.name : branchId;
   return '<span class="chip branch-chip ' + branchClass(branchId) + '">' + escapeHtml(label) + "</span>";
 }
+
+/** Category for color-coding event kinds. */
+function kindCategory(kind) {
+  if (kind === "denial") return "denial";
+  if (["policy_decision", "capability_request", "approval", "commit_revalidation"].includes(kind)) return "policy";
+  if (["effect_proposed", "effect_prepared", "effect_committed"].includes(kind)) return "effect";
+  if (["state_delta", "branch_forked", "branch_discarded", "branch_merged"].includes(kind)) return "state";
+  return "neutral"; // objective, model_response, intent_declared, tool_invocation, observation
+}
+
+function kindBadge(kind) {
+  return '<span class="kind-badge kindcat-' + kindCategory(kind) + '">' + escapeHtml(kind) + "</span>";
+}
+
+/** Compact human rendering of one lease constraint (serde-tagged form). */
+function constraintText(param, c) {
+  switch (c.kind) {
+    case "equals": return param + " = " + JSON.stringify(c.value);
+    case "one_of": return param + " in " + JSON.stringify(c.values);
+    case "glob": return param + " matches " + c.pattern;
+    case "prefix": return param + " starts-with " + c.prefix;
+    case "max": return param + " <= " + c.max;
+    case "forbidden": return param + " forbidden";
+    default: return param + " " + JSON.stringify(c);
+  }
+}

@@ -760,3 +760,29 @@ function shortHash(h, n) {
   if (i >= 0 && s.length > i + 1 + n) return s.slice(0, i + 1 + n) + "\u2026";
   return s.length > n + 4 ? s.slice(0, n + 4) + "\u2026" : s;
 }
+
+function shortSig(sig) {
+  const s = String(sig || "");
+  return s.length > 20 ? s.slice(0, 12) + "\u2026" + s.slice(-8) : s;
+}
+
+function principalName(id) {
+  const p = (state.data && state.data.principals || []).find((p) => p.id === id);
+  return p ? p.display_name : id;
+}
+
+function branchById(id) {
+  return (state.data && state.data.branches || []).find((b) => b.id === id);
+}
+
+function branchClass(branchId) {
+  const b = branchById(branchId);
+  const st = b ? b.status : "active";
+  return "branch-" + (["main", "active", "merged", "discarded"].includes(st) ? st : "active");
+}
+
+function branchChip(branchId) {
+  const b = branchById(branchId);
+  const label = b ? b.name : branchId;
+  return '<span class="chip branch-chip ' + branchClass(branchId) + '">' + escapeHtml(label) + "</span>";
+}

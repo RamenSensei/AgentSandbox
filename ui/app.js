@@ -812,3 +812,93 @@ function constraintText(param, c) {
     default: return param + " " + JSON.stringify(c);
   }
 }
+
+/** A truncated monospace value with a copy button (full value copied). */
+function hashField(value) {
+  return (
+    '<span class="hash-field"><code title="' + escapeHtml(value) + '">' +
+    escapeHtml(shortHash(value, 12)) +
+    '</code><button class="copy-btn" data-copy="' + escapeHtml(value) + '">copy</button></span>'
+  );
+}
+
+function prettyJson(obj) {
+  return escapeHtml(JSON.stringify(obj, null, 2));
+}
+
+/* ------------------------------------------------------------------ */
+/* 5a. Timeline view                                                   */
+/* ------------------------------------------------------------------ */
+
+function renderTimeline() {
+  const root = $("#view-timeline");
+  const d = state.data;
+  if (!d || !d.events || !d.events.length) {
+    root.innerHTML = '<div class="empty-state">No events. Select an episode, or enable demo mode to explore the bundled trace.</div>';
+    return;
+  }
+
+  const kinds = [...new Set(d.events.map((e) => e.kind))].sort();
+  const branches = d.branches || [];
+
+  let html =
+    '<h2 class="view-title">Causal timeline</h2>' +
+    '<p class="view-sub">Every kernel-mediated event in the episode, grouped by step. Click a row to expand its payload.</p>' +
+    '<div class="filter-bar">' +
+    '<span class="filter-label">filter</span>' +
+    '<select id="filter-kind"><option value="">all kinds</option>' +
+    kinds.map((k) => '<option value="' + k + '"' + (state.filters.kind === k ? " selected" : "") + ">" + k + "</option>").join("") +
+    "</select>" +
+    '<select id="filter-branch"><option value="">all branches</option>' +
+    branches.map((b) => '<option value="' + b.id + '"' + (state.filters.branch === b.id ? " selected" : "") + ">" + escapeHtml(b.name) + "</option>").join("") +
+    "</select></div>";
+
+  // Sort by timestamp, then group consecutive events by step.
+  const events = d.events
+    .filter((e) => (!state.filters.kind || e.kind === state.filters.kind) &&
+                   (!state.filters.branch || e.branch === state.filters.branch))
+    .slice()
+    .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+
+  if (!events.length) {
+    html += '<div class="empty-state">No events match the current filters.</div>';
+    root.innerHTML = html;
+    wireTimelineFilters();
+    return;
+  }
+
+  let currentStep = null;
+  let open = false;
+  for (const ev of events) {
+    if (ev.step !== currentStep) {
+      if (open) html += "</div>";
+      currentStep = ev.step;
+      open = true;
+      html += '<div class="step-group"><div class="step-header">' + escapeHtml(ev.step || "(no step)") + "</div>";
+    }
+    const expanded = state.expandedEvents.has(ev.id);
+    html +=
+      '<div class="event-row' + (expanded ? " expanded" : "") + '" data-event="' + escapeHtml(ev.id) + '">' +
+      '<span class="event-ts">' + fmtTime(ev.ts) + "</span>" +
+      branchChip(ev.branch) +
+      '<span class="event-actor" title="' + escapeHtml(ev.actor) + '">' + escapeHtml(principalName(ev.actor)) + "</span>" +
+      kindBadge(ev.kind) +
+      '<span class="event-summary">' + escapeHtml(ev.summary) + "</span>" +
+      "</div>";
+    if (expanded) {
+      html += '<pre class="event-payload">' + prettyJson(ev.payload) + "</pre>";
+    }
+  }
+  if (open) html += "</div>";
+  root.innerHTML = html;
+  wireTimelineFilters();
+
+  root.querySelectorAll(".event-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const id = row.dataset.event;
+      if (state.expandedEvents.has(id)) state.expandedEvents.delete(id);
+      else state.expandedEvents.add(id);
+      renderTimeline();
+    });
+  });
+}

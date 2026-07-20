@@ -925,3 +925,38 @@ function branchColor(branchId) {
   const b = branchById(branchId);
   return BRANCH_COLORS[b ? b.status : "active"] || BRANCH_COLORS.active;
 }
+
+/** Simple layered layout: x = topological depth from the root (longest path
+ * over parent and merge_parent edges), y = branch lane. */
+function layoutGraph(states, branches) {
+  const byId = new Map(states.map((s) => [s.id, s]));
+  const depth = new Map();
+  function depthOf(id) {
+    if (depth.has(id)) return depth.get(id);
+    const s = byId.get(id);
+    if (!s) return 0;
+    let d = 0;
+    if (s.parent && byId.has(s.parent)) d = Math.max(d, depthOf(s.parent) + 1);
+    if (s.merge_parent && byId.has(s.merge_parent)) d = Math.max(d, depthOf(s.merge_parent) + 1);
+    depth.set(id, d);
+    return d;
+  }
+  states.forEach((s) => depthOf(s.id));
+
+  // Lanes: main first, then other branches in declaration order.
+  const laneOf = new Map();
+  let lane = 0;
+  const ordered = branches.slice().sort((a, b) => (a.status === "main" ? -1 : b.status === "main" ? 1 : 0));
+  for (const b of ordered) laneOf.set(b.id, lane++);
+
+  const X0 = 70, DX = 108, Y0 = 46, DY = 84, W = 78, H = 34;
+  const nodes = states.map((s) => ({
+    s,
+    x: X0 + depthOf(s.id) * DX,
+    y: Y0 + (laneOf.get(s.branch) || 0) * DY,
+    w: W, h: H,
+  }));
+  const width = Math.max(...nodes.map((n) => n.x)) + W + 40;
+  const height = Y0 + lane * DY;
+  return { nodes, byId, laneOf, width, height, ordered };
+}

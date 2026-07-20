@@ -902,3 +902,26 @@ function renderTimeline() {
     });
   });
 }
+
+function wireTimelineFilters() {
+  const fk = $("#filter-kind");
+  const fb = $("#filter-branch");
+  if (fk) fk.addEventListener("change", () => { state.filters.kind = fk.value; renderTimeline(); });
+  if (fb) fb.addEventListener("change", () => { state.filters.branch = fb.value; renderTimeline(); });
+}
+
+/* ------------------------------------------------------------------ */
+/* 5b. Branch graph view                                               */
+/* ------------------------------------------------------------------ */
+
+const BRANCH_COLORS = {
+  main: "#e8a33d",
+  active: "#3fb670",
+  merged: "#a07be0",
+  discarded: "#9b5252",
+};
+
+function branchColor(branchId) {
+  const b = branchById(branchId);
+  return BRANCH_COLORS[b ? b.status : "active"] || BRANCH_COLORS.active;
+}

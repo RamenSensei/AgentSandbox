@@ -960,3 +960,86 @@ function layoutGraph(states, branches) {
   const height = Y0 + lane * DY;
   return { nodes, byId, laneOf, width, height, ordered };
 }
+
+function edgePath(a, b) {
+  // Curved horizontal-ish path from right edge of a to left edge of b.
+  const x1 = a.x + a.w, y1 = a.y + a.h / 2;
+  const x2 = b.x, y2 = b.y + b.h / 2;
+  const mx = (x1 + x2) / 2;
+  return "M " + x1 + " " + y1 + " C " + mx + " " + y1 + ", " + mx + " " + y2 + ", " + x2 + " " + y2;
+}
+
+function renderGraph() {
+  const root = $("#view-graph");
+  const d = state.data;
+  if (!d || !d.states || !d.states.length) {
+    root.innerHTML = '<div class="empty-state">No state nodes available for this episode.' +
+      (state.demoMode ? "" : " The live trace endpoint did not include states; demo mode shows a full DAG.") +
+      "</div>";
+    return;
+  }
+
+  const { nodes, byId, width, height, ordered } = layoutGraph(d.states, d.branches || []);
+  const pos = new Map(nodes.map((n) => [n.s.id, n]));
+
+  let svg = "";
+  // Lane labels
+  for (const b of ordered) {
+    const lanes = nodes.filter((n) => n.s.branch === b.id);
+    if (!lanes.length) continue;
+    const y = lanes[0].y + lanes[0].h / 2 + 3;
+    svg += '<text class="lane-label" x="8" y="' + y + '">' + escapeHtml(b.name) + "</text>";
+  }
+  // Edges (drawn under nodes)
+  for (const n of nodes) {
+    const s = n.s;
+    if (s.parent && pos.has(s.parent)) {
+      const p = pos.get(s.parent);
+      const color = branchColor(s.branch);
+      svg += '<path class="gedge" d="' + edgePath(p, n) + '" stroke="' + color + '" opacity="' +
+        (branchById(s.branch) && branchById(s.branch).status === "discarded" ? 0.45 : 0.8) + '"/>';
+    }
+    if (s.merge_parent && pos.has(s.merge_parent)) {
+      const p = pos.get(s.merge_parent);
+      svg += '<path class="gedge merge" d="' + edgePath(p, n) + '" stroke="' + BRANCH_COLORS.merged + '" opacity="0.85"/>';
+    }
+  }
+  // Nodes
+  for (const n of nodes) {
+    const s = n.s;
+    const b = branchById(s.branch);
+    const dim = b && b.status === "discarded";
+    const color = branchColor(s.branch);
+    const sel = state.selectedState === s.id ? " selected" : "";
+    svg +=
+      '<g class="gnode' + sel + '" data-state="' + escapeHtml(s.id) + '" opacity="' + (dim ? 0.55 : 1) + '">' +
+      '<rect x="' + n.x + '" y="' + n.y + '" width="' + n.w + '" height="' + n.h +
+      '" rx="8" fill="#141a22" stroke="' + color + '" stroke-width="1.5"/>' +
+      '<text x="' + (n.x + n.w / 2) + '" y="' + (n.y + 15) + '" text-anchor="middle">' + escapeHtml(s.id) + "</text>" +
+      '<text class="node-sub" x="' + (n.x + n.w / 2) + '" y="' + (n.y + 27) + '" text-anchor="middle">' +
+      escapeHtml(s.produced_by || (s.merge_parent ? "merge" : "root")) + "</text></g>";
+  }
+
+  const legend = [
+    ["main", BRANCH_COLORS.main], ["active", BRANCH_COLORS.active],
+    ["merged", BRANCH_COLORS.merged], ["discarded", BRANCH_COLORS.discarded],
+  ].map(([name, c]) => '<span><span class="swatch" style="background:' + c + '"></span>' + name + "</span>").join("") +
+    '<span><span class="swatch" style="background:none;border:1px dashed ' + BRANCH_COLORS.merged + '"></span>merge edge (dashed)</span>';
+
+  root.innerHTML =
+    '<h2 class="view-title">World-state DAG</h2>' +
+    '<p class="view-sub">Immutable state nodes per branch lane; time flows left to right. Click a node for its delta.</p>' +
+    '<div class="graph-layout">' +
+    '<div><div class="graph-canvas"><svg width="' + width + '" height="' + height +
+    '" viewBox="0 0 ' + width + " " + height + '">' + svg + "</svg></div>" +
+    '<div class="graph-legend">' + legend + "</div></div>" +
+    '<div class="node-panel" id="node-panel">' + nodePanelHtml(byId.get(state.selectedState)) + "</div>" +
+    "</div>";
+
+  root.querySelectorAll(".gnode").forEach((g) => {
+    g.addEventListener("click", () => {
+      state.selectedState = g.dataset.state === state.selectedState ? null : g.dataset.state;
+      renderGraph();
+    });
+  });
+}

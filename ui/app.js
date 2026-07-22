@@ -1078,3 +1078,87 @@ function nodePanelHtml(s) {
     "</dl>"
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* 5c. Policy view                                                     */
+/* ------------------------------------------------------------------ */
+
+function leaseStatus(lease, now) {
+  if (lease.revoked) return "revoked";
+  if (Date.parse(lease.expires_at) <= now) return "expired";
+  if (lease.remaining_uses === 0) return "exhausted";
+  return "active";
+}
+
+/** Best-effort original grant size: remaining plus uses observed in events. */
+function leaseUsesLabel(lease) {
+  return lease.remaining_uses + " left";
+}
+
+function renderPolicy() {
+  const root = $("#view-policy");
+  const d = state.data;
+  const leases = d && d.leases || [];
+  if (!leases.length) {
+    root.innerHTML = '<div class="empty-state">No capability leases recorded for this episode.</div>';
+    return;
+  }
+  const now = Date.now();
+
+  const rows = leases.map((l) => {
+    const st = leaseStatus(l, now);
+    const cons = Object.entries(l.constraints || {})
+      .map(([p, c]) => escapeHtml(constraintText(p, c)))
+      .join(" \u00b7 ") || '<span style="color:var(--text-faint)">unconstrained</span>';
+    const expired = Date.parse(l.expires_at) <= now;
+    return (
+      '<tr class="' + (l.revoked ? "row-revoked" : "") + '">' +
+      "<td><div>" + escapeHtml(principalName(l.principal)) + '</div><div class="lease-id">' + escapeHtml(l.id) +
+      (l.parent_lease ? ' <span class="parent-lease" title="attenuated from">&larr; ' + escapeHtml(l.parent_lease) + "</span>" : "") +
+      "</div></td>" +
+      '<td class="op">' + escapeHtml(l.operation) + "</td>" +
+      '<td class="constraints">' + cons + "</td>" +
+      '<td class="uses">' + leaseUsesLabel(l) + "</td>" +
+      '<td class="expiry' + (expired ? " expired" : "") + '">' + relTime(l.expires_at, now) +
+      '<span class="abs">' + escapeHtml(l.expires_at) + "</span></td>" +
+      "<td>" + (l.bound_branch ? branchChip(l.bound_branch) : '<span style="color:var(--text-faint)">unbound</span>') + "</td>" +
+      '<td><span class="status-chip status-' + st + '">' + st + "</span></td></tr>"
+    );
+  }).join("");
+
+  // Latest denial from the event stream.
+  const denials = (d.events || []).filter((e) => e.kind === "denial");
+  const denial = denials.length ? denials[denials.length - 1] : null;
+  let denialHtml;
+  if (denial) {
+    const p = denial.payload || {};
+    denialHtml =
+      '<div><span class="denial-code">' + escapeHtml(p.code || "") + "</span>" +
+      '<span class="denial-op">attempted: ' + escapeHtml(p.attempted_operation || "") + "</span></div>" +
+      '<p class="denial-reason">' + escapeHtml(p.reason || "") + "</p>" +
+      '<div class="denial-section-title">safe alternatives (already granted)</div>' +
+      '<div class="alt-list">' + (p.safe_alternatives || []).map((a) => '<span class="chip">' + escapeHtml(a) + "</span>").join("") + "</div>" +
+      '<div class="denial-section-title">requestable scopes</div>' +
+      (p.requestable_scopes || []).map((sc) =>
+        '<div class="scope-row"><code>' + escapeHtml(sc.operation) + "</code>" +
+        "<code>" + escapeHtml(JSON.stringify(sc.constraints)) + "</code>" +
+        (sc.requires_human ? '<span class="scope-human">requires human approval</span>' : "") +
+        "</div>").join("") +
+      '<div class="escalation-note">escalation ' + (p.escalation_allowed ? "allowed" : "not allowed") +
+      " on this branch \u00b7 raised at " + fmtTime(denial.ts) + " by " + escapeHtml(principalName(denial.actor)) + "</div>";
+  } else {
+    denialHtml = '<p class="view-sub" style="margin:0">No denials recorded in this episode.</p>';
+  }
+
+  root.innerHTML =
+    '<h2 class="view-title">Policy</h2>' +
+    '<p class="view-sub">Capability leases are time-bound, budgeted, attenuable authority. Nothing here is a boolean permission.</p>' +
+    '<div class="panel"><h3>Capability leases</h3>' +
+    '<p class="panel-sub">Delegation is only ever attenuation: a child lease never grants more than its parent.</p>' +
+    '<table class="leases"><thead><tr>' +
+    "<th>principal</th><th>operation</th><th>constraints</th><th>uses</th><th>expiry</th><th>branch</th><th>status</th>" +
+    "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+    '<div class="panel denial-panel"><h3>Machine-readable denials</h3>' +
+    '<p class="panel-sub">A policy rejection is a high-quality observation the agent can recover from without a human.</p>' +
+    denialHtml + "</div>";
+}

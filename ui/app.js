@@ -1043,3 +1043,38 @@ function renderGraph() {
     });
   });
 }
+
+function nodePanelHtml(s) {
+  if (!s) return '<h3>State node</h3><p class="view-sub">Click a node in the graph to inspect its StateNode record.</p>';
+  const delta = s.delta || {};
+  const files = delta.files || [];
+  const fileList = files.length
+    ? '<ul class="file-list">' + files.map((f) =>
+        '<li><span class="file-op op-' + f.op + '">' +
+        (f.op === "added" ? "A" : f.op === "modified" ? "M" : "D") +
+        "</span>" + escapeHtml(f.path) + "</li>").join("") + "</ul>"
+    : '<span style="color:var(--text-faint)">no file changes</span>';
+
+  const extras = [];
+  if ((delta.processes_started || []).length) extras.push(delta.processes_started.length + " process(es) started");
+  if ((delta.processes_exited || []).length) extras.push(delta.processes_exited.length + " process(es) exited");
+  if ((delta.tool_sessions || []).length) extras.push("tool sessions: " + delta.tool_sessions.join(", "));
+  if ((delta.effects_proposed || []).length) extras.push("effects proposed: " + delta.effects_proposed.join(", "));
+  if ((delta.effects_committed || []).length) extras.push("receipts: " + delta.effects_committed.join(", "));
+
+  return (
+    "<h3>" + escapeHtml(s.id) + "</h3><dl>" +
+    "<dt>branch</dt><dd>" + branchChip(s.branch) + "</dd>" +
+    "<dt>actor</dt><dd>" + escapeHtml(principalName(s.actor)) + ' <span class="mono" style="color:var(--text-faint)">(' + escapeHtml(s.actor) + ")</span></dd>" +
+    "<dt>produced by</dt><dd class=\"mono\">" + escapeHtml(s.produced_by || (s.merge_parent ? "merge of " + s.parent + " + " + s.merge_parent : "episode root")) + "</dd>" +
+    (s.parent ? '<dt>parent</dt><dd class="mono">' + escapeHtml(s.parent) + "</dd>" : "") +
+    (s.merge_parent ? '<dt>merge parent</dt><dd class="mono">' + escapeHtml(s.merge_parent) + "</dd>" : "") +
+    "<dt>workspace root</dt><dd>" + hashField(s.workspace_root) + "</dd>" +
+    '<dt>replay class</dt><dd class="mono">' + escapeHtml(s.replay_class) + "</dd>" +
+    '<dt>policy epoch</dt><dd class="mono">' + escapeHtml(String(delta.policy_epoch)) + "</dd>" +
+    '<dt>created</dt><dd class="mono">' + escapeHtml(s.created_at) + "</dd>" +
+    "<dt>delta files</dt><dd>" + fileList + "</dd>" +
+    (extras.length ? "<dt>other delta</dt><dd>" + extras.map(escapeHtml).join("<br>") + "</dd>" : "") +
+    "</dl>"
+  );
+}

@@ -1208,3 +1208,41 @@ function renderReceipts() {
     '<p class="view-sub">Non-repudiable records of committed external effects. The Ed25519 signature covers the canonical JSON of the body.</p>' +
     '<div class="receipt-grid">' + cards + "</div>";
 }
+
+/* ------------------------------------------------------------------ */
+/* 6. Header wiring, view switching, boot                              */
+/* ------------------------------------------------------------------ */
+
+function renderHeader() {
+  const sel = $("#episode-select");
+  sel.innerHTML = state.episodes
+    .map((e) => '<option value="' + escapeHtml(e.id) + '"' + (e.id === state.currentEpisode ? " selected" : "") + ">" +
+      escapeHtml(e.id) + (e.title && e.title !== e.id ? " \u2014 " + escapeHtml(e.title) : "") + "</option>")
+    .join("") || '<option value="">(no episodes)</option>';
+
+  $("#demo-toggle").checked = state.demoMode;
+  const api = $("#api-base");
+  api.value = state.apiBase;
+  api.disabled = state.demoMode;
+
+  const pv = state.data && state.data.episode && state.data.episode.protocol_version;
+  $("#proto-version").textContent = pv ? "protocol v" + pv : "";
+}
+
+function renderCurrentView() {
+  ["timeline", "graph", "policy", "receipts"].forEach((v) => {
+    $("#view-" + v).classList.toggle("hidden", v !== state.view);
+  });
+  document.querySelectorAll("#tabs button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === state.view);
+  });
+  if (!state.data) {
+    $("#view-" + state.view).innerHTML =
+      '<div class="empty-state">No data loaded. Enable demo mode or point the API base at a running kernel.</div>';
+    return;
+  }
+  if (state.view === "timeline") renderTimeline();
+  else if (state.view === "graph") renderGraph();
+  else if (state.view === "policy") renderPolicy();
+  else renderReceipts();
+}

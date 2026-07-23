@@ -1162,3 +1162,49 @@ function renderPolicy() {
     '<p class="panel-sub">A policy rejection is a high-quality observation the agent can recover from without a human.</p>' +
     denialHtml + "</div>";
 }
+
+/* ------------------------------------------------------------------ */
+/* 5d. Receipt view                                                    */
+/* ------------------------------------------------------------------ */
+
+function renderReceipts() {
+  const root = $("#view-receipts");
+  const d = state.data;
+  const receipts = d && d.receipts || [];
+  if (!receipts.length) {
+    root.innerHTML = '<div class="empty-state">No signed receipts yet. Receipts appear once external effects commit.</div>';
+    return;
+  }
+
+  const cards = receipts.map((r) => {
+    const b = r.body || {};
+    const ok = r.verified === true;
+    return (
+      '<div class="receipt-card">' +
+      '<div class="receipt-head"><span class="receipt-op">' + escapeHtml(b.operation || "") + "</span>" +
+      '<span class="verify-badge ' + (ok ? "verify-ok" : "verify-fail") + '">' +
+      (ok ? "signature verified" : "verification failed") + "</span></div>" +
+      '<div class="receipt-resource">' + escapeHtml(b.resource || "") + "</div>" +
+      '<div class="receipt-meta">' +
+      '<span class="k">receipt</span><span class="v">' + escapeHtml(r.id) + "</span>" +
+      '<span class="k">who</span><span class="v">' + escapeHtml(principalName(b.who)) + " (" + escapeHtml(b.who || "") + ")</span>" +
+      '<span class="k">branch</span><span class="v">' + (b.branch ? branchChip(b.branch) : "") + "</span>" +
+      '<span class="k">step</span><span class="v">' + escapeHtml(b.step || "") + "</span>" +
+      '<span class="k">effect</span><span class="v">' + escapeHtml(b.effect || "") + "</span>" +
+      '<span class="k">contract hash</span><span class="v">' + hashField(b.contract_hash || "") + "</span>" +
+      '<span class="k">auth witness</span><span class="v">' + hashField(b.authorization_witness || "") + "</span>" +
+      '<span class="k">response digest</span><span class="v">' + hashField(b.external_response_digest || "") + "</span>" +
+      '<span class="k">policy epoch</span><span class="v">' + escapeHtml(String(b.policy_epoch)) + "</span>" +
+      '<span class="k">committed at</span><span class="v">' + escapeHtml(b.committed_at || "") + "</span>" +
+      '<span class="k">key id</span><span class="v">' + escapeHtml(r.key_id || "") + "</span>" +
+      '<span class="k">signature</span><span class="v"><span class="hash-field"><code>' + escapeHtml(shortSig(r.signature)) +
+      '</code><button class="copy-btn" data-copy="' + escapeHtml(r.signature || "") + '">copy</button></span></span>' +
+      "</div></div>"
+    );
+  }).join("");
+
+  root.innerHTML =
+    '<h2 class="view-title">Signed receipts</h2>' +
+    '<p class="view-sub">Non-repudiable records of committed external effects. The Ed25519 signature covers the canonical JSON of the body.</p>' +
+    '<div class="receipt-grid">' + cards + "</div>";
+}

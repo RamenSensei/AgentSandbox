@@ -1246,3 +1246,52 @@ function renderCurrentView() {
   else if (state.view === "policy") renderPolicy();
   else renderReceipts();
 }
+
+function renderAll() {
+  renderHeader();
+  renderCurrentView();
+}
+
+function wireHeader() {
+  document.querySelectorAll("#tabs button").forEach((b) => {
+    b.addEventListener("click", () => { state.view = b.dataset.view; renderCurrentView(); });
+  });
+  $("#demo-toggle").addEventListener("change", (e) => {
+    state.demoMode = e.target.checked;
+    persist();
+    reload();
+  });
+  $("#api-base").addEventListener("change", (e) => {
+    state.apiBase = e.target.value.trim();
+    persist();
+    if (!state.demoMode) reload();
+  });
+  $("#episode-select").addEventListener("change", (e) => {
+    state.currentEpisode = e.target.value;
+    if (!state.demoMode) reload();
+  });
+  // Copy buttons (delegated so re-renders keep working).
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest && e.target.closest(".copy-btn");
+    if (!btn) return;
+    e.stopPropagation();
+    const text = btn.dataset.copy || "";
+    const done = () => {
+      btn.textContent = "copied";
+      btn.classList.add("copied");
+      setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("copied"); }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, done);
+    } else {
+      // file:// fallback
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (_e) { /* ignore */ }
+      document.body.removeChild(ta);
+      done();
+    }
+  });
+}

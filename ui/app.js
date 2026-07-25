@@ -1295,3 +1295,6 @@ function wireHeader() {
     }
   });
 }
+
+wireHeader();
+reload();

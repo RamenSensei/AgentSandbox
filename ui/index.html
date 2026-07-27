@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentKernel Trace</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="brand">agent<span class="brand-kernel">kernel</span> trace
+        <span class="proto" id="proto-version"></span>
+      </div>
+      <div class="controls">
+        <label>episode
+          <select id="episode-select"></select>
+        </label>
+        <label class="toggle" title="When on, the bundled demo dataset is used and no network requests are made.">
+          <input type="checkbox" id="demo-toggle" checked> demo mode
+        </label>
+        <label>api base
+          <input type="text" id="api-base" placeholder="http://127.0.0.1:7411" spellcheck="false">
+        </label>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-view="timeline" class="active">Timeline</button>
+      <button data-view="graph">Branch graph</button>
+      <button data-view="policy">Policy</button>
+      <button data-view="receipts">Receipts</button>
+    </nav>
+  </header>
+
+  <main>
+    <div id="error-banner" class="error-banner hidden"></div>
+    <section id="view-timeline"></section>
+    <section id="view-graph" class="hidden"></section>
+    <section id="view-policy" class="hidden"></section>
+    <section id="view-receipts" class="hidden"></section>
+  </main>
+
+  <footer>AgentKernel observability UI — no build step, no dependencies.</footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+/* AgentKernel observability UI — dark theme.
+   Palette: near-black base, slate borders, one amber accent, per-branch hues. */
+
+:root {
+  --bg: #0d1117;
+  --bg-raised: #141a22;
+  --bg-inset: #0a0e13;
+  --border: #262d38;
+  --border-soft: #1c222c;
+  --text: #d6dde6;
+  --text-dim: #8b95a3;
+  --text-faint: #5c6570;
+  --accent: #e8a33d;          /* restrained amber */
+  --accent-dim: #8a6220;
+  --ok: #3fb670;
+  --warn: #d9a132;
+  --danger: #e05d5d;
+  --violet: #a07be0;
+  --blue: #5d9de0;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, Inter, "Segoe UI", sans-serif;
+}

@@ -44,3 +44,26 @@ header {
   border-bottom: 1px solid var(--border);
   padding: 0 20px;
 }
+
+.header-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 0 10px;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.brand .brand-kernel { color: var(--accent); }
+.brand .proto {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 400;
+  margin-left: 8px;
+  font-family: var(--mono);
+}

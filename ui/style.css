@@ -92,3 +92,27 @@ select, input[type="text"] {
   font-size: 13px;
   font-family: var(--mono);
 }
+select:focus, input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+input[type="text"]#api-base { width: 220px; }
+input[type="text"]#api-base:disabled {
+  opacity: 0.4;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.toggle input { accent-color: var(--accent); cursor: pointer; }
+
+/* ---------- Tabs ---------- */
+
+nav.tabs {
+  display: flex;
+  gap: 2px;
+}

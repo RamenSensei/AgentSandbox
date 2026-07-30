@@ -116,3 +116,32 @@ nav.tabs {
   display: flex;
   gap: 2px;
 }
+nav.tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 8px 14px 10px;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+nav.tabs button:hover { color: var(--text); }
+nav.tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ---------- Layout ---------- */
+
+main { padding: 20px; max-width: 1280px; margin: 0 auto; }
+
+.error-banner {
+  background: rgba(224, 93, 93, 0.08);
+  border: 1px solid rgba(224, 93, 93, 0.4);
+  color: #f0a8a8;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}

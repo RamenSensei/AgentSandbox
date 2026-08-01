@@ -198,3 +198,34 @@ p.view-sub {
   border-radius: 4px;
   white-space: nowrap;
 }
+.kindcat-policy  { color: #f2b862; background: rgba(217,161,50,0.12); border: 1px solid rgba(217,161,50,0.35); }
+.kindcat-denial  { color: #f08585; background: rgba(224,93,93,0.12);  border: 1px solid rgba(224,93,93,0.4); }
+.kindcat-effect  { color: #c0a2ef; background: rgba(160,123,224,0.12); border: 1px solid rgba(160,123,224,0.35); }
+.kindcat-state   { color: #85b8f0; background: rgba(93,157,224,0.12); border: 1px solid rgba(93,157,224,0.35); }
+.kindcat-neutral { color: var(--text-dim); background: rgba(139,149,163,0.08); border: 1px solid var(--border); }
+
+.status-chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-family: var(--mono);
+}
+.status-active    { color: var(--ok);     background: rgba(63,182,112,0.1);  border: 1px solid rgba(63,182,112,0.4); }
+.status-expired   { color: var(--text-faint); background: rgba(139,149,163,0.07); border: 1px solid var(--border); }
+.status-exhausted { color: var(--warn);   background: rgba(217,161,50,0.1);  border: 1px solid rgba(217,161,50,0.4); }
+.status-revoked   { color: var(--danger); background: rgba(224,93,93,0.1);   border: 1px solid rgba(224,93,93,0.4); }
+
+/* ---------- Timeline ---------- */
+
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}

@@ -229,3 +229,33 @@ p.view-sub {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
 }
+.filter-bar span.filter-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.step-group { margin-bottom: 18px; }
+.step-header {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+  padding-left: 2px;
+  letter-spacing: 0.03em;
+}
+
+.event-row {
+  display: grid;
+  grid-template-columns: 70px 150px minmax(90px, 160px) minmax(120px, 170px) 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  margin-bottom: 4px;
+  background: var(--bg-raised);
+  cursor: pointer;
+  transition: border-color 120ms;
+}

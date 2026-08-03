@@ -259,3 +259,25 @@ p.view-sub {
   cursor: pointer;
   transition: border-color 120ms;
 }
+.event-row:hover { border-color: var(--border); }
+.event-row.expanded { border-color: var(--accent-dim); }
+
+.event-ts { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+.event-actor { font-family: var(--mono); font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.event-summary { font-size: 13px; }
+
+.event-payload {
+  margin: 0 0 8px;
+  padding: 12px 14px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: #b8c2cf;
+  white-space: pre;
+}
+
+/* ---------- Branch graph ---------- */

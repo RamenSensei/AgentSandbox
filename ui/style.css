@@ -308,3 +308,31 @@ p.view-sub {
   margin-right: 6px;
   vertical-align: -1px;
 }
+
+.node-panel {
+  width: 320px;
+  flex-shrink: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  position: sticky;
+  top: 110px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+}
+.node-panel h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--accent);
+  word-break: break-all;
+}
+.node-panel dl { margin: 0; }
+.node-panel dt {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 10px;
+}

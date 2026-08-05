@@ -336,3 +336,31 @@ p.view-sub {
   letter-spacing: 0.06em;
   margin-top: 10px;
 }
+.node-panel dd {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  word-break: break-all;
+}
+.node-panel dd.mono { font-size: 11.5px; }
+.node-panel .file-list { list-style: none; padding: 0; margin: 4px 0 0; }
+.node-panel .file-list li {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 0;
+  color: var(--text-dim);
+}
+.node-panel .file-op { display: inline-block; width: 14px; font-weight: 700; }
+.file-op.op-added { color: var(--ok); }
+.file-op.op-modified { color: var(--warn); }
+.file-op.op-deleted { color: var(--danger); }
+
+/* SVG node/edge styling via classes */
+.gnode { cursor: pointer; }
+.gnode rect { transition: stroke-width 100ms; }
+.gnode:hover rect { stroke-width: 2.5; }
+.gnode.selected rect { stroke: var(--accent); stroke-width: 2.5; }
+.gnode text { font-family: var(--mono); font-size: 10px; fill: var(--text); pointer-events: none; }
+.gnode text.node-sub { fill: var(--text-faint); font-size: 8.5px; }
+.gedge { fill: none; stroke-width: 1.5; }
+.gedge.merge { stroke-dasharray: 5 4; }
+.lane-label { font-family: var(--mono); font-size: 10px; fill: var(--text-faint); }

@@ -364,3 +364,35 @@ p.view-sub {
 .gedge { fill: none; stroke-width: 1.5; }
 .gedge.merge { stroke-dasharray: 5 4; }
 .lane-label { font-family: var(--mono); font-size: 10px; fill: var(--text-faint); }
+
+/* ---------- Policy view ---------- */
+
+.panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+}
+.panel h3 {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.panel p.panel-sub { color: var(--text-dim); font-size: 12px; margin: 0 0 12px; }
+
+table.leases {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+table.leases th {
+  text-align: left;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}

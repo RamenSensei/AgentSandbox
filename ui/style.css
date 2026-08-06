@@ -396,3 +396,28 @@ table.leases th {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
 }
+table.leases td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+}
+table.leases tr:last-child td { border-bottom: none; }
+table.leases .op { font-family: var(--mono); color: var(--text); white-space: nowrap; }
+table.leases .lease-id { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+table.leases .constraints { color: var(--text-dim); font-size: 12px; }
+table.leases .constraints code { font-size: 11px; color: var(--text); }
+table.leases .uses { font-family: var(--mono); white-space: nowrap; }
+table.leases .expiry { white-space: nowrap; }
+table.leases .expiry .abs { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+table.leases .expiry.expired { color: var(--danger); }
+table.leases .parent-lease { font-family: var(--mono); font-size: 10.5px; color: var(--violet); }
+tr.row-revoked td { opacity: 0.6; }
+
+.denial-panel { border-color: rgba(224, 93, 93, 0.35); }
+.denial-code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--danger);
+  font-weight: 600;
+  margin-right: 10px;
+}

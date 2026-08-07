@@ -421,3 +421,26 @@ tr.row-revoked td { opacity: 0.6; }
   font-weight: 600;
   margin-right: 10px;
 }
+.denial-op { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+.denial-reason { margin: 10px 0; font-size: 13px; }
+.denial-section-title {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 12px 0 4px;
+}
+.alt-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.alt-list .chip { color: var(--ok); border-color: rgba(63,182,112,0.4); }
+.scope-row {
+  font-size: 12px;
+  padding: 6px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}

@@ -444,3 +444,27 @@ tr.row-revoked td { opacity: 0.6; }
   align-items: baseline;
   flex-wrap: wrap;
 }
+.scope-row code { font-size: 11px; color: var(--text-dim); }
+.scope-human { font-size: 10.5px; color: var(--warn); }
+.escalation-note { font-size: 12px; color: var(--text-dim); margin-top: 12px; }
+
+/* ---------- Receipts ---------- */
+
+.receipt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+.receipt-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+.receipt-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 4px;
+}

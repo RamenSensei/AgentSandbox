@@ -520,3 +520,18 @@ button.copy-btn {
   font-family: var(--mono);
   flex-shrink: 0;
 }
+button.copy-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+button.copy-btn.copied { color: var(--ok); border-color: var(--ok); }
+
+footer {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-align: center;
+  padding: 24px 0 32px;
+}
+
+@media (max-width: 900px) {
+  .graph-layout { flex-direction: column; }
+  .node-panel { width: 100%; position: static; }
+  .event-row { grid-template-columns: 70px 1fr; grid-auto-flow: dense; }
+}

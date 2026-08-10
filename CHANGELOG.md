@@ -9,6 +9,38 @@ and on-disk formats.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-10
+
+### Added
+- `adversarial-bench`: scenario suite exercising the security invariants, including
+  malicious dependency credential read (guest holds no raw token), SSRF against
+  cloud metadata endpoints through the HTTP connector, duplicate-commit retry
+  against idempotency keys, stale-approval commit after base-branch movement,
+  child-agent capability escalation attempts, and cross-branch data leakage probes.
+- Three replay modes exposed through the protocol and `ak-api`: `replay.audit`
+  (play back recorded observations, no re-execution), `replay.sandbox` (restore
+  state and re-execute local code with recorded time/randomness/DNS/model inputs
+  substituted), and `replay.live` (re-execute the same effect contracts against
+  the current world).
+- Per-backend `ReplayClass` declarations (`audit_only`, `filesystem_only`,
+  `process_and_filesystem`, `framework_host_calls`, `browser_profile`); the
+  kernel classifies every step and refuses replay modes a step cannot honor.
+- Replay divergence reporting: sandbox replays emit a structured diff of any
+  observation that departs from the recording.
+- `ui/`: receipt view and replay timeline, plus a demo mode replaying a recorded
+  episode without a live kernel.
+
+### Changed
+- Protocol version bumped to "0.6"; `EffectContract` preconditions are now
+  canonicalized before hashing so approval hashes are stable across SDKs.
+- `Denial` detail is now redacted by caller `TrustLevel`: quarantined principals
+  receive the code and safe alternatives but not scope sketches or reasons.
+
+### Fixed
+- Effect broker no longer accepts an approval whose `policy_epoch` predates a
+  policy change on the same branch (caught by the stale-approval bench scenario).
+- `ReplayClass` ordering bug that allowed sandbox replay of `audit_only` steps.
+
 ## [0.5.0] - 2026-07-06
 
 ### Added

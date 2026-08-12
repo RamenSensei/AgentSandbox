@@ -21,8 +21,18 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - name: Test
         run: cargo test --workspace
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   protocol:
     runs-on: ubuntu-latest
@@ -31,6 +41,13 @@ jobs:
       - uses: arduino/setup-protoc@v3
       - name: Validate protos
         run: protoc --descriptor_set_out=/dev/null -I protocol protocol/*.proto
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate OpenAPI
+        run: |
+          pip install pyyaml openapi-spec-validator
+          python -m openapi_spec_validator protocol/openapi.yaml
 
   python-sdk:
     runs-on: ubuntu-latest
@@ -40,7 +57,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Test
-        run: python -m unittest discover -s sdk/python -v
+        run: |
+          pip install pytest
+          python -m pytest sdk/python -W error::ResourceWarning
 
   typescript-sdk:
     runs-on: ubuntu-latest
@@ -55,3 +74,17 @@ jobs:
           npm ci
           npx tsc --noEmit
           npm test --if-present
+
+  ui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static assets referenced by index.html exist
+        run: |
+          cd ui
+          for asset in style.css app.js demo-data.json; do
+            test -f "$asset" || { echo "missing $asset"; exit 1; }
+          done
+          for ref in style.css app.js; do
+            grep -q "$ref" index.html || { echo "index.html does not reference $ref"; exit 1; }
+          done

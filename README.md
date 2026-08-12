@@ -82,10 +82,37 @@ External effects follow a single lifecycle: **propose → canonicalize → prepa
 # Build the whole workspace
 cargo build --workspace
 
-# Run the end-to-end example: a coding agent that forks branches,
-# runs tests, and prepares a draft PR through the GitHub effect broker
-cargo run -p coding-agent-github
+# Run the end-to-end example: a coding agent that creates an episode,
+# executes sandboxed steps, forks/diffs/merges branches, and prints the
+# causal trace
+cargo run -p ak-example-coding-agent --bin coding-agent
+
+# Run the adversarial security bench (sandbox escapes, lease races,
+# budget bypasses, self-merge) and write a JSON report
+cargo run -p ak-adversarial-bench -- --report target/adversarial-report.json
+
+# Serve the HTTP control plane (unauthenticated mode is loopback-only
+# and must be opted into explicitly; use --auth-config in production)
+cargo run -p ak-api --bin agent-kernel-server -- --insecure-no-auth
 ```
+
+### Authentication
+
+The HTTP API requires `Authorization: Bearer <token>` on every route
+except `/healthz` when started with `--auth-config <file>`:
+
+```yaml
+enabled: true
+tokens:
+  - token_sha256: "<sha256 hex of the token>"
+    principal: "pr-<uuid>"
+    roles: [agent]          # agent | approver | admin
+```
+
+Body principals must match the authenticated principal (admins may act
+for anyone), effect approval requires the `approver` role, and
+episode/branch/effect operations enforce resource ownership. The server
+refuses to listen on a non-loopback address without an auth config.
 
 The `ui/` directory contains the timeline, branch graph, policy, and receipt views; it includes a demo mode that replays a recorded episode without a live kernel. See `ui/README.md`.
 

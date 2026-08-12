@@ -37,7 +37,17 @@ dependencies = [
 name = "ak-adversarial-bench"
 version = "0.6.0"
 dependencies = [
+ "ak-api",
+ "ak-backend-local",
  "ak-core",
+ "ak-policy",
+ "anyhow",
+ "clap",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -261,7 +271,16 @@ dependencies = [
 name = "ak-example-coding-agent"
 version = "0.6.0"
 dependencies = [
+ "ak-api",
+ "ak-backend-local",
+ "ak-causal-ledger",
  "ak-core",
+ "ak-policy",
+ "anyhow",
+ "indexmap",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

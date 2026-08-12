@@ -1445,7 +1445,34 @@ impl Kernel {
                 id: state_id.to_string(),
             })?;
 
-        // Scratch backend rooted in a temp dir; the replay branch id is fresh.
+        // Re-authorize before re-executing (AK-011): the recorded actor must
+        // still pass the *current* policy for this action, and the replay
+        // runs under the compiled confinement, not an empty one.
+        let who = self
+            .registry()
+            .get(&recorded.actor)
+            .map_err(KernelError::from)?;
+        let operation = action_kind.required_operation();
+        let params = action_kind.params();
+        let confinement = match self.policy_read()?.evaluate(
+            &who,
+            &operation,
+            &params,
+            Some(&recorded.branch),
+            Utc::now(),
+        ) {
+            Decision::Allow { grant, .. } => grant.confinement,
+            Decision::RequireApproval { rule_id, .. } => {
+                return Err(KernelError::Other(format!(
+                    "sandbox replay refused: rule `{rule_id}` now requires approval"
+                )))
+            }
+            Decision::Deny { denial } => return Err(KernelError::Denied(Box::new(denial))),
+        };
+
+        // Scratch backend rooted in a temp dir; the replay branch id is
+        // fresh. The backend enforces the same verified OS sandbox as live
+        // execution and fails closed without one.
         let tmp = tempfile::tempdir()?;
         let scratch = LocalBackend::new(LocalBackendConfig::new(tmp.path().join("replay")))?;
         let replay_branch = BranchId::generate();
@@ -1458,9 +1485,9 @@ impl Kernel {
                 actor: recorded.actor.clone(),
                 action: action_kind,
                 budget: ResourceBudget::step_default(),
-                writable_prefixes: Vec::new(),
-                readable_prefixes: Vec::new(),
-                egress_domains: Vec::new(),
+                writable_prefixes: confinement.writable_prefixes,
+                readable_prefixes: confinement.readable_prefixes,
+                egress_domains: confinement.egress_domains,
             })
             .await?;
         let (root, _) = ak_state_dag::snapshot_dir(self.dag.cas(), &dir)?;

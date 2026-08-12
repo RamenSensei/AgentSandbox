@@ -287,25 +287,25 @@ class Observation:
 
 
 @dataclass(frozen=True)
-class Episode:
-    id: str  # "ep-..."
-    title: str
-    owner: str  # "pr-..."
+class EpisodeDescription:
+    """Wire description of an episode (GET /v1/episodes/{id})."""
+
+    episode: str  # "ep-..."
+    root_branch: str  # "br-..."
     root_state: str  # "st-..."
-    main_branch: str  # "br-..."
-    budget: ResourceBudget
-    created_at: str
+    branches: List["Branch"]
+    created_by: str  # "pr-..."
+    remaining_budget: ResourceBudget
 
     @classmethod
-    def from_wire(cls, d: Mapping[str, Any]) -> "Episode":
+    def from_wire(cls, d: Mapping[str, Any]) -> "EpisodeDescription":
         return cls(
-            id=d["id"],
-            title=d.get("title", ""),
-            owner=d.get("owner", ""),
+            episode=d["episode"],
+            root_branch=d.get("root_branch", ""),
             root_state=d.get("root_state", ""),
-            main_branch=d.get("main_branch", ""),
-            budget=ResourceBudget.from_wire(d.get("budget", {})),
-            created_at=d.get("created_at", ""),
+            branches=[Branch.from_wire(b) for b in d.get("branches", [])],
+            created_by=d.get("created_by", ""),
+            remaining_budget=ResourceBudget.from_wire(d.get("remaining_budget", {})),
         )
 
 
@@ -335,17 +335,15 @@ class Branch:
 @dataclass(frozen=True)
 class StepResult:
     step: str  # "step-..."
+    state: str  # "st-..." — branch head after the step (unchanged when denied)
     observation: Observation
-    usage: ResourceBudget
-    produced_state: Optional[str] = None  # "st-..."
 
     @classmethod
     def from_wire(cls, d: Mapping[str, Any]) -> "StepResult":
         return cls(
             step=d["step"],
+            state=d.get("state", ""),
             observation=Observation.from_wire(d["observation"]),
-            usage=ResourceBudget.from_wire(d.get("usage", {})),
-            produced_state=d.get("produced_state"),
         )
 
 
@@ -373,29 +371,19 @@ class StateDelta:
 
 
 @dataclass(frozen=True)
-class BranchDiff:
-    delta: StateDelta
-    summary: str
-
-    @classmethod
-    def from_wire(cls, d: Mapping[str, Any]) -> "BranchDiff":
-        return cls(delta=StateDelta.from_wire(d.get("delta", {})), summary=d.get("summary", ""))
-
-
-@dataclass(frozen=True)
 class BranchComparison:
-    common_ancestor: str
-    left_delta: StateDelta
-    right_delta: StateDelta
-    conflicting_paths: List[str]
+    """GET /v1/branches/{a}/compare/{b}."""
+
+    base: str  # common ancestor state, "st-..."
+    changed_in_a: List[str]
+    changed_in_b: List[str]
 
     @classmethod
     def from_wire(cls, d: Mapping[str, Any]) -> "BranchComparison":
         return cls(
-            common_ancestor=d.get("common_ancestor", ""),
-            left_delta=StateDelta.from_wire(d.get("left_delta", {})),
-            right_delta=StateDelta.from_wire(d.get("right_delta", {})),
-            conflicting_paths=list(d.get("conflicting_paths", [])),
+            base=d.get("base", ""),
+            changed_in_a=list(d.get("changed_in_a", [])),
+            changed_in_b=list(d.get("changed_in_b", [])),
         )
 
 
@@ -528,14 +516,14 @@ class Receipt:
 
 @dataclass(frozen=True)
 class EffectPreview:
+    """POST /v1/effects/{id}/prepare — preview and observed preconditions."""
+
     preview: Json
     observed_preconditions: Json
-    effect: PendingEffect
 
     @classmethod
     def from_wire(cls, d: Mapping[str, Any]) -> "EffectPreview":
         return cls(
             preview=d.get("preview"),
             observed_preconditions=d.get("observed_preconditions"),
-            effect=PendingEffect.from_wire(d["effect"]),
         )

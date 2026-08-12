@@ -1,5 +1,6 @@
 /**
- * HTTP client for the AgentKernel Execution Protocol (JSON binding).
+ * HTTP client for the AgentKernel Execution Protocol (JSON binding),
+ * matching the routes implemented in kernel/api/src/http.rs.
  * Zero runtime dependencies; uses global fetch (Node >= 18, browsers).
  */
 
@@ -8,24 +9,24 @@ import type {
   ActionKind,
   Branch,
   BranchCompareResponse,
-  BranchDiffResponse,
-  BranchMergeResponse,
   CapabilityLease,
   Constraint,
-  EffectContract,
   EffectPrepareResponse,
-  Episode,
   EpisodeCreateResponse,
-  EpisodeDescribeResponse,
+  EpisodeDescription,
   ErrorEnvelope,
+  FileChange,
   Json,
+  LedgerEvent,
+  OperatorResolution,
   PendingEffect,
   Receipt,
-  ReplayMode,
-  ReplayReport,
+  ReplayAuditResponse,
+  ReplaySandboxReport,
   ResourceBudget,
+  StateNode,
+  StepExplanation,
   StepResult,
-  TraceQueryResponse,
 } from "./types.js";
 import { stepDefaultBudget } from "./types.js";
 
@@ -35,6 +36,8 @@ export interface KernelOptions {
   maxRetries?: number;
   /** Base backoff in ms, doubled per attempt. Default 250. */
   backoffMs?: number;
+  /** Per-request timeout in ms. Default 30000. */
+  timeoutMs?: number;
   fetch?: typeof fetch;
   /** Injectable sleep for tests. */
   sleep?: (ms: number) => Promise<void>;
@@ -44,12 +47,14 @@ const RETRYABLE = new Set([502, 503, 504]);
 
 export class Kernel {
   readonly baseUrl: string;
-  private readonly opts: Required<Pick<KernelOptions, "maxRetries" | "backoffMs">> &
+  private readonly opts: Required<
+    Pick<KernelOptions, "maxRetries" | "backoffMs" | "timeoutMs">
+  > &
     KernelOptions;
 
   constructor(baseUrl: string, options: KernelOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.opts = { maxRetries: 3, backoffMs: 250, ...options };
+    this.opts = { maxRetries: 3, backoffMs: 250, timeoutMs: 30_000, ...options };
   }
 
   // -- transport --------------------------------------------------------
@@ -80,20 +85,37 @@ export class Kernel {
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.opts.maxRetries; attempt++) {
+      // A fresh controller per attempt: a timeout must abort only this
+      // request, never concurrent or subsequent ones.
+      const controller = new AbortController();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.opts.timeoutMs);
       let res: Response;
       try {
         res = await doFetch(url, {
           method,
           headers,
           body: body === undefined ? null : JSON.stringify(body),
+          signal: controller.signal,
         });
       } catch (e) {
+        if (timedOut) {
+          throw new TransportError(
+            `request to ${url} timed out after ${this.opts.timeoutMs}ms`,
+            e,
+          );
+        }
         lastError = e;
         if (attempt < this.opts.maxRetries) {
           await sleep(this.opts.backoffMs * 2 ** attempt);
           continue;
         }
         throw new TransportError(`kernel unreachable at ${url}: ${String(e)}`, e);
+      } finally {
+        clearTimeout(timer);
       }
       if (RETRYABLE.has(res.status) && attempt < this.opts.maxRetries) {
         await sleep(this.opts.backoffMs * 2 ** attempt);
@@ -113,150 +135,274 @@ export class Kernel {
       payload = { code: "OTHER", message: text };
     }
     if (res.ok) return payload as T;
+    const p = payload as Record<string, unknown>;
+    // A denied-but-recorded step is HTTP 403 with the recorded step,
+    // state and observation alongside the error envelope. Surface it as a
+    // normal result so callers see the "denied" observation.
+    if (res.status === 403 && p.step !== undefined && p.observation !== undefined) {
+      return payload as T;
+    }
     const env = payload as ErrorEnvelope;
     if (env.denial) throw new DenialError(env.denial, env.message, res.status);
     throw new KernelError(env.code ?? "OTHER", env.message ?? text, res.status);
   }
 
+  // -- health -----------------------------------------------------------
+
+  async healthz(): Promise<{ status: string; version: string }> {
+    return this.request("GET", "/healthz");
+  }
+
   // -- episodes ---------------------------------------------------------
 
+  /** POST /v1/episodes — create an episode with its root state and main
+   * branch. */
   async createEpisode(params: {
-    title: string;
-    owner: string;
-    budget?: ResourceBudget;
-    workspaceRoot?: string;
+    principal: string;
+    objective?: string;
+    workspace?: string;
   }): Promise<EpisodeHandle> {
     const body: Record<string, unknown> = {
-      title: params.title,
-      owner: params.owner,
-      budget: params.budget ?? stepDefaultBudget(),
+      principal: params.principal,
+      objective: params.objective ?? "",
     };
-    if (params.workspaceRoot !== undefined) body.workspace_root = params.workspaceRoot;
+    if (params.workspace !== undefined) body.workspace = params.workspace;
     const resp = await this.request<EpisodeCreateResponse>("POST", "/v1/episodes", body);
-    return new EpisodeHandle(this, resp.episode, resp.main_branch);
+    return new EpisodeHandle(this, resp.episode, params.principal, resp.branch);
+  }
+
+  /** GET /v1/episodes/{id} */
+  async describeEpisode(episodeId: string): Promise<EpisodeDescription> {
+    return this.request<EpisodeDescription>("GET", `/v1/episodes/${episodeId}`);
   }
 
   async getEpisode(episodeId: string): Promise<EpisodeHandle> {
-    const resp = await this.request<EpisodeDescribeResponse>(
-      "GET",
-      `/v1/episodes/${episodeId}`,
+    const desc = await this.describeEpisode(episodeId);
+    return new EpisodeHandle(this, desc.episode, desc.created_by, desc.root_branch);
+  }
+
+  // -- steps ------------------------------------------------------------
+
+  /** POST /v1/steps/execute */
+  async executeStep(params: {
+    principal: string;
+    branch: string;
+    action: ActionKind;
+    lease?: string | undefined;
+    intentHint?: string | undefined;
+    budget?: ResourceBudget | undefined;
+  }): Promise<StepResult> {
+    const action: Record<string, unknown> = {
+      kind: params.action,
+      lease: params.lease ?? "",
+      budget: params.budget ?? stepDefaultBudget(),
+    };
+    if (params.intentHint !== undefined) action.intent_hint = params.intentHint;
+    return this.request<StepResult>("POST", "/v1/steps/execute", {
+      principal: params.principal,
+      branch: params.branch,
+      action,
+    });
+  }
+
+  /** GET /v1/steps/{id}/explain */
+  async explainStep(stepId: string): Promise<StepExplanation> {
+    return this.request<StepExplanation>("GET", `/v1/steps/${stepId}/explain`);
+  }
+
+  /** POST /v1/steps/{id}/retry */
+  async retryStep(stepId: string): Promise<StepResult> {
+    return this.request<StepResult>("POST", `/v1/steps/${stepId}/retry`);
+  }
+
+  // -- branches ---------------------------------------------------------
+
+  /** POST /v1/branches/{id}/fork — forks one sibling branch. */
+  async forkBranch(branchId: string): Promise<Branch> {
+    return this.request<Branch>("POST", `/v1/branches/${branchId}/fork`);
+  }
+
+  /** POST /v1/branches/{id}/diff */
+  async diffBranch(branchId: string, since?: string): Promise<FileChange[]> {
+    return this.request<FileChange[]>(
+      "POST",
+      `/v1/branches/${branchId}/diff`,
+      since !== undefined ? { since } : {},
     );
-    const main =
-      resp.branches.find((b) => b.id === resp.episode.main_branch) ?? resp.branches[0];
-    if (!main) throw new KernelError("OTHER", `episode ${episodeId} has no branches`);
-    return new EpisodeHandle(this, resp.episode, main);
+  }
+
+  /** POST /v1/branches/{id}/merge — merges `source` into `branchId`. */
+  async mergeBranch(branchId: string, source: string, actor: string): Promise<StateNode> {
+    return this.request<StateNode>("POST", `/v1/branches/${branchId}/merge`, {
+      source,
+      actor,
+    });
+  }
+
+  /** POST /v1/branches/{id}/discard */
+  async discardBranch(branchId: string): Promise<{ discarded: string }> {
+    return this.request<{ discarded: string }>("POST", `/v1/branches/${branchId}/discard`);
+  }
+
+  /** GET /v1/branches/{a}/compare/{b} */
+  async compareBranches(a: string, b: string): Promise<BranchCompareResponse> {
+    return this.request<BranchCompareResponse>("GET", `/v1/branches/${a}/compare/${b}`);
   }
 
   // -- capabilities -----------------------------------------------------
 
-  async capabilities(principal: string, namespace?: string): Promise<CapabilityLease[]> {
-    const resp = await this.request<{ leases: CapabilityLease[] }>(
-      "GET",
-      `/v1/capabilities/${principal}`,
-      undefined,
-      { namespace },
-    );
-    return resp.leases;
+  /** GET /v1/capabilities/{principal} — active leases. */
+  async capabilities(principal: string): Promise<CapabilityLease[]> {
+    return this.request<CapabilityLease[]>("GET", `/v1/capabilities/${principal}`);
   }
 
+  /** POST /v1/capabilities/request — 201 with the granted lease; policy
+   * denials throw DenialError. */
   async requestCapability(params: {
     principal: string;
     operation: string;
-    constraints?: Record<string, Constraint>;
-    uses?: number;
-    expiresAt?: string;
-    budget?: ResourceBudget;
-    boundBranch?: string;
-    justification?: string;
+    params?: Json;
+    branch?: string;
   }): Promise<CapabilityLease> {
     const body: Record<string, unknown> = {
       principal: params.principal,
       operation: params.operation,
-      constraints: params.constraints ?? {},
-      uses: params.uses ?? 1,
-      justification: params.justification ?? "",
+      params: params.params ?? {},
     };
-    if (params.expiresAt !== undefined) body.expires_at = params.expiresAt;
-    if (params.budget !== undefined) body.budget = params.budget;
-    if (params.boundBranch !== undefined) body.bound_branch = params.boundBranch;
-    const resp = await this.request<{
-      lease?: CapabilityLease;
-      denial?: import("./types.js").Denial;
-      pending_approval_id?: string;
-    }>("POST", "/v1/capabilities/request", body);
-    if (resp.denial) throw new DenialError(resp.denial);
-    if (resp.pending_approval_id !== undefined) {
-      throw new KernelError(
-        "PENDING_APPROVAL",
-        `awaiting human approval: ${resp.pending_approval_id}`,
-        202,
-      );
-    }
-    if (!resp.lease) throw new KernelError("OTHER", "malformed capability response");
-    return resp.lease;
+    if (params.branch !== undefined) body.branch = params.branch;
+    return this.request<CapabilityLease>("POST", "/v1/capabilities/request", body);
   }
 
+  /** POST /v1/capabilities/delegate — attenuate a lease for a delegatee.
+   * Never widens. */
   async delegateCapability(params: {
+    delegator: string;
     parentLease: string;
-    childPrincipal: string;
-    constraints: Record<string, Constraint>;
+    delegatee: string;
+    constraints?: Record<string, Constraint>;
     uses: number;
     expiresAt: string;
     budget?: ResourceBudget;
   }): Promise<CapabilityLease> {
-    return this.request<CapabilityLease>("POST", "/v1/capabilities/delegate", {
+    const body: Record<string, unknown> = {
+      delegator: params.delegator,
       parent_lease: params.parentLease,
-      child_principal: params.childPrincipal,
-      constraints: params.constraints,
+      delegatee: params.delegatee,
+      constraints: params.constraints ?? {},
       uses: params.uses,
       expires_at: params.expiresAt,
-      budget: params.budget ?? stepDefaultBudget(),
+    };
+    if (params.budget !== undefined) body.budget = params.budget;
+    return this.request<CapabilityLease>("POST", "/v1/capabilities/delegate", body);
+  }
+
+  /** POST /v1/capabilities/revoke — revokes the lease and its whole
+   * delegation subtree; returns every revoked lease id. */
+  async revokeCapability(lease: string): Promise<string[]> {
+    const resp = await this.request<{ revoked: string[] }>(
+      "POST",
+      "/v1/capabilities/revoke",
+      { lease },
+    );
+    return resp.revoked;
+  }
+
+  // -- effects ----------------------------------------------------------
+
+  /** GET /v1/effects?phase= */
+  async listEffects(phase?: string): Promise<PendingEffect[]> {
+    return this.request<PendingEffect[]>("GET", "/v1/effects", undefined, { phase });
+  }
+
+  /** GET /v1/effects/{id} */
+  async getEffect(effectId: string): Promise<PendingEffect> {
+    return this.request<PendingEffect>("GET", `/v1/effects/${effectId}`);
+  }
+
+  effectHandle(effect: PendingEffect): EffectHandle {
+    return new EffectHandle(this, effect);
+  }
+
+  /** POST /v1/effects/{id}/prepare */
+  async prepareEffect(effectId: string): Promise<EffectPrepareResponse> {
+    return this.request<EffectPrepareResponse>("POST", `/v1/effects/${effectId}/prepare`);
+  }
+
+  /** POST /v1/effects/{id}/approve */
+  async approveEffect(effectId: string, approver: string): Promise<{ approved: string }> {
+    return this.request<{ approved: string }>("POST", `/v1/effects/${effectId}/approve`, {
+      approver,
     });
   }
 
-  async revokeCapability(
-    lease: string,
-    opts: { cascade?: boolean; reason?: string } = {},
-  ): Promise<string[]> {
-    const resp = await this.request<{ revoked_leases: string[] }>(
-      "POST",
-      "/v1/capabilities/revoke",
-      { lease, cascade: opts.cascade ?? false, reason: opts.reason ?? "" },
-    );
-    return resp.revoked_leases;
+  /** POST /v1/effects/{id}/commit — commit after revalidation. */
+  async commitEffect(effectId: string): Promise<Receipt> {
+    return this.request<Receipt>("POST", `/v1/effects/${effectId}/commit`);
+  }
+
+  /** POST /v1/effects/{id}/compensate */
+  async compensateEffect(effectId: string): Promise<Receipt> {
+    return this.request<Receipt>("POST", `/v1/effects/${effectId}/compensate`);
+  }
+
+  /** POST /v1/effects/recover — resolve in-doubt effects. */
+  async recoverEffects(): Promise<{ resolutions: { effect: string; resolution: Json }[] }> {
+    return this.request("POST", "/v1/effects/recover");
+  }
+
+  /** POST /v1/effects/{id}/resolve — operator verdict on an in-doubt
+   * effect. */
+  async resolveEffect(
+    effectId: string,
+    resolution: OperatorResolution,
+  ): Promise<{ resolved: string; receipt: Receipt | null }> {
+    return this.request("POST", `/v1/effects/${effectId}/resolve`, resolution);
   }
 
   // -- trace / replay / receipts ---------------------------------------
 
+  /** GET /v1/trace/query — causal ledger events. */
   async traceQuery(
-    query: string,
-    opts: { episode?: string; limit?: number; pageToken?: string } = {},
-  ): Promise<TraceQueryResponse> {
-    return this.request<TraceQueryResponse>("GET", "/v1/trace/query", undefined, {
-      q: query,
+    opts: {
+      episode?: string;
+      branch?: string;
+      step?: string;
+      principal?: string;
+      kind?: string;
+      limit?: number;
+    } = {},
+  ): Promise<LedgerEvent[]> {
+    return this.request<LedgerEvent[]>("GET", "/v1/trace/query", undefined, {
       episode: opts.episode,
+      branch: opts.branch,
+      step: opts.step,
+      principal: opts.principal,
+      kind: opts.kind,
       limit: opts.limit,
-      page_token: opts.pageToken,
     });
   }
 
-  async replay(
-    mode: ReplayMode,
-    episode: string,
-    opts: { fromStep?: string; toStep?: string } = {},
-  ): Promise<ReplayReport> {
-    const body: Record<string, unknown> = { episode };
-    if (opts.fromStep !== undefined) body.from_step = opts.fromStep;
-    if (opts.toStep !== undefined) body.to_step = opts.toStep;
-    return this.request<ReplayReport>("POST", `/v1/replay/${mode}`, body);
+  /** POST /v1/replay/audit — play back a ledger sequence range. */
+  async replayAudit(opts: { seqFrom?: number; seqTo?: number } = {}): Promise<ReplayAuditResponse> {
+    const body: Record<string, unknown> = {};
+    if (opts.seqFrom !== undefined) body.seq_from = opts.seqFrom;
+    if (opts.seqTo !== undefined) body.seq_to = opts.seqTo;
+    return this.request<ReplayAuditResponse>("POST", "/v1/replay/audit", body);
   }
 
+  /** POST /v1/replay/sandbox — re-execute one recorded step. */
+  async replaySandbox(step: string): Promise<ReplaySandboxReport> {
+    return this.request<ReplaySandboxReport>("POST", "/v1/replay/sandbox", { step });
+  }
+
+  /** POST /v1/replay/live — re-commit one recorded effect contract. */
+  async replayLive(effect: string, approver: string): Promise<Receipt> {
+    return this.request<Receipt>("POST", "/v1/replay/live", { effect, approver });
+  }
+
+  /** GET /v1/receipts/{id} */
   async getReceipt(receiptId: string): Promise<Receipt> {
     return this.request<Receipt>("GET", `/v1/receipts/${receiptId}`);
-  }
-
-  async getEffect(effectId: string): Promise<PendingEffect> {
-    return this.request<PendingEffect>("GET", `/v1/effects/${effectId}`);
   }
 }
 
@@ -267,126 +413,81 @@ export class Kernel {
 export class BranchHandle {
   constructor(
     protected readonly kernel: Kernel,
-    readonly episode: Episode,
-    public branch: Branch,
+    readonly episode: string,
+    readonly principal: string,
+    readonly branch: string,
   ) {}
 
   get id(): string {
-    return this.branch.id;
+    return this.branch;
   }
 
-  /** Execute one action on this branch. Denied-but-recorded steps come back
-   * as an Observation of kind "denied"; outright rejections throw
-   * DenialError. */
+  /** Execute one action on this branch. A denied step is still recorded
+   * and comes back as an Observation of kind "denied". */
   async execute(
     action: ActionKind,
     opts: {
-      actor?: string;
+      principal?: string;
       lease?: string;
       intentHint?: string;
       budget?: ResourceBudget;
     } = {},
   ): Promise<StepResult> {
-    const actionBody: Record<string, unknown> = {
-      kind: action,
-      lease: opts.lease ?? "",
-      budget: opts.budget ?? stepDefaultBudget(),
-    };
-    if (opts.intentHint !== undefined) actionBody.intent_hint = opts.intentHint;
-    return this.kernel.request<StepResult>("POST", "/v1/steps/execute", {
-      branch: this.branch.id,
-      actor: opts.actor ?? this.episode.owner,
-      action: actionBody,
+    return this.kernel.executeStep({
+      principal: opts.principal ?? this.principal,
+      branch: this.branch,
+      action,
+      lease: opts.lease,
+      intentHint: opts.intentHint,
+      budget: opts.budget,
     });
   }
 
-  async fork(count = 1, fromState?: string): Promise<BranchHandle[]> {
-    const body: Record<string, unknown> = { count };
-    if (fromState !== undefined) body.from_state = fromState;
-    const resp = await this.kernel.request<{ branches: Branch[] }>(
-      "POST",
-      `/v1/branches/${this.branch.id}/fork`,
-      body,
-    );
-    return resp.branches.map((b) => new BranchHandle(this.kernel, this.episode, b));
+  /** Fork `count` sibling branches (one kernel call each). */
+  async fork(count = 1): Promise<BranchHandle[]> {
+    const out: BranchHandle[] = [];
+    for (let i = 0; i < count; i++) {
+      const b = await this.kernel.forkBranch(this.branch);
+      out.push(new BranchHandle(this.kernel, this.episode, this.principal, b.id));
+    }
+    return out;
   }
 
-  async diff(since?: string): Promise<BranchDiffResponse> {
-    return this.kernel.request<BranchDiffResponse>(
-      "POST",
-      `/v1/branches/${this.branch.id}/diff`,
-      since !== undefined ? { since } : {},
-    );
+  async diff(since?: string): Promise<FileChange[]> {
+    return this.kernel.diffBranch(this.branch, since);
   }
 
   async compare(other: BranchHandle | string): Promise<BranchCompareResponse> {
     const otherId = typeof other === "string" ? other : other.id;
-    return this.kernel.request<BranchCompareResponse>(
-      "GET",
-      `/v1/branches/${this.branch.id}/compare/${otherId}`,
-    );
+    return this.kernel.compareBranches(this.branch, otherId);
   }
 
-  async merge(
-    into: BranchHandle | string,
-    opts: { requireClean?: boolean } = {},
-  ): Promise<BranchMergeResponse> {
-    const intoId = typeof into === "string" ? into : into.id;
-    return this.kernel.request<BranchMergeResponse>(
-      "POST",
-      `/v1/branches/${this.branch.id}/merge`,
-      { into: intoId, require_clean: opts.requireClean ?? false },
-    );
+  /** Merge `source` into this branch. */
+  async merge(source: BranchHandle | string, actor?: string): Promise<StateNode> {
+    const sourceId = typeof source === "string" ? source : source.id;
+    return this.kernel.mergeBranch(this.branch, sourceId, actor ?? this.principal);
   }
 
-  async discard(reason = ""): Promise<Branch> {
-    const b = await this.kernel.request<Branch>(
-      "POST",
-      `/v1/branches/${this.branch.id}/discard`,
-      { reason },
-    );
-    this.branch = b;
-    return b;
-  }
-
-  async proposeEffect(
-    contract: EffectContract,
-    opts: { proposer?: string; step?: string; lease?: string } = {},
-  ): Promise<EffectHandle> {
-    const resp = await this.kernel.request<{
-      effect?: PendingEffect;
-      denial?: import("./types.js").Denial;
-    }>("POST", "/v1/effects", {
-      contract,
-      proposer: opts.proposer ?? this.episode.owner,
-      branch: this.branch.id,
-      step: opts.step ?? "",
-      lease: opts.lease ?? "",
-    });
-    if (resp.denial) throw new DenialError(resp.denial);
-    if (!resp.effect) throw new KernelError("OTHER", "malformed effect response");
-    return new EffectHandle(this.kernel, resp.effect);
+  async discard(): Promise<{ discarded: string }> {
+    return this.kernel.discardBranch(this.branch);
   }
 }
 
 /** Acts on the episode's main branch by default. */
 export class EpisodeHandle extends BranchHandle {
   get episodeId(): string {
-    return this.episode.id;
+    return this.episode;
   }
 
-  async describe(): Promise<EpisodeDescribeResponse> {
-    return this.kernel.request<EpisodeDescribeResponse>(
-      "GET",
-      `/v1/episodes/${this.episode.id}`,
-    );
+  async describe(): Promise<EpisodeDescription> {
+    return this.kernel.describeEpisode(this.episode);
   }
 }
 
 /**
  * A pending effect: prepare -> approve -> commit -> (compensate).
- * `run(fn)` aborts the effect if `fn` returns without a successful commit
- * (invariant: no irreversible effect before commit).
+ * Effects are proposed by executing a connector_op action; the resulting
+ * "effect_pending" observation names the effect id.
  */
 export class EffectHandle {
   receipt?: Receipt;
@@ -404,60 +505,27 @@ export class EffectHandle {
     return this.effect.contract_hash;
   }
 
-  async prepare(): Promise<EffectPrepareResponse> {
-    const resp = await this.kernel.request<EffectPrepareResponse>(
-      "POST",
-      `/v1/effects/${this.effect.id}/prepare`,
-    );
-    this.effect = resp.effect;
-    return resp;
-  }
-
-  async approve(approver: string, contractHash?: string): Promise<PendingEffect> {
-    this.effect = await this.kernel.request<PendingEffect>(
-      "POST",
-      `/v1/effects/${this.effect.id}/approve`,
-      { approver, contract_hash: contractHash ?? this.effect.contract_hash },
-    );
+  async refresh(): Promise<PendingEffect> {
+    this.effect = await this.kernel.getEffect(this.effect.id);
     return this.effect;
   }
 
-  async commit(expectedContractHash?: string): Promise<Receipt> {
-    const resp = await this.kernel.request<{
-      receipt?: Receipt;
-      denial?: import("./types.js").Denial;
-    }>("POST", `/v1/effects/${this.effect.id}/commit`, {
-      expected_contract_hash: expectedContractHash ?? this.effect.contract_hash,
-    });
-    if (resp.denial) throw new DenialError(resp.denial);
-    const receipt = resp.receipt ?? (resp as unknown as Receipt);
+  async prepare(): Promise<EffectPrepareResponse> {
+    return this.kernel.prepareEffect(this.effect.id);
+  }
+
+  async approve(approver: string): Promise<{ approved: string }> {
+    return this.kernel.approveEffect(this.effect.id, approver);
+  }
+
+  async commit(): Promise<Receipt> {
+    const receipt = await this.kernel.commitEffect(this.effect.id);
     this.receipt = receipt;
     return receipt;
   }
 
-  async compensate(reason = ""): Promise<Receipt> {
-    return this.kernel.request<Receipt>(
-      "POST",
-      `/v1/effects/${this.effect.id}/compensate`,
-      { reason },
-    );
-  }
-
-  async abort(reason = "abandoned by client"): Promise<void> {
-    try {
-      await this.kernel.request("POST", `/v1/effects/${this.effect.id}/abort`, { reason });
-    } catch {
-      // best-effort; the kernel garbage-collects stale effects
-    }
-  }
-
-  /** Scoped use; aborts on exit unless a commit succeeded. */
-  async run<T>(fn: (fx: EffectHandle) => Promise<T>): Promise<T> {
-    try {
-      return await fn(this);
-    } finally {
-      if (!this.receipt) await this.abort();
-    }
+  async compensate(): Promise<Receipt> {
+    return this.kernel.compensateEffect(this.effect.id);
   }
 }
 

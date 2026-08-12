@@ -230,16 +230,6 @@ export interface StateNode {
 // Episodes / branches / steps
 // ---------------------------------------------------------------------------
 
-export interface Episode {
-  id: string; // "ep-..."
-  title: string;
-  owner: string;
-  root_state: string;
-  main_branch: string;
-  budget: ResourceBudget;
-  created_at: string;
-}
-
 export interface Branch {
   id: string; // "br-..."
   episode: string;
@@ -251,40 +241,56 @@ export interface Branch {
 }
 
 export interface EpisodeCreateResponse {
-  episode: Episode;
-  main_branch: Branch;
+  /** "ep-..." */
+  episode: string;
+  /** "br-..." — the main branch. */
+  branch: string;
+  /** "st-..." — the root state. */
+  root_state: string;
 }
 
-export interface EpisodeDescribeResponse {
-  episode: Episode;
+export interface EpisodeDescription {
+  episode: string;
+  root_branch: string;
+  root_state: string;
   branches: Branch[];
-  step_count: number;
-  pending_effects: number;
-  budget_remaining: ResourceBudget;
+  created_by: string;
+  remaining_budget: ResourceBudget;
 }
 
 export interface StepResult {
   step: string; // "step-..."
+  /** Branch head after the step (unchanged when the step was denied). */
+  state: string; // "st-..."
   observation: Observation;
-  produced_state?: string;
-  usage: ResourceBudget;
 }
 
-export interface BranchDiffResponse {
-  delta: StateDelta;
-  summary: string;
+export interface LedgerEvent {
+  seq: number;
+  kind: string;
+  [key: string]: Json | undefined;
+}
+
+export interface StepExplanation {
+  step: string;
+  episode: string;
+  branch?: string | null;
+  principal: string;
+  action?: Json;
+  policy_decisions: Json[];
+  denial?: Denial | null;
+  state?: string | null;
+  state_delta?: Json;
+  observation?: Json;
+  effects_proposed: Json[];
+  events: LedgerEvent[];
 }
 
 export interface BranchCompareResponse {
-  common_ancestor: string;
-  left_delta: StateDelta;
-  right_delta: StateDelta;
-  conflicting_paths: string[];
-}
-
-export interface BranchMergeResponse {
-  merged?: StateNode;
-  conflict?: { paths: string[] };
+  /** Common ancestor state ("st-..."). */
+  base: string;
+  changed_in_a: string[];
+  changed_in_b: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +310,7 @@ export type EffectPhase =
   | { phase: "proposed" }
   | { phase: "prepared"; preview: Json }
   | { phase: "approved"; approver: string; approved_at: string; policy_epoch: number }
+  | { phase: "committing" }
   | { phase: "committed"; receipt: string }
   | { phase: "aborted"; reason: string }
   | { phase: "compensated"; compensating_receipt: string };
@@ -345,48 +352,30 @@ export interface Receipt {
 export interface EffectPrepareResponse {
   preview: Json;
   observed_preconditions: Json;
-  effect: PendingEffect;
 }
+
+/** Operator verdict on an in-doubt effect. */
+export type OperatorResolution =
+  | { outcome: "committed"; response: Json }
+  | { outcome: "aborted"; reason: string };
 
 // ---------------------------------------------------------------------------
 // Trace / replay
 // ---------------------------------------------------------------------------
 
-export interface TraceEntry {
-  step: string;
-  episode: string;
-  branch: string;
-  actor: string;
-  action: ActionKind;
-  lease: string;
-  observation: Observation;
-  produced_state?: string;
-  usage: ResourceBudget;
-  started_at: string;
-  finished_at: string;
-}
-
-export interface TraceQueryResponse {
-  entries: TraceEntry[];
-  next_page_token?: string;
-}
-
 export type ReplayMode = "audit" | "sandbox" | "live";
 
-export interface ReplayDivergence {
-  step: string;
-  layer: "observation" | "state" | "effect_contract" | "effect_outcome";
-  recorded_digest: string;
-  replayed_digest: string;
-  detail: string;
+export interface ReplayAuditResponse {
+  mode: "audit";
+  events: LedgerEvent[];
 }
 
-export interface ReplayReport {
-  episode: string;
-  mode: ReplayMode;
-  effective_class: ReplayClass;
-  steps_replayed: number;
-  divergences: ReplayDivergence[];
-  receipts?: Receipt[];
-  completed_at: string;
+export interface ReplaySandboxReport {
+  step: string;
+  original_exit_code?: number | null;
+  rerun_exit_code: number;
+  /** Whether the re-executed workspace tree hashed identically to the
+   * recorded post-step state. */
+  workspace_match: boolean;
+  replay_class: ReplayClass;
 }

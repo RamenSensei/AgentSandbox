@@ -5,7 +5,7 @@ Example:
     from agentkernel import Kernel, Shell
 
     kernel = Kernel("http://localhost:7411")
-    ep = kernel.create_episode("fix issue 42", owner="pr-agent")
+    ep = kernel.create_episode("pr-agent", objective="fix issue 42")
     result = ep.execute(Shell("pytest"), lease="lease-abc")
     branches = ep.fork(3)
 """
@@ -21,7 +21,6 @@ from .types import (
     ActionKind,
     Branch,
     BranchComparison,
-    BranchDiff,
     BranchDiffAction,
     CapabilityLease,
     ConnectorOp,
@@ -29,7 +28,7 @@ from .types import (
     Denial,
     EffectContract,
     EffectPreview,
-    Episode,
+    EpisodeDescription,
     HttpRead,
     McpInvoke,
     Observation,
@@ -70,9 +69,8 @@ __all__ = [
     "RequestableScope",
     "Observation",
     "StepResult",
-    "Episode",
+    "EpisodeDescription",
     "Branch",
-    "BranchDiff",
     "BranchComparison",
     "StateDelta",
     "CapabilityLease",

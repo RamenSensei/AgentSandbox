@@ -1,4 +1,4 @@
-/** Minimal mock kernel over node:http for tests. */
+/** Minimal mock kernel over node:http mirroring kernel/api/src/http.rs. */
 import http from "node:http";
 import { AddressInfo } from "node:net";
 
@@ -12,6 +12,8 @@ export interface MockState {
   receipts: Map<string, J>;
   leases: Map<string, J>;
   flakyRemaining: number;
+  /** Delay (ms) applied to every response while > 0. */
+  delayMs: number;
 }
 
 const DENIAL = {
@@ -51,12 +53,13 @@ export async function makeServer(): Promise<{
     receipts: new Map(),
     leases: new Map(),
     flakyRemaining: 0,
+    delayMs: 0,
   };
   const nextId = (p: string) => `${p}-${++state.counter}`;
 
-  const newEffect = (id: string, body: J): J => ({
+  const newEffect = (id: string, branch: string, proposer: string): J => ({
     id,
-    contract: body.contract ?? {
+    contract: {
       operation: "github.create_pull_request",
       resource: "org/repo",
       arguments: {},
@@ -65,22 +68,45 @@ export async function makeServer(): Promise<{
       class: "compensatable",
     },
     contract_hash: "sha256:deadbeef",
-    proposer: body.proposer ?? "pr-agent",
-    branch: body.branch ?? "br-1",
-    step: body.step ?? "",
-    lease: body.lease ?? "",
+    proposer,
+    branch,
+    step: "",
+    lease: "",
     phase: { phase: "proposed" },
     proposed_at: "2026-01-01T00:00:00Z",
+  });
+
+  const makeReceipt = (fx: J): J => ({
+    id: nextId("rcpt"),
+    body: {
+      effect: fx.id,
+      who: fx.proposer,
+      operation: fx.contract.operation,
+      resource: fx.contract.resource,
+      contract_hash: fx.contract_hash,
+      branch: fx.branch,
+      step: fx.step,
+      policy_epoch: 1,
+      authorization_witness: "sha256:w",
+      external_response_digest: "sha256:r",
+      committed_at: "2026-01-01T00:00:00Z",
+    },
+    signature: "aa".repeat(32),
+    key_id: "kernel-key-1",
   });
 
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
-      const send = (status: number, payload: J) => {
+      const respond = (status: number, payload: J | J[]) => {
         const raw = JSON.stringify(payload);
         res.writeHead(status, { "content-type": "application/json" });
         res.end(raw);
+      };
+      const send = (status: number, payload: J | J[]) => {
+        if (state.delayMs > 0) setTimeout(() => respond(status, payload), state.delayMs);
+        else respond(status, payload);
       };
       if (state.flakyRemaining > 0) {
         state.flakyRemaining--;
@@ -88,47 +114,51 @@ export async function makeServer(): Promise<{
         return;
       }
       const body: J = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
-      const path = (req.url ?? "").split("?")[0]!;
+      const [path, qs] = (req.url ?? "").split("?") as [string, string?];
+      const query = new URLSearchParams(qs ?? "");
       const method = req.method ?? "GET";
       let m: RegExpMatchArray | null;
+
+      if (method === "GET" && path === "/healthz") {
+        send(200, { status: "ok", version: "1.0.0-mock" });
+        return;
+      }
 
       if (method === "POST" && path === "/v1/episodes") {
         const ep = nextId("ep");
         const br = nextId("br");
         const root = nextId("st");
-        const episode = {
-          id: ep,
-          title: body.title ?? "",
-          owner: body.owner ?? "",
+        state.episodes.set(ep, {
+          episode: ep,
+          root_branch: br,
           root_state: root,
-          main_branch: br,
-          budget: body.budget ?? BUDGET,
-          created_at: "2026-01-01T00:00:00Z",
-        };
-        const branch = {
+          created_by: body.principal ?? "",
+          objective: body.objective ?? "",
+          remaining_budget: BUDGET,
+        });
+        state.branches.set(br, {
           id: br,
           episode: ep,
           forked_from: root,
           head: root,
           discarded: false,
           created_at: "2026-01-01T00:00:00Z",
-        };
-        state.episodes.set(ep, episode);
-        state.branches.set(br, branch);
-        send(201, { episode, main_branch: branch });
+        });
+        send(201, { episode: ep, branch: br, root_state: root });
         return;
       }
 
       if (method === "GET" && (m = path.match(/^\/v1\/episodes\/(ep-[\w-]+)$/))) {
         const ep = state.episodes.get(m[1]!);
         if (!ep) return send(404, { code: "NOT_FOUND", message: m[1]! });
-        const branches = [...state.branches.values()].filter((b) => b.episode === ep.id);
+        const branches = [...state.branches.values()].filter((b) => b.episode === ep.episode);
         send(200, {
-          episode: ep,
+          episode: ep.episode,
+          root_branch: ep.root_branch,
+          root_state: ep.root_state,
           branches,
-          step_count: 0,
-          pending_effects: 0,
-          budget_remaining: ep.budget,
+          created_by: ep.created_by,
+          remaining_budget: ep.remaining_budget,
         });
         return;
       }
@@ -136,28 +166,36 @@ export async function makeServer(): Promise<{
       if (method === "POST" && path === "/v1/steps/execute") {
         const kind = body.action.kind;
         const step = nextId("step");
+        const branch = state.branches.get(body.branch);
+        if (!branch) return send(404, { code: "NOT_FOUND", message: body.branch });
         if (kind.kind === "shell" && String(kind.command).includes("forbidden")) {
-          send(200, { step, observation: { kind: "denied", denial: DENIAL }, usage: BUDGET });
+          send(403, {
+            step,
+            state: branch.head,
+            observation: { kind: "denied", denial: DENIAL },
+            error: { code: "DENIED", message: DENIAL.reason, denial: DENIAL },
+          });
           return;
         }
         if (kind.kind === "connector_op") {
           const fx = nextId("fx");
-          state.effects.set(fx, newEffect(fx, body));
+          state.effects.set(fx, newEffect(fx, body.branch, body.principal));
           send(200, {
             step,
+            state: branch.head,
             observation: {
               kind: "effect_pending",
               effect: fx,
               contract_hash: "sha256:deadbeef",
               class: "compensatable",
             },
-            usage: BUDGET,
           });
           return;
         }
-        const st = nextId("st");
+        branch.head = nextId("st");
         send(200, {
           step,
+          state: branch.head,
           observation: {
             kind: "success",
             summary: "ok",
@@ -166,63 +204,97 @@ export async function makeServer(): Promise<{
             full_output: "sha256:abc",
             truncated: false,
           },
-          produced_state: st,
-          usage: BUDGET,
+        });
+        return;
+      }
+
+      if (method === "GET" && (m = path.match(/^\/v1\/steps\/(step-[\w-]+)\/explain$/))) {
+        send(200, {
+          step: m[1],
+          episode: "ep-1",
+          branch: "br-1",
+          principal: "pr-agent",
+          action: { kind: { kind: "shell", command: "pytest" } },
+          policy_decisions: [],
+          denial: null,
+          state: "st-2",
+          state_delta: null,
+          observation: { kind: "success" },
+          effects_proposed: [],
+          events: [{ seq: 1, kind: "step_started" }],
+        });
+        return;
+      }
+
+      if (method === "POST" && /^\/v1\/steps\/step-[\w-]+\/retry$/.test(path)) {
+        send(200, {
+          step: nextId("step"),
+          state: nextId("st"),
+          observation: {
+            kind: "success",
+            summary: "ok",
+            exit_code: 0,
+            full_output: "sha256:abc",
+            truncated: false,
+          },
         });
         return;
       }
 
       if (method === "POST" && (m = path.match(/^\/v1\/branches\/(br-[\w-]+)\/fork$/))) {
-        const parent = state.branches.get(m[1]!)!;
-        const out: J[] = [];
-        for (let i = 0; i < (body.count ?? 1); i++) {
-          const bid = nextId("br");
-          const b = {
-            id: bid,
-            episode: parent.episode,
-            parent_branch: parent.id,
-            forked_from: parent.head,
-            head: parent.head,
-            discarded: false,
-            created_at: "2026-01-01T00:00:00Z",
-          };
-          state.branches.set(bid, b);
-          out.push(b);
-        }
-        send(200, { branches: out });
+        const parent = state.branches.get(m[1]!);
+        if (!parent) return send(404, { code: "NOT_FOUND", message: m[1]! });
+        const bid = nextId("br");
+        const b = {
+          id: bid,
+          episode: parent.episode,
+          parent_branch: parent.id,
+          forked_from: parent.head,
+          head: parent.head,
+          discarded: false,
+          created_at: "2026-01-01T00:00:00Z",
+        };
+        state.branches.set(bid, b);
+        send(200, b);
         return;
       }
 
       if (method === "POST" && /^\/v1\/branches\/br-[\w-]+\/diff$/.test(path)) {
-        send(200, {
-          delta: {
-            files: [{ op: "modified", path: "a.py", old_blob: "sha256:1", new_blob: "sha256:2" }],
-            policy_epoch: 3,
-          },
-          summary: "1 file changed",
-        });
+        send(200, [
+          { op: "modified", path: "a.py", old_blob: "sha256:1", new_blob: "sha256:2" },
+        ]);
         return;
       }
 
       if (method === "GET" && /^\/v1\/branches\/br-[\w-]+\/compare\/br-[\w-]+$/.test(path)) {
-        send(200, {
-          common_ancestor: "st-1",
-          left_delta: { policy_epoch: 1 },
-          right_delta: { policy_epoch: 1 },
-          conflicting_paths: ["a.py"],
-        });
+        send(200, { base: "st-1", changed_in_a: ["a.py"], changed_in_b: ["a.py"] });
         return;
       }
 
-      if (method === "POST" && /^\/v1\/branches\/br-[\w-]+\/merge$/.test(path)) {
-        send(200, { merged: { id: nextId("st"), branch: body.into } });
+      if (method === "POST" && (m = path.match(/^\/v1\/branches\/(br-[\w-]+)\/merge$/))) {
+        const dest = state.branches.get(m[1]!);
+        if (!dest) return send(404, { code: "NOT_FOUND", message: m[1]! });
+        const node = {
+          id: nextId("st"),
+          episode: dest.episode,
+          branch: dest.id,
+          parent: dest.head,
+          merge_parent: state.branches.get(body.source)?.head,
+          actor: body.actor,
+          delta: { policy_epoch: 1 },
+          workspace_root: "/tmp/ws",
+          replay_class: "filesystem_only",
+          created_at: "2026-01-01T00:00:00Z",
+        };
+        dest.head = node.id;
+        send(200, node);
         return;
       }
 
       if (method === "POST" && (m = path.match(/^\/v1\/branches\/(br-[\w-]+)\/discard$/))) {
-        const b = state.branches.get(m[1]!)!;
-        b.discarded = true;
-        send(200, b);
+        const b = state.branches.get(m[1]!);
+        if (b) b.discarded = true;
+        send(200, { discarded: m[1]! });
         return;
       }
 
@@ -236,31 +308,33 @@ export async function makeServer(): Promise<{
           id,
           principal: body.principal,
           operation: body.operation,
-          constraints: body.constraints ?? {},
-          remaining_uses: body.uses ?? 1,
+          constraints: {},
+          remaining_uses: 1,
           issued_at: "2026-01-01T00:00:00Z",
-          expires_at: body.expires_at ?? "2026-01-01T01:00:00Z",
+          expires_at: "2026-01-01T01:00:00Z",
           budget: BUDGET,
           revoked: false,
         };
         state.leases.set(id, lease);
-        send(200, { lease });
+        send(201, lease);
         return;
       }
 
       if (method === "POST" && path === "/v1/capabilities/delegate") {
-        const parent = state.leases.get(body.parent_lease)!;
+        const parent = state.leases.get(body.parent_lease);
+        if (!parent) return send(404, { code: "NOT_FOUND", message: body.parent_lease });
         const id = nextId("lease");
         const lease = {
           ...parent,
           id,
-          principal: body.child_principal,
+          principal: body.delegatee,
           parent_lease: parent.id,
-          constraints: body.constraints,
+          constraints: body.constraints ?? {},
           remaining_uses: body.uses,
+          expires_at: body.expires_at,
         };
         state.leases.set(id, lease);
-        send(200, lease);
+        send(201, lease);
         return;
       }
 
@@ -270,30 +344,36 @@ export async function makeServer(): Promise<{
         if (lease) {
           lease.revoked = true;
           revoked.push(lease.id);
-          if (body.cascade) {
-            for (const other of state.leases.values()) {
-              if (other.parent_lease === lease.id) {
-                other.revoked = true;
-                revoked.push(other.id);
-              }
+          for (const other of state.leases.values()) {
+            if (other.parent_lease === lease.id) {
+              other.revoked = true;
+              revoked.push(other.id);
             }
           }
         }
-        send(200, { revoked_leases: revoked });
+        send(200, { revoked });
         return;
       }
 
       if (method === "GET" && (m = path.match(/^\/v1\/capabilities\/(pr-[\w-]+)$/))) {
-        const leases = [...state.leases.values()].filter((l) => l.principal === m![1]);
-        send(200, { leases });
+        const leases = [...state.leases.values()].filter(
+          (l) => l.principal === m![1] && !l.revoked,
+        );
+        send(200, leases);
         return;
       }
 
-      if (method === "POST" && path === "/v1/effects") {
-        const id = nextId("fx");
-        const fx = newEffect(id, body);
-        state.effects.set(id, fx);
-        send(201, { effect: fx });
+      if (method === "GET" && path === "/v1/effects") {
+        const phase = query.get("phase");
+        const out = [...state.effects.values()].filter(
+          (fx) => !phase || fx.phase.phase === phase,
+        );
+        send(200, out);
+        return;
+      }
+
+      if (method === "POST" && path === "/v1/effects/recover") {
+        send(200, { resolutions: [] });
         return;
       }
 
@@ -307,7 +387,6 @@ export async function makeServer(): Promise<{
           send(200, {
             preview: { will: "create PR" },
             observed_preconditions: { base_head_sha: "abc123" },
-            effect: fx,
           });
           return;
         }
@@ -318,76 +397,73 @@ export async function makeServer(): Promise<{
             approved_at: "2026-01-01T00:00:00Z",
             policy_epoch: 1,
           };
-          send(200, fx);
+          send(200, { approved: fx.id });
           return;
         }
         if (method === "POST" && verb === "commit") {
-          if (body.expected_contract_hash !== fx.contract_hash) {
-            send(403, {
-              code: "DENIED",
-              message: "stale contract hash",
-              denial: { ...DENIAL, code: "STALE_AUTHORIZATION" },
+          if (fx.phase.phase !== "approved") {
+            send(409, {
+              code: "WRONG_EFFECT_PHASE",
+              message: `commit requires approved, effect is ${fx.phase.phase}`,
             });
             return;
           }
-          const rcpt = nextId("rcpt");
-          const receipt = {
-            id: rcpt,
-            body: {
-              effect: fx.id,
-              who: fx.proposer,
-              operation: fx.contract.operation,
-              resource: fx.contract.resource,
-              contract_hash: fx.contract_hash,
-              branch: fx.branch,
-              step: fx.step,
-              policy_epoch: 1,
-              authorization_witness: "sha256:w",
-              external_response_digest: "sha256:r",
-              committed_at: "2026-01-01T00:00:00Z",
-            },
-            signature: "aa".repeat(32),
-            key_id: "kernel-key-1",
-          };
-          state.receipts.set(rcpt, receipt);
-          fx.phase = { phase: "committed", receipt: rcpt };
-          send(200, { receipt });
-          return;
-        }
-        if (method === "POST" && verb === "abort") {
-          fx.phase = { phase: "aborted", reason: body.reason ?? "" };
-          send(200, fx);
+          const receipt = makeReceipt(fx);
+          state.receipts.set(receipt.id, receipt);
+          fx.phase = { phase: "committed", receipt: receipt.id };
+          send(200, receipt);
           return;
         }
         if (method === "POST" && verb === "compensate") {
-          const rcpt = nextId("rcpt");
-          const receipt = {
-            id: rcpt,
-            body: { effect: fx.id },
-            signature: "bb".repeat(32),
-            key_id: "kernel-key-1",
-          };
-          state.receipts.set(rcpt, receipt);
-          fx.phase = { phase: "compensated", compensating_receipt: rcpt };
+          const receipt = makeReceipt(fx);
+          state.receipts.set(receipt.id, receipt);
+          fx.phase = { phase: "compensated", compensating_receipt: receipt.id };
           send(200, receipt);
+          return;
+        }
+        if (method === "POST" && verb === "resolve") {
+          send(200, { resolved: fx.id, receipt: null });
           return;
         }
       }
 
       if (method === "GET" && path === "/v1/trace/query") {
-        send(200, { entries: [], next_page_token: "" });
+        send(200, [
+          { seq: 1, kind: "step_started" },
+          { seq: 2, kind: "step_finished" },
+        ]);
         return;
       }
 
-      if (method === "POST" && (m = path.match(/^\/v1\/replay\/(audit|sandbox|live)$/))) {
-        send(200, {
-          episode: body.episode,
-          mode: m[1],
-          effective_class: "filesystem_only",
-          steps_replayed: 4,
-          divergences: [],
-          completed_at: "2026-01-01T00:00:00Z",
-        });
+      if (method === "POST" && (m = path.match(/^\/v1\/replay\/(\w+)$/))) {
+        const mode = m[1];
+        if (mode === "audit") {
+          send(200, { mode: "audit", events: [{ seq: 1, kind: "step_started" }] });
+          return;
+        }
+        if (mode === "sandbox") {
+          if (!body.step) {
+            send(500, { code: "OTHER", message: "sandbox replay requires `step`" });
+            return;
+          }
+          send(200, {
+            step: body.step,
+            original_exit_code: 0,
+            rerun_exit_code: 0,
+            workspace_match: true,
+            replay_class: "filesystem_only",
+          });
+          return;
+        }
+        if (mode === "live") {
+          const fx = state.effects.get(body.effect);
+          if (!fx) return send(404, { code: "NOT_FOUND", message: String(body.effect) });
+          const receipt = makeReceipt(fx);
+          state.receipts.set(receipt.id, receipt);
+          send(200, receipt);
+          return;
+        }
+        send(400, { code: "INVALID_ID", message: `expected audit|sandbox|live, got ${mode}` });
         return;
       }
 

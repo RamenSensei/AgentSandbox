@@ -1,19 +1,28 @@
 openapi: 3.1.0
 info:
   title: AgentKernel Execution Protocol — HTTP/JSON binding
-  version: 1.0.0
+  version: 0.6.0
   description: |
     JSON/HTTP binding of the AgentKernel Execution Protocol exposed by the
-    kernel API server. Wire objects use the canonical JSON encoding of
-    ak-core (snake_case fields, internally tagged enums, prefixed string
-    ids: ep-/step-/br-/st-/pr-/lease-/fx-/rcpt-).
+    kernel API server (kernel/api/src/http.rs). Wire objects use the
+    canonical JSON encoding of ak-core (snake_case fields, internally
+    tagged enums, prefixed string ids: ep-/step-/br-/st-/pr-/lease-/fx-/rcpt-).
+
+    Authentication: every route except /healthz requires
+    `Authorization: Bearer <token>` when the server runs with an auth
+    config. Missing/invalid tokens are 401; principal spoofing, missing
+    roles and non-ownership are 403. In disabled (loopback dev) mode
+    request-body principals are trusted.
 
     Errors are returned as an ErrorEnvelope `{code, message, denial?}`.
     Policy denials are HTTP 403 with `code: "DENIED"` and the full
-    structured Denial — never a bare "permission denied".
+    structured Denial — never a bare "permission denied". A denial that was
+    itself recorded as a step is also HTTP 403, with the recorded step,
+    state and observation alongside the error envelope.
 servers:
   - url: /
 tags:
+  - name: health
   - name: episodes
   - name: steps
   - name: branches
@@ -24,6 +33,24 @@ tags:
   - name: receipts
 
 paths:
+  /healthz:
+    get:
+      security: []
+      tags: [health]
+      operationId: health.check
+      summary: Liveness probe.
+      responses:
+        "200":
+          description: The kernel is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status: { const: ok }
+                  version: { type: string }
+
   /v1/episodes:
     post:
       tags: [episodes]
@@ -54,7 +81,7 @@ paths:
           description: Episode description.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/EpisodeDescribeResponse" }
+              schema: { $ref: "#/components/schemas/EpisodeDescription" }
         "404": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
@@ -64,10 +91,10 @@ paths:
       operationId: step.execute
       summary: Execute one action on a branch as a principal.
       description: |
-        Every action must present a lease (no ambient authority). A policy
-        rejection is returned as HTTP 200 with an Observation of kind
-        "denied" when the step itself was recorded, or HTTP 403 with an
-        ErrorEnvelope when the request could not be admitted at all.
+        Every action must present a lease (no ambient authority). A denied
+        step is still recorded; the response is HTTP 403 carrying the
+        recorded step, unchanged state, the "denied" observation and an
+        ErrorEnvelope with the full structured Denial.
       requestBody:
         required: true
         content:
@@ -75,18 +102,18 @@ paths:
             schema: { $ref: "#/components/schemas/StepExecuteRequest" }
       responses:
         "200":
-          description: The step ran (possibly to a denial observation).
+          description: The step ran.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/StepExecuteResponse" }
-        "403": { $ref: "#/components/responses/Denied" }
+              schema: { $ref: "#/components/schemas/StepResult" }
+        "403": { $ref: "#/components/responses/DeniedStep" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/steps/{id}/explain:
     get:
       tags: [steps]
       operationId: step.explain
-      summary: Full authorization narrative for a recorded step.
+      summary: Full causal narrative for a recorded step.
       parameters:
         - $ref: "#/components/parameters/StepId"
       responses:
@@ -94,68 +121,104 @@ paths:
           description: Explanation.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/StepExplainResponse" }
+              schema: { $ref: "#/components/schemas/StepExplanation" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/steps/{id}/retry:
     post:
       tags: [steps]
       operationId: step.retry
-      summary: Re-execute a recorded step, optionally on another branch.
+      summary: Re-execute a recorded step on its branch. No request body.
       parameters:
         - $ref: "#/components/parameters/StepId"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/StepRetryRequest" }
       responses:
         "200":
           description: Retry result.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/StepExecuteResponse" }
-        "403": { $ref: "#/components/responses/Denied" }
+              schema: { $ref: "#/components/schemas/StepResult" }
+        "403": { $ref: "#/components/responses/DeniedStep" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/branches/{id}/fork:
     post:
       tags: [branches]
       operationId: branch.fork
-      summary: Fork one or more sibling branches (parallel speculation).
+      summary: Fork one sibling branch from this branch's head. No request body.
       parameters:
         - $ref: "#/components/parameters/BranchId"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/BranchForkRequest" }
       responses:
         "200":
-          description: Forked branches.
+          description: The forked branch.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BranchForkResponse" }
+              schema: { $ref: "#/components/schemas/Branch" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/branches/{id}/diff:
     post:
       tags: [branches]
       operationId: branch.diff
-      summary: Semantic diff of a branch since a state (default fork point).
+      summary: File changes on a branch since a state (default fork point).
       parameters:
         - $ref: "#/components/parameters/BranchId"
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/BranchDiffRequest" }
       responses:
         "200":
-          description: Diff.
+          description: File changes.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BranchDiffResponse" }
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/FileChange" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/merge:
+    post:
+      tags: [branches]
+      operationId: branch.merge
+      summary: Merge a source branch into this branch.
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchMergeRequest" }
+      responses:
+        "200":
+          description: The merged state node on the destination branch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StateNode" }
+        "409":
+          description: Merge conflict (code MERGE_CONFLICT).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/discard:
+    post:
+      tags: [branches]
+      operationId: branch.discard
+      summary: Discard a speculative branch and its backend resources. No request body.
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      responses:
+        "200":
+          description: Acknowledgement.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [discarded]
+                properties:
+                  discarded: { type: string, pattern: "^br-" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/branches/{id}/compare/{other}:
@@ -177,51 +240,6 @@ paths:
               schema: { $ref: "#/components/schemas/BranchCompareResponse" }
         default: { $ref: "#/components/responses/Error" }
 
-  /v1/branches/{id}/merge:
-    post:
-      tags: [branches]
-      operationId: branch.merge
-      summary: Merge this branch into a destination branch.
-      parameters:
-        - $ref: "#/components/parameters/BranchId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/BranchMergeRequest" }
-      responses:
-        "200":
-          description: Merge result (merged state node or conflict).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/BranchMergeResponse" }
-        "409":
-          description: Merge conflict (code MERGE_CONFLICT).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
-        default: { $ref: "#/components/responses/Error" }
-
-  /v1/branches/{id}/discard:
-    post:
-      tags: [branches]
-      operationId: branch.discard
-      summary: Discard a speculative branch and its backend resources.
-      parameters:
-        - $ref: "#/components/parameters/BranchId"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/BranchDiscardRequest" }
-      responses:
-        "200":
-          description: Discarded branch.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Branch" }
-        default: { $ref: "#/components/responses/Error" }
-
   /v1/capabilities/request:
     post:
       tags: [capabilities]
@@ -233,11 +251,11 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CapabilityRequestRequest" }
       responses:
-        "200":
-          description: Lease granted or queued for human approval.
+        "201":
+          description: Lease granted.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/CapabilityRequestResponse" }
+              schema: { $ref: "#/components/schemas/CapabilityLease" }
         "403": { $ref: "#/components/responses/Denied" }
         default: { $ref: "#/components/responses/Error" }
 
@@ -245,14 +263,14 @@ paths:
     post:
       tags: [capabilities]
       operationId: capability.delegate
-      summary: Attenuate a lease for a child principal. Never widens.
+      summary: Attenuate a lease for a delegatee principal. Never widens.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/CapabilityDelegateRequest" }
       responses:
-        "200":
+        "201":
           description: Child lease.
           content:
             application/json:
@@ -264,59 +282,97 @@ paths:
     post:
       tags: [capabilities]
       operationId: capability.revoke
-      summary: Revoke a lease (optionally its whole delegation subtree).
+      summary: Revoke a lease and its delegation subtree.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/CapabilityRevokeRequest" }
+            schema:
+              type: object
+              required: [lease]
+              properties:
+                lease: { type: string, pattern: "^lease-" }
       responses:
         "200":
-          description: Revoked lease ids.
+          description: Revoked lease ids (the lease and every descendant).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/CapabilityRevokeResponse" }
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked:
+                    type: array
+                    items: { type: string, pattern: "^lease-" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/capabilities/{principal}:
     get:
       tags: [capabilities]
-      operationId: capability.describe
-      summary: List the leases currently held by a principal.
+      operationId: capability.list
+      summary: List the active leases currently held by a principal.
       parameters:
         - name: principal
           in: path
           required: true
           schema: { type: string, pattern: "^pr-" }
-        - name: namespace
-          in: query
-          required: false
-          schema: { type: string }
       responses:
         "200":
-          description: Leases.
+          description: Active leases.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/CapabilityDescribeResponse" }
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CapabilityLease" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/effects:
-    post:
+    get:
       tags: [effects]
-      operationId: effect.propose
-      summary: Propose an external effect (canonicalized on ingest).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/EffectProposeRequest" }
+      operationId: effect.list
+      summary: List pending effects, optionally filtered by phase.
+      parameters:
+        - name: phase
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [proposed, prepared, approved, committing, committed,
+                   aborted, compensated]
       responses:
-        "201":
-          description: Pending effect (or a denial in the body union).
+        "200":
+          description: Effects.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/EffectProposeResponse" }
-        "403": { $ref: "#/components/responses/Denied" }
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PendingEffect" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/effects/recover:
+    post:
+      tags: [effects]
+      operationId: effect.recover
+      summary: >
+        Run in-doubt recovery: resolve effects parked in phase "committing"
+        through each connector's idempotency probe. No request body.
+      responses:
+        "200":
+          description: Per-effect resolutions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resolutions]
+                properties:
+                  resolutions:
+                    type: array
+                    items:
+                      type: object
+                      required: [effect, resolution]
+                      properties:
+                        effect: { type: string, pattern: "^fx-" }
+                        resolution: {}
         default: { $ref: "#/components/responses/Error" }
 
   /v1/effects/{id}:
@@ -338,7 +394,7 @@ paths:
     post:
       tags: [effects]
       operationId: effect.prepare
-      summary: Dry-run the effect against the live world. No side effects.
+      summary: Dry-run the effect against the live world. No side effects, no request body.
       parameters:
         - $ref: "#/components/parameters/EffectId"
       responses:
@@ -346,27 +402,40 @@ paths:
           description: Preview and observed preconditions.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/EffectPrepareResponse" }
+              schema:
+                type: object
+                required: [preview, observed_preconditions]
+                properties:
+                  preview: {}
+                  observed_preconditions: {}
         default: { $ref: "#/components/responses/Error" }
 
   /v1/effects/{id}/approve:
     post:
       tags: [effects]
       operationId: effect.approve
-      summary: Record an approval of exactly this contract hash.
+      summary: Record an approval of the effect's current contract.
       parameters:
         - $ref: "#/components/parameters/EffectId"
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/EffectApproveRequest" }
+            schema:
+              type: object
+              required: [approver]
+              properties:
+                approver: { type: string, pattern: "^pr-" }
       responses:
         "200":
-          description: The effect, now in phase "approved".
+          description: Acknowledgement.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/PendingEffect" }
+              schema:
+                type: object
+                required: [approved]
+                properties:
+                  approved: { type: string, pattern: "^fx-" }
         "403": { $ref: "#/components/responses/Denied" }
         default: { $ref: "#/components/responses/Error" }
 
@@ -374,19 +443,15 @@ paths:
     post:
       tags: [effects]
       operationId: effect.commit
-      summary: Commit the effect after commit-time revalidation.
+      summary: Commit the effect after commit-time revalidation. No request body.
       description: |
         Revalidates lease, preconditions, policy epoch and contract hash
-        before touching the world. A mismatched expected_contract_hash fails
-        with STALE_AUTHORIZATION. Duplicate idempotency keys return the
-        original receipt (code DUPLICATE_COMMIT is not an error here).
+        before touching the world. Stale authorization, duplicate commits
+        and wrong-phase commits are HTTP 409 with the corresponding error
+        code (STALE_AUTHORIZATION, DUPLICATE_COMMIT, COMMIT_IN_DOUBT,
+        WRONG_EFFECT_PHASE).
       parameters:
         - $ref: "#/components/parameters/EffectId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/EffectCommitRequest" }
       responses:
         "200":
           description: Signed receipt.
@@ -395,47 +460,19 @@ paths:
               schema: { $ref: "#/components/schemas/Receipt" }
         "403": { $ref: "#/components/responses/Denied" }
         "409":
-          description: Stale authorization or failed precondition.
+          description: Stale authorization, duplicate or in-doubt commit.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
-        default: { $ref: "#/components/responses/Error" }
-
-  /v1/effects/{id}/abort:
-    post:
-      tags: [effects]
-      operationId: effect.abort
-      summary: Abort a pending effect before commit.
-      parameters:
-        - $ref: "#/components/parameters/EffectId"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                reason: { type: string }
-      responses:
-        "200":
-          description: The effect, now in phase "aborted".
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/PendingEffect" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/effects/{id}/compensate:
     post:
       tags: [effects]
       operationId: effect.compensate
-      summary: Run the compensating action for a committed effect.
+      summary: Run the compensating action for a committed effect. No request body.
       parameters:
         - $ref: "#/components/parameters/EffectId"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/EffectCompensateRequest" }
       responses:
         "200":
           description: Compensating receipt.
@@ -444,50 +481,47 @@ paths:
               schema: { $ref: "#/components/schemas/Receipt" }
         default: { $ref: "#/components/responses/Error" }
 
-  /v1/trace/query:
-    get:
-      tags: [trace]
-      operationId: trace.query
-      summary: Query the causal ledger.
+  /v1/effects/{id}/resolve:
+    post:
+      tags: [effects]
+      operationId: effect.resolve
+      summary: Operator verdict on an in-doubt effect.
       parameters:
-        - name: q
-          in: query
-          required: true
-          schema: { type: string }
-          description: >
-            Trace query, e.g.
-            `effects where class >= compensatable and branch = "br-42"`.
-        - name: episode
-          in: query
-          required: false
-          schema: { type: string, pattern: "^ep-" }
-        - name: limit
-          in: query
-          required: false
-          schema: { type: integer, minimum: 1, maximum: 1000 }
-        - name: page_token
-          in: query
-          required: false
-          schema: { type: string }
+        - $ref: "#/components/parameters/EffectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OperatorResolution" }
       responses:
         "200":
-          description: Matching trace entries.
+          description: Resolution acknowledgement.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/TraceQueryResponse" }
+              schema:
+                type: object
+                required: [resolved]
+                properties:
+                  resolved: { type: string, pattern: "^fx-" }
+                  receipt:
+                    oneOf:
+                      - { $ref: "#/components/schemas/Receipt" }
+                      - { type: "null" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/replay/{mode}:
     post:
       tags: [replay]
       operationId: replay.run
-      summary: Replay an episode in audit, sandbox or live mode.
+      summary: Replay in audit, sandbox or live mode.
       description: |
-        audit — play back the recorded ledger; never re-executes.
-        sandbox — restore state and re-execute local code with recorded
-        inputs substituted where captured.
-        live — re-execute the same effect contracts against the real world.
-        Live replay guarantees the contract, not the outcome.
+        audit — play back the recorded ledger sequence range; never
+        re-executes. Requires seq_from/seq_to (defaults: whole ledger).
+        sandbox — re-execute one recorded step in an isolated fork.
+        Requires `step`.
+        live — re-commit one recorded effect contract against the real
+        world. Requires `effect` and `approver`. Live replay guarantees
+        the contract, not the outcome.
       parameters:
         - name: mode
           in: path
@@ -500,10 +534,57 @@ paths:
             schema: { $ref: "#/components/schemas/ReplayRequest" }
       responses:
         "200":
-          description: Replay report.
+          description: >
+            Mode-specific result: audit returns {mode, events}; sandbox
+            returns a ReplaySandboxReport; live returns the new Receipt.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ReplayReport" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ReplayAuditResponse"
+                  - $ref: "#/components/schemas/ReplaySandboxReport"
+                  - $ref: "#/components/schemas/Receipt"
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/trace/query:
+    get:
+      tags: [trace]
+      operationId: trace.query
+      summary: Query the causal ledger.
+      parameters:
+        - name: episode
+          in: query
+          required: false
+          schema: { type: string, pattern: "^ep-" }
+        - name: branch
+          in: query
+          required: false
+          schema: { type: string, pattern: "^br-" }
+        - name: step
+          in: query
+          required: false
+          schema: { type: string, pattern: "^step-" }
+        - name: principal
+          in: query
+          required: false
+          schema: { type: string, pattern: "^pr-" }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string }
+          description: Ledger event kind, e.g. step_started, effect_committed.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Matching ledger events, in causal order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LedgerEvent" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/receipts/{id}:
@@ -524,7 +605,15 @@ paths:
               schema: { $ref: "#/components/schemas/Receipt" }
         default: { $ref: "#/components/responses/Error" }
 
+security:
+  - bearerAuth: []
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Static API token mapped to a principal and role set.
   parameters:
     EpisodeId:
       name: id
@@ -559,6 +648,25 @@ components:
             allOf:
               - $ref: "#/components/schemas/ErrorEnvelope"
               - required: [denial]
+    DeniedStep:
+      description: >
+        The step was admitted and recorded, but the action was denied. The
+        body carries the recorded step, the unchanged branch head state,
+        the "denied" observation and the error envelope with the full
+        structured Denial.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [step, state, observation, error]
+            properties:
+              step: { type: string, pattern: "^step-" }
+              state: { type: string, pattern: "^st-" }
+              observation: { $ref: "#/components/schemas/Observation" }
+              error:
+                allOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - required: [denial]
     Error:
       description: Error envelope.
       content:
@@ -575,8 +683,8 @@ components:
           description: >
             Stable machine code, e.g. INVALID_ID, NOT_FOUND, DENIED,
             WRONG_EFFECT_PHASE, STALE_AUTHORIZATION, DUPLICATE_COMMIT,
-            BACKEND_UNAVAILABLE, BRANCH_DISCARDED, MERGE_CONFLICT, STORAGE,
-            CONNECTOR, SERDE, IO, OTHER.
+            COMMIT_IN_DOUBT, BACKEND_UNAVAILABLE, BRANCH_DISCARDED,
+            MERGE_CONFLICT, STORAGE, CONNECTOR, SERDE, IO, OTHER.
         message: { type: string }
         denial: { $ref: "#/components/schemas/Denial" }
 
@@ -833,6 +941,10 @@ components:
             approved_at: { type: string, format: date-time }
             policy_epoch: { type: integer }
         - type: object
+          required: [phase]
+          properties:
+            phase: { const: committing }
+        - type: object
           required: [phase, receipt]
           properties:
             phase: { const: committed }
@@ -863,6 +975,22 @@ components:
         lease: { type: string, pattern: "^lease-" }
         phase: { $ref: "#/components/schemas/EffectPhase" }
         proposed_at: { type: string, format: date-time }
+
+    OperatorResolution:
+      description: >
+        Operator verdict on an in-doubt effect: either the external call
+        committed (with its response) or it aborted.
+      oneOf:
+        - type: object
+          required: [outcome, response]
+          properties:
+            outcome: { const: committed }
+            response: {}
+        - type: object
+          required: [outcome, reason]
+          properties:
+            outcome: { const: aborted }
+            reason: { type: string }
 
     ReceiptBody:
       type: object
@@ -969,18 +1097,6 @@ components:
         replay_class: { $ref: "#/components/schemas/ReplayClass" }
         created_at: { type: string, format: date-time }
 
-    Episode:
-      type: object
-      required: [id, title, owner, root_state, main_branch, budget, created_at]
-      properties:
-        id: { type: string, pattern: "^ep-" }
-        title: { type: string }
-        owner: { type: string, pattern: "^pr-" }
-        root_state: { type: string, pattern: "^st-" }
-        main_branch: { type: string, pattern: "^br-" }
-        budget: { $ref: "#/components/schemas/ResourceBudget" }
-        created_at: { type: string, format: date-time }
-
     Branch:
       type: object
       required: [id, episode, forked_from, head, discarded, created_at]
@@ -995,154 +1111,113 @@ components:
 
     EpisodeCreateRequest:
       type: object
-      required: [title, owner, budget]
+      required: [principal]
       properties:
-        title: { type: string }
-        owner: { type: string, pattern: "^pr-" }
-        budget: { $ref: "#/components/schemas/ResourceBudget" }
-        workspace_root: { type: string }
+        principal: { type: string, pattern: "^pr-" }
+        objective: { type: string, default: "" }
+        workspace:
+          type: [string, "null"]
+          description: Workspace root path; the kernel allocates one when omitted.
 
     EpisodeCreateResponse:
       type: object
-      required: [episode, main_branch]
+      required: [episode, branch, root_state]
       properties:
-        episode: { $ref: "#/components/schemas/Episode" }
-        main_branch: { $ref: "#/components/schemas/Branch" }
+        episode: { type: string, pattern: "^ep-" }
+        branch: { type: string, pattern: "^br-" }
+        root_state: { type: string, pattern: "^st-" }
 
-    EpisodeDescribeResponse:
+    EpisodeDescription:
       type: object
-      required: [episode, branches, step_count, pending_effects, budget_remaining]
+      required:
+        [episode, root_branch, root_state, branches, created_by,
+         remaining_budget]
       properties:
-        episode: { $ref: "#/components/schemas/Episode" }
+        episode: { type: string, pattern: "^ep-" }
+        root_branch: { type: string, pattern: "^br-" }
+        root_state: { type: string, pattern: "^st-" }
         branches:
           type: array
           items: { $ref: "#/components/schemas/Branch" }
-        step_count: { type: integer }
-        pending_effects: { type: integer }
-        budget_remaining: { $ref: "#/components/schemas/ResourceBudget" }
+        created_by: { type: string, pattern: "^pr-" }
+        remaining_budget: { $ref: "#/components/schemas/ResourceBudget" }
 
     StepExecuteRequest:
       type: object
-      required: [branch, actor, action]
+      required: [principal, branch, action]
       properties:
+        principal: { type: string, pattern: "^pr-" }
         branch: { type: string, pattern: "^br-" }
-        actor: { type: string, pattern: "^pr-" }
         action: { $ref: "#/components/schemas/Action" }
 
-    StepExecuteResponse:
+    StepResult:
       type: object
-      required: [step, observation, usage]
+      required: [step, state, observation]
       properties:
         step: { type: string, pattern: "^step-" }
+        state:
+          type: string
+          pattern: "^st-"
+          description: Branch head after the step (unchanged when denied).
         observation: { $ref: "#/components/schemas/Observation" }
-        produced_state: { type: string, pattern: "^st-" }
-        usage: { $ref: "#/components/schemas/ResourceBudget" }
 
-    TraceEntry:
+    StepExplanation:
       type: object
       required:
-        [step, episode, branch, actor, action, lease, observation, usage,
-         started_at, finished_at]
+        [step, episode, principal, policy_decisions, effects_proposed, events]
       properties:
         step: { type: string, pattern: "^step-" }
         episode: { type: string, pattern: "^ep-" }
-        branch: { type: string, pattern: "^br-" }
-        actor: { type: string, pattern: "^pr-" }
-        action: { $ref: "#/components/schemas/ActionKind" }
-        lease: { type: string, pattern: "^lease-" }
-        observation: { $ref: "#/components/schemas/Observation" }
-        produced_state: { type: string, pattern: "^st-" }
-        usage: { $ref: "#/components/schemas/ResourceBudget" }
-        started_at: { type: string, format: date-time }
-        finished_at: { type: string, format: date-time }
-
-    StepExplainResponse:
-      type: object
-      required: [entry, lease, constraint_checks, backend, backend_rationale]
-      properties:
-        entry: { $ref: "#/components/schemas/TraceEntry" }
-        lease: { $ref: "#/components/schemas/CapabilityLease" }
-        constraint_checks:
-          type: object
-          additionalProperties: { type: string }
-        backend: { type: string }
-        backend_rationale: { type: string }
-
-    StepRetryRequest:
-      type: object
-      properties:
-        branch: { type: string, pattern: "^br-" }
-        budget: { $ref: "#/components/schemas/ResourceBudget" }
-
-    BranchForkRequest:
-      type: object
-      properties:
-        from_state: { type: string, pattern: "^st-" }
-        count: { type: integer, minimum: 1, default: 1 }
-
-    BranchForkResponse:
-      type: object
-      required: [branches]
-      properties:
-        branches:
+        branch: { type: [string, "null"], pattern: "^br-" }
+        principal: { type: string, pattern: "^pr-" }
+        action:
+          description: The invoked action as recorded.
+        policy_decisions:
           type: array
-          items: { $ref: "#/components/schemas/Branch" }
+          items: {}
+        denial:
+          oneOf:
+            - $ref: "#/components/schemas/Denial"
+            - { type: "null" }
+        state: { type: [string, "null"], pattern: "^st-" }
+        state_delta: {}
+        observation: {}
+        effects_proposed:
+          type: array
+          items: {}
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/LedgerEvent" }
 
     BranchDiffRequest:
       type: object
       properties:
         since: { type: string, pattern: "^st-" }
 
-    BranchDiffResponse:
+    BranchMergeRequest:
       type: object
-      required: [delta, summary]
+      required: [source, actor]
       properties:
-        delta: { $ref: "#/components/schemas/StateDelta" }
-        summary: { type: string }
+        source:
+          type: string
+          pattern: "^br-"
+          description: The branch merged into the path branch.
+        actor: { type: string, pattern: "^pr-" }
 
     BranchCompareResponse:
       type: object
-      required: [common_ancestor, left_delta, right_delta, conflicting_paths]
+      required: [base, changed_in_a, changed_in_b]
       properties:
-        common_ancestor: { type: string, pattern: "^st-" }
-        left_delta: { $ref: "#/components/schemas/StateDelta" }
-        right_delta: { $ref: "#/components/schemas/StateDelta" }
-        conflicting_paths:
+        base:
+          type: string
+          pattern: "^st-"
+          description: Common ancestor state.
+        changed_in_a:
           type: array
           items: { type: string }
-
-    BranchMergeRequest:
-      type: object
-      required: [into]
-      properties:
-        into: { type: string, pattern: "^br-" }
-        require_clean: { type: boolean, default: false }
-
-    BranchMergeResponse:
-      type: object
-      description: Exactly one of merged / conflict is present.
-      properties:
-        merged: { $ref: "#/components/schemas/StateNode" }
-        conflict:
-          type: object
-          required: [paths]
-          properties:
-            paths:
-              type: array
-              items: { type: string }
-
-    BranchDiscardRequest:
-      type: object
-      properties:
-        reason: { type: string }
-
-    CapabilityDescribeResponse:
-      type: object
-      required: [leases]
-      properties:
-        leases:
+        changed_in_b:
           type: array
-          items: { $ref: "#/components/schemas/CapabilityLease" }
+          items: { type: string }
 
     CapabilityRequestRequest:
       type: object
@@ -1150,138 +1225,78 @@ components:
       properties:
         principal: { type: string, pattern: "^pr-" }
         operation: { type: string }
-        constraints:
-          type: object
-          additionalProperties: { $ref: "#/components/schemas/Constraint" }
-        uses: { type: integer, minimum: 1 }
-        expires_at: { type: string, format: date-time }
-        budget: { $ref: "#/components/schemas/ResourceBudget" }
-        bound_branch: { type: string, pattern: "^br-" }
-        justification: { type: string }
-
-    CapabilityRequestResponse:
-      type: object
-      description: Exactly one of lease / denial / pending_approval_id.
-      properties:
-        lease: { $ref: "#/components/schemas/CapabilityLease" }
-        denial: { $ref: "#/components/schemas/Denial" }
-        pending_approval_id: { type: string }
+        params:
+          description: Operation parameters evaluated against policy.
+        branch:
+          type: string
+          pattern: "^br-"
+          description: Bind the lease to this branch.
 
     CapabilityDelegateRequest:
       type: object
-      required: [parent_lease, child_principal, constraints, uses, expires_at, budget]
+      required: [delegator, parent_lease, delegatee, uses, expires_at]
       properties:
+        delegator: { type: string, pattern: "^pr-" }
         parent_lease: { type: string, pattern: "^lease-" }
-        child_principal: { type: string, pattern: "^pr-" }
+        delegatee: { type: string, pattern: "^pr-" }
         constraints:
           type: object
           additionalProperties: { $ref: "#/components/schemas/Constraint" }
-        uses: { type: integer, minimum: 1 }
+        uses: { type: integer, minimum: 0 }
         expires_at: { type: string, format: date-time }
         budget: { $ref: "#/components/schemas/ResourceBudget" }
 
-    CapabilityRevokeRequest:
-      type: object
-      required: [lease]
-      properties:
-        lease: { type: string, pattern: "^lease-" }
-        cascade: { type: boolean, default: false }
-        reason: { type: string }
-
-    CapabilityRevokeResponse:
-      type: object
-      required: [revoked_leases]
-      properties:
-        revoked_leases:
-          type: array
-          items: { type: string, pattern: "^lease-" }
-
-    EffectProposeRequest:
-      type: object
-      required: [contract, proposer, branch]
-      properties:
-        contract: { $ref: "#/components/schemas/EffectContract" }
-        proposer: { type: string, pattern: "^pr-" }
-        branch: { type: string, pattern: "^br-" }
-        step: { type: string }
-        lease: { type: string }
-
-    EffectProposeResponse:
-      type: object
-      description: Exactly one of effect / denial.
-      properties:
-        effect: { $ref: "#/components/schemas/PendingEffect" }
-        denial: { $ref: "#/components/schemas/Denial" }
-
-    EffectApproveRequest:
-      type: object
-      required: [approver, contract_hash]
-      properties:
-        approver: { type: string, pattern: "^pr-" }
-        contract_hash:
-          type: string
-          description: Approving an effect means approving exactly this hash.
-
-    EffectCommitRequest:
-      type: object
-      required: [expected_contract_hash]
-      properties:
-        expected_contract_hash: { type: string }
-
-    EffectCompensateRequest:
-      type: object
-      properties:
-        reason: { type: string }
-
-    EffectPrepareResponse:
-      type: object
-      required: [preview, observed_preconditions, effect]
-      properties:
-        preview: {}
-        observed_preconditions: {}
-        effect: { $ref: "#/components/schemas/PendingEffect" }
-
-    TraceQueryResponse:
-      type: object
-      required: [entries]
-      properties:
-        entries:
-          type: array
-          items: { $ref: "#/components/schemas/TraceEntry" }
-        next_page_token: { type: string }
-
     ReplayRequest:
       type: object
-      required: [episode]
+      description: Mode-specific fields; see replay.run.
       properties:
-        episode: { type: string, pattern: "^ep-" }
-        from_step: { type: string, pattern: "^step-" }
-        to_step: { type: string, pattern: "^step-" }
+        seq_from:
+          type: integer
+          description: audit — inclusive ledger sequence range start.
+        seq_to:
+          type: integer
+          description: audit — inclusive ledger sequence range end.
+        step:
+          type: string
+          pattern: "^step-"
+          description: sandbox — the recorded step to re-execute.
+        effect:
+          type: string
+          pattern: "^fx-"
+          description: live — the recorded effect whose contract is re-committed.
+        approver:
+          type: string
+          pattern: "^pr-"
+          description: live — principal approving the new commit.
 
-    ReplayDivergence:
+    ReplayAuditResponse:
       type: object
-      required: [step, layer, recorded_digest, replayed_digest, detail]
+      required: [mode, events]
+      properties:
+        mode: { const: audit }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/LedgerEvent" }
+
+    ReplaySandboxReport:
+      type: object
+      required: [step, rerun_exit_code, workspace_match, replay_class]
       properties:
         step: { type: string, pattern: "^step-" }
-        layer:
-          type: string
-          enum: [observation, state, effect_contract, effect_outcome]
-        recorded_digest: { type: string }
-        replayed_digest: { type: string }
-        detail: { type: string }
+        original_exit_code: { type: [integer, "null"] }
+        rerun_exit_code: { type: integer }
+        workspace_match:
+          type: boolean
+          description: >
+            Whether the re-executed workspace tree hashed identically to
+            the recorded post-step state.
+        replay_class: { $ref: "#/components/schemas/ReplayClass" }
 
-    ReplayReport:
+    LedgerEvent:
       type: object
-      required: [episode, mode, effective_class, steps_replayed, divergences, completed_at]
+      description: One event of the causal ledger (ak-causal-ledger).
+      required: [seq, kind]
       properties:
-        episode: { type: string, pattern: "^ep-" }
-        mode: { type: string, enum: [audit, sandbox, live] }
-        effective_class: { $ref: "#/components/schemas/ReplayClass" }
-        steps_replayed: { type: integer }
-        divergences:
-          type: array
-          items: { $ref: "#/components/schemas/ReplayDivergence" }
-        receipts:
-          type: array
-          items: { $ref: "#/components/schemas/Receipt" }
-        completed_at: { type: string, format: date-time }
+        seq: { type: integer }
+        kind: { type: string }
+      additionalProperties: true

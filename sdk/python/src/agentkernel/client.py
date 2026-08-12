@@ -1,8 +1,10 @@
-"""HTTP client for the AgentKernel Execution Protocol (JSON binding).
+"""HTTP client for the AgentKernel Execution Protocol (JSON binding),
+matching the routes implemented in ``kernel/api/src/http.rs``.
 
 Zero runtime dependencies: transport is stdlib ``urllib``. An alternative
 transport (e.g. httpx) can be injected via the ``transport`` argument —
-any callable ``(method, url, body_json_or_none, headers) -> (status, body_bytes)``.
+any callable
+``(method, url, body_json_or_none, headers, timeout) -> (status, body_bytes)``.
 """
 
 from __future__ import annotations
@@ -19,12 +21,10 @@ from .types import (
     ActionKind,
     Branch,
     BranchComparison,
-    BranchDiff,
     CapabilityLease,
     Denial,
-    EffectContract,
     EffectPreview,
-    Episode,
+    EpisodeDescription,
     Json,
     PendingEffect,
     Receipt,
@@ -32,21 +32,37 @@ from .types import (
     StepResult,
 )
 
-Transport = Callable[[str, str, Optional[Dict[str, Any]], Dict[str, str]], Tuple[int, bytes]]
+Transport = Callable[
+    [str, str, Optional[Dict[str, Any]], Dict[str, str], Optional[float]],
+    Tuple[int, bytes],
+]
 
 _RETRYABLE_STATUS = {502, 503, 504}
 
+#: Default per-request timeout in seconds. ``timeout=None`` (wait forever)
+#: must be opted into explicitly.
+DEFAULT_TIMEOUT = 30.0
+
 
 def _urllib_transport(
-    method: str, url: str, body: Optional[Dict[str, Any]], headers: Dict[str, str]
+    method: str,
+    url: str,
+    body: Optional[Dict[str, Any]],
+    headers: Dict[str, str],
+    timeout: Optional[float],
 ) -> Tuple[int, bytes]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        # The HTTPError doubles as the (error) response object; close it so
+        # the underlying socket is released (avoids ResourceWarning).
+        try:
+            return e.code, e.read()
+        finally:
+            e.close()
 
 
 class Kernel:
@@ -59,6 +75,7 @@ class Kernel:
         token: Optional[str] = None,
         max_retries: int = 3,
         backoff_base: float = 0.25,
+        timeout: Optional[float] = DEFAULT_TIMEOUT,
         transport: Optional[Transport] = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -66,6 +83,7 @@ class Kernel:
         self._token = token
         self._max_retries = max_retries
         self._backoff_base = backoff_base
+        self._timeout = timeout
         self._transport: Transport = transport or _urllib_transport
         self._sleep = sleep
 
@@ -90,7 +108,7 @@ class Kernel:
         last_exc: Optional[BaseException] = None
         for attempt in range(self._max_retries + 1):
             try:
-                status, raw = self._transport(method, url, body, headers)
+                status, raw = self._transport(method, url, body, headers, self._timeout)
             except (urllib.error.URLError, ConnectionError, OSError) as e:
                 last_exc = e
                 if attempt < self._max_retries:
@@ -112,6 +130,16 @@ class Kernel:
             payload = {"code": "OTHER", "message": raw.decode("utf-8", "replace")}
         if 200 <= status < 300:
             return payload
+        # A denied-but-recorded step is HTTP 403 carrying the recorded step,
+        # state and observation alongside the error envelope. Surface it as
+        # a normal result so callers see the "denied" observation.
+        if (
+            status == 403
+            and isinstance(payload, dict)
+            and "step" in payload
+            and "observation" in payload
+        ):
+            return payload
         denial = payload.get("denial") if isinstance(payload, dict) else None
         if denial is not None:
             raise DenialError(
@@ -123,182 +151,53 @@ class Kernel:
             status,
         )
 
+    # -- health -----------------------------------------------------------
+
+    def healthz(self) -> Dict[str, Json]:
+        return self._request("GET", "/healthz")
+
     # -- episodes ---------------------------------------------------------
 
     def create_episode(
         self,
-        title: str,
-        owner: str,
-        budget: Optional[ResourceBudget] = None,
-        workspace_root: Optional[str] = None,
+        principal: str,
+        *,
+        objective: str = "",
+        workspace: Optional[str] = None,
     ) -> "EpisodeHandle":
-        body: Dict[str, Any] = {
-            "title": title,
-            "owner": owner,
-            "budget": (budget or ResourceBudget.step_default()).to_wire(),
-        }
-        if workspace_root is not None:
-            body["workspace_root"] = workspace_root
+        """POST /v1/episodes — returns 201 {episode, branch, root_state}."""
+        body: Dict[str, Any] = {"principal": principal, "objective": objective}
+        if workspace is not None:
+            body["workspace"] = workspace
         resp = self._request("POST", "/v1/episodes", body)
-        episode = Episode.from_wire(resp["episode"])
-        main_branch = Branch.from_wire(resp["main_branch"])
-        return EpisodeHandle(self, episode, main_branch)
+        return EpisodeHandle(self, resp["episode"], principal, resp["branch"])
+
+    def describe_episode(self, episode_id: str) -> EpisodeDescription:
+        """GET /v1/episodes/{id}."""
+        return EpisodeDescription.from_wire(
+            self._request("GET", f"/v1/episodes/{episode_id}")
+        )
 
     def get_episode(self, episode_id: str) -> "EpisodeHandle":
-        resp = self._request("GET", f"/v1/episodes/{episode_id}")
-        episode = Episode.from_wire(resp["episode"])
-        branches = [Branch.from_wire(b) for b in resp.get("branches", [])]
-        main = next(
-            (b for b in branches if b.id == episode.main_branch),
-            branches[0] if branches else Branch.from_wire(
-                {"id": episode.main_branch, "episode": episode.id}
-            ),
-        )
-        return EpisodeHandle(self, episode, main)
+        desc = self.describe_episode(episode_id)
+        return EpisodeHandle(self, desc.episode, desc.created_by, desc.root_branch)
 
-    # -- capabilities -----------------------------------------------------
+    # -- steps ------------------------------------------------------------
 
-    def capabilities(self, principal: str, namespace: Optional[str] = None) -> List[CapabilityLease]:
-        resp = self._request(
-            "GET", f"/v1/capabilities/{principal}", query={"namespace": namespace}
-        )
-        return [CapabilityLease.from_wire(l) for l in resp.get("leases", [])]
-
-    def request_capability(
+    def execute_step(
         self,
         principal: str,
-        operation: str,
-        *,
-        constraints: Optional[Dict[str, Json]] = None,
-        uses: int = 1,
-        expires_at: Optional[str] = None,
-        budget: Optional[ResourceBudget] = None,
-        bound_branch: Optional[str] = None,
-        justification: str = "",
-    ) -> CapabilityLease:
-        body: Dict[str, Any] = {
-            "principal": principal,
-            "operation": operation,
-            "constraints": constraints or {},
-            "uses": uses,
-            "justification": justification,
-        }
-        if expires_at is not None:
-            body["expires_at"] = expires_at
-        if budget is not None:
-            body["budget"] = budget.to_wire()
-        if bound_branch is not None:
-            body["bound_branch"] = bound_branch
-        resp = self._request("POST", "/v1/capabilities/request", body)
-        if "denial" in resp:
-            raise DenialError(Denial.from_wire(resp["denial"]))
-        if "pending_approval_id" in resp:
-            raise KernelError(
-                "PENDING_APPROVAL",
-                f"awaiting human approval: {resp['pending_approval_id']}",
-                202,
-            )
-        return CapabilityLease.from_wire(resp["lease"])
-
-    def delegate_capability(
-        self,
-        parent_lease: str,
-        child_principal: str,
-        *,
-        constraints: Dict[str, Json],
-        uses: int,
-        expires_at: str,
-        budget: Optional[ResourceBudget] = None,
-    ) -> CapabilityLease:
-        resp = self._request(
-            "POST",
-            "/v1/capabilities/delegate",
-            {
-                "parent_lease": parent_lease,
-                "child_principal": child_principal,
-                "constraints": constraints,
-                "uses": uses,
-                "expires_at": expires_at,
-                "budget": (budget or ResourceBudget()).to_wire(),
-            },
-        )
-        return CapabilityLease.from_wire(resp)
-
-    def revoke_capability(
-        self, lease: str, *, cascade: bool = False, reason: str = ""
-    ) -> List[str]:
-        resp = self._request(
-            "POST",
-            "/v1/capabilities/revoke",
-            {"lease": lease, "cascade": cascade, "reason": reason},
-        )
-        return list(resp.get("revoked_leases", []))
-
-    # -- trace / replay / receipts ---------------------------------------
-
-    def trace_query(
-        self,
-        query: str,
-        *,
-        episode: Optional[str] = None,
-        limit: Optional[int] = None,
-        page_token: Optional[str] = None,
-    ) -> Dict[str, Json]:
-        return self._request(
-            "GET",
-            "/v1/trace/query",
-            query={"q": query, "episode": episode, "limit": limit, "page_token": page_token},
-        )
-
-    def replay(
-        self,
-        mode: str,
-        episode: str,
-        *,
-        from_step: Optional[str] = None,
-        to_step: Optional[str] = None,
-    ) -> Dict[str, Json]:
-        if mode not in ("audit", "sandbox", "live"):
-            raise ValueError(f"invalid replay mode: {mode!r}")
-        body: Dict[str, Any] = {"episode": episode}
-        if from_step is not None:
-            body["from_step"] = from_step
-        if to_step is not None:
-            body["to_step"] = to_step
-        return self._request("POST", f"/v1/replay/{mode}", body)
-
-    def get_receipt(self, receipt_id: str) -> Receipt:
-        return Receipt.from_wire(self._request("GET", f"/v1/receipts/{receipt_id}"))
-
-    def get_effect(self, effect_id: str) -> PendingEffect:
-        return PendingEffect.from_wire(self._request("GET", f"/v1/effects/{effect_id}"))
-
-
-class BranchHandle:
-    """A handle to one branch, bound to a client and an episode."""
-
-    def __init__(self, kernel: Kernel, episode: Episode, branch: Branch) -> None:
-        self._kernel = kernel
-        self.episode = episode
-        self.branch = branch
-
-    @property
-    def id(self) -> str:
-        return self.branch.id
-
-    def execute(
-        self,
+        branch: str,
         action: ActionKind,
         *,
-        actor: Optional[str] = None,
         lease: str = "",
         intent_hint: Optional[str] = None,
         budget: Optional[ResourceBudget] = None,
     ) -> StepResult:
-        """Execute one action on this branch.
+        """POST /v1/steps/execute.
 
-        A policy denial recorded as a step is returned as an Observation of
-        kind "denied"; a request rejected outright raises DenialError.
+        A denied step is still recorded (HTTP 403 with the recorded step
+        and a "denied" observation) and is returned as a StepResult.
         """
         action_body: Dict[str, Any] = {
             "kind": action.to_wire(),
@@ -307,105 +206,288 @@ class BranchHandle:
         }
         if intent_hint is not None:
             action_body["intent_hint"] = intent_hint
-        resp = self._kernel._request(
+        resp = self._request(
             "POST",
             "/v1/steps/execute",
-            {
-                "branch": self.branch.id,
-                "actor": actor or self.episode.owner,
-                "action": action_body,
-            },
+            {"principal": principal, "branch": branch, "action": action_body},
         )
         return StepResult.from_wire(resp)
 
-    def fork(self, count: int = 1, from_state: Optional[str] = None) -> List["BranchHandle"]:
-        body: Dict[str, Any] = {"count": count}
-        if from_state is not None:
-            body["from_state"] = from_state
-        resp = self._kernel._request("POST", f"/v1/branches/{self.branch.id}/fork", body)
-        return [
-            BranchHandle(self._kernel, self.episode, Branch.from_wire(b))
-            for b in resp.get("branches", [])
-        ]
+    def explain_step(self, step_id: str) -> Dict[str, Json]:
+        """GET /v1/steps/{id}/explain — the step's causal narrative."""
+        return self._request("GET", f"/v1/steps/{step_id}/explain")
 
-    def diff(self, since: Optional[str] = None) -> BranchDiff:
+    def retry_step(self, step_id: str) -> StepResult:
+        """POST /v1/steps/{id}/retry (no request body)."""
+        return StepResult.from_wire(self._request("POST", f"/v1/steps/{step_id}/retry"))
+
+    # -- branches ---------------------------------------------------------
+
+    def fork_branch(self, branch_id: str) -> Branch:
+        """POST /v1/branches/{id}/fork — forks one sibling branch."""
+        return Branch.from_wire(self._request("POST", f"/v1/branches/{branch_id}/fork"))
+
+    def diff_branch(
+        self, branch_id: str, since: Optional[str] = None
+    ) -> List[Dict[str, Json]]:
+        """POST /v1/branches/{id}/diff — file changes since a state."""
         body = {"since": since} if since is not None else {}
-        resp = self._kernel._request("POST", f"/v1/branches/{self.branch.id}/diff", body)
-        return BranchDiff.from_wire(resp)
+        return self._request("POST", f"/v1/branches/{branch_id}/diff", body)
+
+    def merge_branch(self, branch_id: str, source: str, actor: str) -> Dict[str, Json]:
+        """POST /v1/branches/{id}/merge — merge `source` into `branch_id`;
+        returns the merged StateNode."""
+        return self._request(
+            "POST",
+            f"/v1/branches/{branch_id}/merge",
+            {"source": source, "actor": actor},
+        )
+
+    def discard_branch(self, branch_id: str) -> Dict[str, Json]:
+        """POST /v1/branches/{id}/discard — returns {"discarded": id}."""
+        return self._request("POST", f"/v1/branches/{branch_id}/discard")
+
+    def compare_branches(self, a: str, b: str) -> BranchComparison:
+        """GET /v1/branches/{a}/compare/{b}."""
+        return BranchComparison.from_wire(
+            self._request("GET", f"/v1/branches/{a}/compare/{b}")
+        )
+
+    # -- capabilities -----------------------------------------------------
+
+    def capabilities(self, principal: str) -> List[CapabilityLease]:
+        """GET /v1/capabilities/{principal} — active leases."""
+        resp = self._request("GET", f"/v1/capabilities/{principal}")
+        return [CapabilityLease.from_wire(l) for l in resp]
+
+    def request_capability(
+        self,
+        principal: str,
+        operation: str,
+        *,
+        params: Optional[Json] = None,
+        branch: Optional[str] = None,
+    ) -> CapabilityLease:
+        """POST /v1/capabilities/request — 201 with the granted lease;
+        policy denials raise DenialError."""
+        body: Dict[str, Any] = {
+            "principal": principal,
+            "operation": operation,
+            "params": params if params is not None else {},
+        }
+        if branch is not None:
+            body["branch"] = branch
+        resp = self._request("POST", "/v1/capabilities/request", body)
+        return CapabilityLease.from_wire(resp)
+
+    def delegate_capability(
+        self,
+        delegator: str,
+        parent_lease: str,
+        delegatee: str,
+        *,
+        uses: int,
+        expires_at: str,
+        constraints: Optional[Dict[str, Json]] = None,
+        budget: Optional[ResourceBudget] = None,
+    ) -> CapabilityLease:
+        """POST /v1/capabilities/delegate — attenuate a lease for a
+        delegatee. Never widens."""
+        body: Dict[str, Any] = {
+            "delegator": delegator,
+            "parent_lease": parent_lease,
+            "delegatee": delegatee,
+            "constraints": constraints or {},
+            "uses": uses,
+            "expires_at": expires_at,
+        }
+        if budget is not None:
+            body["budget"] = budget.to_wire()
+        resp = self._request("POST", "/v1/capabilities/delegate", body)
+        return CapabilityLease.from_wire(resp)
+
+    def revoke_capability(self, lease: str) -> List[str]:
+        """POST /v1/capabilities/revoke — revokes the lease and its whole
+        delegation subtree; returns every revoked lease id."""
+        resp = self._request("POST", "/v1/capabilities/revoke", {"lease": lease})
+        return list(resp.get("revoked", []))
+
+    # -- effects ----------------------------------------------------------
+
+    def list_effects(self, phase: Optional[str] = None) -> List[PendingEffect]:
+        """GET /v1/effects?phase=..."""
+        resp = self._request("GET", "/v1/effects", query={"phase": phase})
+        return [PendingEffect.from_wire(fx) for fx in resp]
+
+    def get_effect(self, effect_id: str) -> PendingEffect:
+        """GET /v1/effects/{id}."""
+        return PendingEffect.from_wire(self._request("GET", f"/v1/effects/{effect_id}"))
+
+    def effect_handle(self, effect: PendingEffect) -> "EffectHandle":
+        return EffectHandle(self, effect)
+
+    def prepare_effect(self, effect_id: str) -> EffectPreview:
+        """POST /v1/effects/{id}/prepare — dry run, no side effects."""
+        return EffectPreview.from_wire(
+            self._request("POST", f"/v1/effects/{effect_id}/prepare")
+        )
+
+    def approve_effect(self, effect_id: str, approver: str) -> Dict[str, Json]:
+        """POST /v1/effects/{id}/approve — returns {"approved": id}."""
+        return self._request(
+            "POST", f"/v1/effects/{effect_id}/approve", {"approver": approver}
+        )
+
+    def commit_effect(self, effect_id: str) -> Receipt:
+        """POST /v1/effects/{id}/commit (no request body)."""
+        return Receipt.from_wire(self._request("POST", f"/v1/effects/{effect_id}/commit"))
+
+    def compensate_effect(self, effect_id: str) -> Receipt:
+        """POST /v1/effects/{id}/compensate (no request body)."""
+        return Receipt.from_wire(
+            self._request("POST", f"/v1/effects/{effect_id}/compensate")
+        )
+
+    def recover_effects(self) -> Dict[str, Json]:
+        """POST /v1/effects/recover — resolve in-doubt effects."""
+        return self._request("POST", "/v1/effects/recover")
+
+    def resolve_effect(self, effect_id: str, resolution: Dict[str, Json]) -> Dict[str, Json]:
+        """POST /v1/effects/{id}/resolve — operator verdict on an in-doubt
+        effect: {"outcome": "committed", "response": {...}} or
+        {"outcome": "aborted", "reason": "..."}."""
+        return self._request("POST", f"/v1/effects/{effect_id}/resolve", resolution)
+
+    # -- trace / replay / receipts ---------------------------------------
+
+    def trace_query(
+        self,
+        *,
+        episode: Optional[str] = None,
+        branch: Optional[str] = None,
+        step: Optional[str] = None,
+        principal: Optional[str] = None,
+        kind: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Json]]:
+        """GET /v1/trace/query — raw causal ledger events."""
+        return self._request(
+            "GET",
+            "/v1/trace/query",
+            query={
+                "episode": episode,
+                "branch": branch,
+                "step": step,
+                "principal": principal,
+                "kind": kind,
+                "limit": limit,
+            },
+        )
+
+    def replay_audit(
+        self, *, seq_from: Optional[int] = None, seq_to: Optional[int] = None
+    ) -> Dict[str, Json]:
+        """POST /v1/replay/audit — returns {"mode": "audit", "events": [...]}."""
+        body: Dict[str, Any] = {}
+        if seq_from is not None:
+            body["seq_from"] = seq_from
+        if seq_to is not None:
+            body["seq_to"] = seq_to
+        return self._request("POST", "/v1/replay/audit", body)
+
+    def replay_sandbox(self, step: str) -> Dict[str, Json]:
+        """POST /v1/replay/sandbox — re-execute one recorded step."""
+        return self._request("POST", "/v1/replay/sandbox", {"step": step})
+
+    def replay_live(self, effect: str, approver: str) -> Receipt:
+        """POST /v1/replay/live — re-commit one recorded effect contract."""
+        return Receipt.from_wire(
+            self._request(
+                "POST", "/v1/replay/live", {"effect": effect, "approver": approver}
+            )
+        )
+
+    def get_receipt(self, receipt_id: str) -> Receipt:
+        """GET /v1/receipts/{id}."""
+        return Receipt.from_wire(self._request("GET", f"/v1/receipts/{receipt_id}"))
+
+
+class BranchHandle:
+    """A handle to one branch, bound to a client, episode and principal."""
+
+    def __init__(self, kernel: Kernel, episode: str, principal: str, branch: str) -> None:
+        self._kernel = kernel
+        self.episode = episode
+        self.principal = principal
+        self.branch = branch
+
+    @property
+    def id(self) -> str:
+        return self.branch
+
+    def execute(
+        self,
+        action: ActionKind,
+        *,
+        principal: Optional[str] = None,
+        lease: str = "",
+        intent_hint: Optional[str] = None,
+        budget: Optional[ResourceBudget] = None,
+    ) -> StepResult:
+        """Execute one action on this branch. A denied step is still
+        recorded and returned as an Observation of kind "denied"."""
+        return self._kernel.execute_step(
+            principal or self.principal,
+            self.branch,
+            action,
+            lease=lease,
+            intent_hint=intent_hint,
+            budget=budget,
+        )
+
+    def fork(self, count: int = 1) -> List["BranchHandle"]:
+        """Fork `count` sibling branches (one kernel call each)."""
+        out = []
+        for _ in range(count):
+            b = self._kernel.fork_branch(self.branch)
+            out.append(BranchHandle(self._kernel, self.episode, self.principal, b.id))
+        return out
+
+    def diff(self, since: Optional[str] = None) -> List[Dict[str, Json]]:
+        return self._kernel.diff_branch(self.branch, since)
 
     def compare(self, other: Union["BranchHandle", str]) -> BranchComparison:
         other_id = other.id if isinstance(other, BranchHandle) else other
-        resp = self._kernel._request(
-            "GET", f"/v1/branches/{self.branch.id}/compare/{other_id}"
-        )
-        return BranchComparison.from_wire(resp)
+        return self._kernel.compare_branches(self.branch, other_id)
 
     def merge(
-        self, into: Union["BranchHandle", str], *, require_clean: bool = False
+        self, source: Union["BranchHandle", str], *, actor: Optional[str] = None
     ) -> Dict[str, Json]:
-        into_id = into.id if isinstance(into, BranchHandle) else into
-        return self._kernel._request(
-            "POST",
-            f"/v1/branches/{self.branch.id}/merge",
-            {"into": into_id, "require_clean": require_clean},
-        )
+        """Merge `source` into this branch; returns the merged StateNode."""
+        source_id = source.id if isinstance(source, BranchHandle) else source
+        return self._kernel.merge_branch(self.branch, source_id, actor or self.principal)
 
-    def discard(self, reason: str = "") -> Branch:
-        resp = self._kernel._request(
-            "POST", f"/v1/branches/{self.branch.id}/discard", {"reason": reason}
-        )
-        self.branch = Branch.from_wire(resp)
-        return self.branch
-
-    def propose_effect(
-        self,
-        contract: EffectContract,
-        *,
-        proposer: Optional[str] = None,
-        step: str = "",
-        lease: str = "",
-    ) -> "EffectHandle":
-        resp = self._kernel._request(
-            "POST",
-            "/v1/effects",
-            {
-                "contract": contract.to_wire(),
-                "proposer": proposer or self.episode.owner,
-                "branch": self.branch.id,
-                "step": step,
-                "lease": lease,
-            },
-        )
-        if "denial" in resp:
-            raise DenialError(Denial.from_wire(resp["denial"]))
-        effect = PendingEffect.from_wire(resp.get("effect", resp))
-        return EffectHandle(self._kernel, effect)
+    def discard(self) -> Dict[str, Json]:
+        return self._kernel.discard_branch(self.branch)
 
 
 class EpisodeHandle(BranchHandle):
     """An episode handle. Acts on the main branch by default:
     ``obs = ep.execute(Shell("pytest")).observation``."""
 
-    def __init__(self, kernel: Kernel, episode: Episode, main_branch: Branch) -> None:
-        super().__init__(kernel, episode, main_branch)
-
     @property
     def episode_id(self) -> str:
-        return self.episode.id
+        return self.episode
 
-    def describe(self) -> Dict[str, Json]:
-        return self._kernel._request("GET", f"/v1/episodes/{self.episode.id}")
+    def describe(self) -> EpisodeDescription:
+        return self._kernel.describe_episode(self.episode)
 
 
 class EffectHandle:
-    """Context-managed pending effect:
+    """A pending effect: prepare -> approve -> commit -> (compensate).
 
-    with ep.propose_effect(contract) as fx:
-        fx.prepare()
-        fx.commit()
-
-    Leaving the block without a successful commit aborts the effect
-    (invariant: no irreversible effect before commit).
+    Effects are proposed by executing a connector_op action; the resulting
+    "effect_pending" observation names the effect id.
     """
 
     def __init__(self, kernel: Kernel, effect: PendingEffect) -> None:
@@ -421,49 +503,19 @@ class EffectHandle:
     def contract_hash(self) -> str:
         return self.effect.contract_hash
 
-    def prepare(self) -> EffectPreview:
-        resp = self._kernel._request("POST", f"/v1/effects/{self.effect.id}/prepare")
-        preview = EffectPreview.from_wire(resp)
-        self.effect = preview.effect
-        return preview
-
-    def approve(self, approver: str, contract_hash: Optional[str] = None) -> PendingEffect:
-        resp = self._kernel._request(
-            "POST",
-            f"/v1/effects/{self.effect.id}/approve",
-            {"approver": approver, "contract_hash": contract_hash or self.effect.contract_hash},
-        )
-        self.effect = PendingEffect.from_wire(resp)
+    def refresh(self) -> PendingEffect:
+        self.effect = self._kernel.get_effect(self.effect.id)
         return self.effect
 
-    def commit(self, expected_contract_hash: Optional[str] = None) -> Receipt:
-        resp = self._kernel._request(
-            "POST",
-            f"/v1/effects/{self.effect.id}/commit",
-            {"expected_contract_hash": expected_contract_hash or self.effect.contract_hash},
-        )
-        if "denial" in resp:
-            raise DenialError(Denial.from_wire(resp["denial"]))
-        self.receipt = Receipt.from_wire(resp.get("receipt", resp))
+    def prepare(self) -> EffectPreview:
+        return self._kernel.prepare_effect(self.effect.id)
+
+    def approve(self, approver: str) -> Dict[str, Json]:
+        return self._kernel.approve_effect(self.effect.id, approver)
+
+    def commit(self) -> Receipt:
+        self.receipt = self._kernel.commit_effect(self.effect.id)
         return self.receipt
 
-    def compensate(self, reason: str = "") -> Receipt:
-        resp = self._kernel._request(
-            "POST", f"/v1/effects/{self.effect.id}/compensate", {"reason": reason}
-        )
-        return Receipt.from_wire(resp)
-
-    def abort(self, reason: str = "abandoned by client") -> None:
-        try:
-            self._kernel._request(
-                "POST", f"/v1/effects/{self.effect.id}/abort", {"reason": reason}
-            )
-        except KernelError:
-            pass  # best-effort; the kernel garbage-collects stale effects
-
-    def __enter__(self) -> "EffectHandle":
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        if self.receipt is None:
-            self.abort()
+    def compensate(self) -> Receipt:
+        return self._kernel.compensate_effect(self.effect.id)

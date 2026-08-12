@@ -65,7 +65,9 @@ pub struct BackendRouter {
 
 impl BackendRouter {
     pub fn new() -> Self {
-        Self { backends: Vec::new() }
+        Self {
+            backends: Vec::new(),
+        }
     }
 
     /// Register a backend. Registration order does not affect routing.
@@ -80,7 +82,10 @@ impl BackendRouter {
 
     /// Look up a registered backend by profile name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Backend>> {
-        self.backends.iter().find(|b| b.profile().name == name).cloned()
+        self.backends
+            .iter()
+            .find(|b| b.profile().name == name)
+            .cloned()
     }
 
     /// Cost model: cold start plus a per-strength overhead term.
@@ -107,7 +112,9 @@ impl BackendRouter {
             .map(|b| (b.profile(), b))
             .filter(|(p, _)| Self::satisfies(p, risk, needs))
             .min_by(|(a, _), (b, _)| {
-                Self::cost(a).cmp(&Self::cost(b)).then_with(|| a.name.cmp(&b.name))
+                Self::cost(a)
+                    .cmp(&Self::cost(b))
+                    .then_with(|| a.name.cmp(&b.name))
             })
             .map(|(_, b)| Arc::clone(b))
             .ok_or_else(|| KernelError::BackendUnavailable {
@@ -117,7 +124,10 @@ impl BackendRouter {
                      (registered: {:?})",
                     risk.isolation_floor(),
                     needs,
-                    self.backends.iter().map(|b| b.profile().name).collect::<Vec<_>>()
+                    self.backends
+                        .iter()
+                        .map(|b| b.profile().name)
+                        .collect::<Vec<_>>()
                 ),
             })
     }
@@ -177,20 +187,38 @@ mod tests {
     #[test]
     fn low_risk_routes_to_cheapest_local() {
         let r = router();
-        assert_eq!(r.route(RiskTier::Low, &Needs::default()).unwrap().profile().name, "local");
+        assert_eq!(
+            r.route(RiskTier::Low, &Needs::default())
+                .unwrap()
+                .profile()
+                .name,
+            "local"
+        );
     }
 
     #[test]
     fn medium_risk_respects_the_floor() {
         let r = router();
-        assert_eq!(r.route(RiskTier::Medium, &Needs::default()).unwrap().profile().name, "gvisor");
+        assert_eq!(
+            r.route(RiskTier::Medium, &Needs::default())
+                .unwrap()
+                .profile()
+                .name,
+            "gvisor"
+        );
     }
 
     #[test]
     fn high_risk_picks_cheapest_above_85() {
         // forkd: 15 + 900 = 915; cube: 250 + 900 = 1150.
         let r = router();
-        assert_eq!(r.route(RiskTier::High, &Needs::default()).unwrap().profile().name, "forkd");
+        assert_eq!(
+            r.route(RiskTier::High, &Needs::default())
+                .unwrap()
+                .profile()
+                .name,
+            "forkd"
+        );
     }
 
     #[test]
@@ -201,13 +229,19 @@ mod tests {
             replay_at_least: Some(ReplayClass::ProcessAndFilesystem),
             ..Needs::default()
         };
-        assert_eq!(r.route(RiskTier::Low, &needs).unwrap().profile().name, "forkd");
+        assert_eq!(
+            r.route(RiskTier::Low, &needs).unwrap().profile().name,
+            "forkd"
+        );
     }
 
     #[test]
     fn no_backend_satisfies_maps_to_backend_unavailable() {
         let r = router();
-        let needs = Needs { gui: true, ..Needs::default() };
+        let needs = Needs {
+            gui: true,
+            ..Needs::default()
+        };
         match r.route(RiskTier::Low, &needs) {
             Err(KernelError::BackendUnavailable { .. }) => {}
             Err(other) => panic!("expected BackendUnavailable, got {other:?}"),
@@ -220,6 +254,12 @@ mod tests {
         let mut r = BackendRouter::new();
         r.register(Arc::new(Fake(profile("bbb", 50, 100, false))));
         r.register(Arc::new(Fake(profile("aaa", 50, 100, false))));
-        assert_eq!(r.route(RiskTier::Low, &Needs::default()).unwrap().profile().name, "aaa");
+        assert_eq!(
+            r.route(RiskTier::Low, &Needs::default())
+                .unwrap()
+                .profile()
+                .name,
+            "aaa"
+        );
     }
 }

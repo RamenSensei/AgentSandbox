@@ -58,7 +58,10 @@ fn guard_matrix_refuses_ssrf_targets() {
 #[test]
 fn classification_is_pure_only_on_allowlist() {
     let c = connector(&["docs.rs", "*.wikipedia.org"]);
-    assert_eq!(c.classify("https://docs.rs/serde").unwrap(), EffectClass::Pure);
+    assert_eq!(
+        c.classify("https://docs.rs/serde").unwrap(),
+        EffectClass::Pure
+    );
     assert_eq!(
         c.classify("https://en.wikipedia.org/wiki/Rust").unwrap(),
         EffectClass::Pure
@@ -77,11 +80,22 @@ fn classification_is_pure_only_on_allowlist() {
 #[test]
 fn canonicalize_validates_shape_and_guards() {
     let c = connector(&["example.com"]);
-    assert!(c.canonicalize(OP_HTTP_GET, &json!({"url": "https://example.com/a"})).is_ok());
-    assert!(c.canonicalize(OP_HTTP_GET, &json!({"url": "http://169.254.169.254/"})).is_err());
-    assert!(c.canonicalize(OP_HTTP_GET, &json!({"url": "https://example.com", "method": "POST"})).is_err());
+    assert!(c
+        .canonicalize(OP_HTTP_GET, &json!({"url": "https://example.com/a"}))
+        .is_ok());
+    assert!(c
+        .canonicalize(OP_HTTP_GET, &json!({"url": "http://169.254.169.254/"}))
+        .is_err());
+    assert!(c
+        .canonicalize(
+            OP_HTTP_GET,
+            &json!({"url": "https://example.com", "method": "POST"})
+        )
+        .is_err());
     assert!(c.canonicalize(OP_HTTP_GET, &json!({})).is_err());
-    assert!(c.canonicalize("http.post", &json!({"url": "https://example.com"})).is_err());
+    assert!(c
+        .canonicalize("http.post", &json!({"url": "https://example.com"}))
+        .is_err());
 }
 
 fn test_config(allowlist: Vec<String>, max_bytes: usize) -> HttpConnectorConfig {
@@ -129,7 +143,10 @@ async fn commit_fetches_and_caps_size() {
     let host = Url::parse(&base).unwrap().host_str().unwrap().to_string();
     let c = HttpConnector::new(test_config(vec![host], 1024)).unwrap();
 
-    let ok = c.commit(&contract(&format!("{base}/ok"), EffectClass::Pure)).await.unwrap();
+    let ok = c
+        .commit(&contract(&format!("{base}/ok"), EffectClass::Pure))
+        .await
+        .unwrap();
     assert_eq!(ok.response["status"], 200);
     assert_eq!(ok.response["body"], "hello world");
 
@@ -147,7 +164,10 @@ async fn redirects_are_rechecked_per_hop() {
     let c = HttpConnector::new(test_config(vec![host], 65536)).unwrap();
 
     // On-allowlist redirect is followed.
-    let ok = c.commit(&contract(&format!("{base}/hop"), EffectClass::Pure)).await.unwrap();
+    let ok = c
+        .commit(&contract(&format!("{base}/hop"), EffectClass::Pure))
+        .await
+        .unwrap();
     assert_eq!(ok.response["body"], "hello world");
 
     // Redirect that leaves the allowlist is refused.
@@ -175,10 +195,16 @@ async fn pure_claim_off_allowlist_is_refused() {
         .commit(&contract(&format!("{base}/ok"), EffectClass::Pure))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("not on the read-safe allowlist"), "{err}");
+    assert!(
+        err.to_string().contains("not on the read-safe allowlist"),
+        "{err}"
+    );
     // As OpaqueExternal it is allowed through (guards permitting).
     let ok = c
-        .commit(&contract(&format!("{base}/ok"), EffectClass::OpaqueExternal))
+        .commit(&contract(
+            &format!("{base}/ok"),
+            EffectClass::OpaqueExternal,
+        ))
         .await
         .unwrap();
     assert_eq!(ok.response["body"], "hello world");
@@ -187,10 +213,16 @@ async fn pure_claim_off_allowlist_is_refused() {
 #[tokio::test]
 async fn prepare_is_a_pure_dry_run() {
     let c = connector(&["docs.rs"]);
-    let p = c.prepare(&contract("https://docs.rs/serde", EffectClass::Pure)).await.unwrap();
+    let p = c
+        .prepare(&contract("https://docs.rs/serde", EffectClass::Pure))
+        .await
+        .unwrap();
     assert_eq!(p.preview["classified_as"], "pure (allowlisted)");
     let p = c
-        .prepare(&contract("https://other.example/x", EffectClass::OpaqueExternal))
+        .prepare(&contract(
+            "https://other.example/x",
+            EffectClass::OpaqueExternal,
+        ))
         .await
         .unwrap();
     assert_eq!(p.preview["classified_as"], "opaque_external");

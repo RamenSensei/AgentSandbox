@@ -71,7 +71,10 @@ impl Cas {
         let path = self.blob_path(hash)?;
         fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                KernelError::NotFound { kind: "blob", id: hash.to_string() }
+                KernelError::NotFound {
+                    kind: "blob",
+                    id: hash.to_string(),
+                }
             } else {
                 KernelError::Io(e)
             }

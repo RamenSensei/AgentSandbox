@@ -8,7 +8,9 @@ use ak_core::capability::{CapabilityLease, Constraint, LeaseCheckFailure, Operat
 use ak_core::denial::{Denial, DenialCode};
 use ak_core::effect::{EffectClass, EffectContract, PendingEffect, Receipt};
 use ak_core::hash::ContentHash;
-use ak_core::ids::{BranchId, EffectId, EpisodeId, LeaseId, PrincipalId, ReceiptId, StateId, StepId};
+use ak_core::ids::{
+    BranchId, EffectId, EpisodeId, LeaseId, PrincipalId, ReceiptId, StateId, StepId,
+};
 use ak_core::observation::{distill_output, Observation};
 use ak_core::replay::ReplayClass;
 use ak_core::state::{FileChange, StateDelta, StateNode};
@@ -168,7 +170,9 @@ pub struct Kernel {
 
 impl std::fmt::Debug for Kernel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Kernel").field("data_dir", &self.config.data_dir).finish_non_exhaustive()
+        f.debug_struct("Kernel")
+            .field("data_dir", &self.config.data_dir)
+            .finish_non_exhaustive()
     }
 }
 
@@ -205,10 +209,13 @@ impl Kernel {
     #[instrument(skip(config), fields(data_dir = %config.data_dir.display()))]
     pub fn open(config: KernelConfig) -> KernelResult<Self> {
         std::fs::create_dir_all(&config.data_dir)?;
-        let dag = StateDag::open(&config.data_dir.join("dag.db"), &config.data_dir.join("cas"))?;
+        let dag = StateDag::open(
+            &config.data_dir.join("dag.db"),
+            &config.data_dir.join("cas"),
+        )?;
         let ledger = Arc::new(Ledger::open(&config.data_dir.join("ledger.db"))?);
-        let identity_db = IdentityDb::open(config.data_dir.join("identity.db"))
-            .map_err(KernelError::from)?;
+        let identity_db =
+            IdentityDb::open(config.data_dir.join("identity.db")).map_err(KernelError::from)?;
         let delegation = DelegationService::new(identity_db);
         let keypair = Arc::new(
             KernelKeypair::load_or_generate(config.data_dir.join("receipt.key"))
@@ -292,7 +299,9 @@ impl Kernel {
     }
 
     fn policy_read(&self) -> KernelResult<std::sync::RwLockReadGuard<'_, PolicyEngine>> {
-        self.policy.read().map_err(|_| KernelError::Storage("policy lock poisoned".into()))
+        self.policy
+            .read()
+            .map_err(|_| KernelError::Storage("policy lock poisoned".into()))
     }
 
     /// The current policy epoch.
@@ -303,14 +312,18 @@ impl Kernel {
     /// Run `f` with mutable access to the policy engine (epoch bumps are the
     /// document's responsibility).
     pub fn with_policy_mut<R>(&self, f: impl FnOnce(&mut PolicyEngine) -> R) -> KernelResult<R> {
-        let mut guard =
-            self.policy.write().map_err(|_| KernelError::Storage("policy lock poisoned".into()))?;
+        let mut guard = self
+            .policy
+            .write()
+            .map_err(|_| KernelError::Storage("policy lock poisoned".into()))?;
         Ok(f(&mut guard))
     }
 
     /// Register a principal in the identity registry.
     pub fn register_principal(&self, principal: &Principal) -> KernelResult<()> {
-        self.registry().register(principal).map_err(KernelError::from)
+        self.registry()
+            .register(principal)
+            .map_err(KernelError::from)
     }
 
     /// Register a connector with the effect broker, recording its declared
@@ -330,7 +343,10 @@ impl Kernel {
     /// The declared effect class for a connector operation; undeclared
     /// operations classify as [`EffectClass::OpaqueExternal`].
     pub fn effect_class_of(&self, operation: &str) -> KernelResult<EffectClass> {
-        Ok(lock(&self.op_classes)?.get(operation).copied().unwrap_or(EffectClass::OpaqueExternal))
+        Ok(lock(&self.op_classes)?
+            .get(operation)
+            .copied()
+            .unwrap_or(EffectClass::OpaqueExternal))
     }
 
     // ------------------------------------------------------------- episodes
@@ -346,7 +362,9 @@ impl Kernel {
         objective: &str,
     ) -> KernelResult<EpisodeHandle> {
         let ws = workspace.or(self.config.workspace_root.as_deref());
-        let handle = self.dag.create_episode(actor, ws, ReplayClass::FilesystemOnly)?;
+        let handle = self
+            .dag
+            .create_episode(actor, ws, ReplayClass::FilesystemOnly)?;
         // Materialize the root workspace for the initial branch.
         let dir = self.backend.workspace_for(&handle.branch)?;
         self.dag.materialize(&handle.root.id, &dir)?;
@@ -363,17 +381,29 @@ impl Kernel {
             },
         );
         self.ledger
-            .writer(handle.episode.clone(), Some(handle.branch.clone()), None, actor.clone())
-            .record(EventKind::Objective, serde_json::json!({ "objective": objective }))?;
+            .writer(
+                handle.episode.clone(),
+                Some(handle.branch.clone()),
+                None,
+                actor.clone(),
+            )
+            .record(
+                EventKind::Objective,
+                serde_json::json!({ "objective": objective }),
+            )?;
         Ok(handle)
     }
 
     /// Describe an episode: branches and remaining budget.
     pub async fn describe_episode(&self, episode: &EpisodeId) -> KernelResult<EpisodeDescription> {
-        let info = lock(&self.episodes)?
-            .get(episode)
-            .cloned()
-            .ok_or_else(|| KernelError::NotFound { kind: "episode", id: episode.to_string() })?;
+        let info =
+            lock(&self.episodes)?
+                .get(episode)
+                .cloned()
+                .ok_or_else(|| KernelError::NotFound {
+                    kind: "episode",
+                    id: episode.to_string(),
+                })?;
         let branches = info
             .branches
             .iter()
@@ -410,7 +440,11 @@ impl Kernel {
 
     /// File-level diff of a branch head since `since` (defaults to the
     /// branch base state).
-    pub fn branch_diff(&self, branch: &BranchId, since: Option<&StateId>) -> KernelResult<Vec<FileChange>> {
+    pub fn branch_diff(
+        &self,
+        branch: &BranchId,
+        since: Option<&StateId>,
+    ) -> KernelResult<Vec<FileChange>> {
         let b = self.dag.get_branch(branch)?;
         let since = since.cloned().unwrap_or(b.base_state);
         self.dag.diff(&since, &b.head)
@@ -458,7 +492,9 @@ impl Kernel {
         branch: Option<&BranchId>,
     ) -> KernelResult<CapabilityLease> {
         let who = self.registry().get(principal).map_err(KernelError::from)?;
-        let decision = self.policy_read()?.evaluate(&who, operation, params, branch, Utc::now());
+        let decision = self
+            .policy_read()?
+            .evaluate(&who, operation, params, branch, Utc::now());
         match decision {
             Decision::Allow { rule_id, grant } => {
                 self.leases().issue(&grant.lease).map_err(KernelError::from)?;
@@ -509,13 +545,24 @@ impl Kernel {
         budget: ResourceBudget,
     ) -> KernelResult<CapabilityLease> {
         self.delegation
-            .delegate(delegator, parent_lease, delegatee, constraints, uses, expires_at, budget, Utc::now())
+            .delegate(
+                delegator,
+                parent_lease,
+                delegatee,
+                constraints,
+                uses,
+                expires_at,
+                budget,
+                Utc::now(),
+            )
             .map_err(KernelError::from)
     }
 
     /// Revoke a lease and everything transitively attenuated from it.
     pub fn revoke(&self, lease: &LeaseId) -> KernelResult<Vec<LeaseId>> {
-        self.leases().revoke_cascading(lease).map_err(KernelError::from)
+        self.leases()
+            .revoke_cascading(lease)
+            .map_err(KernelError::from)
     }
 
     // ------------------------------------------------------------ execution
@@ -540,8 +587,12 @@ impl Kernel {
         let step = StepId::generate();
         let b = self.dag.get_branch(branch)?;
         let who = self.registry().get(principal).map_err(KernelError::from)?;
-        let writer =
-            self.ledger.writer(b.episode.clone(), Some(branch.clone()), Some(step.clone()), principal.clone());
+        let writer = self.ledger.writer(
+            b.episode.clone(),
+            Some(branch.clone()),
+            Some(step.clone()),
+            principal.clone(),
+        );
         let now = Utc::now();
         let operation = action.kind.required_operation();
         let params = action.kind.params();
@@ -587,7 +638,8 @@ impl Kernel {
         // ---- deterministic policy evaluation ---------------------------
         let confinement = {
             let decision =
-                self.policy_read()?.evaluate(&who, &operation, &params, Some(branch), now);
+                self.policy_read()?
+                    .evaluate(&who, &operation, &params, Some(branch), now);
             match decision {
                 Decision::Allow { grant, .. } => grant.confinement,
                 Decision::RequireApproval { rule_id, .. } => {
@@ -617,7 +669,11 @@ impl Kernel {
         }
 
         match &action.kind {
-            ActionKind::ConnectorOp { connector, operation: op, params: op_params } => {
+            ActionKind::ConnectorOp {
+                connector,
+                operation: op,
+                params: op_params,
+            } => {
                 self.propose_connector_op(
                     &writer, &b, branch, step, principal, &action, connector, op, op_params,
                 )
@@ -679,7 +735,11 @@ impl Kernel {
             serde_json::json!({ "kind": "denied", "code": denial.code }),
             vec![ev.seq],
         )?;
-        Ok(StepResult { step, state: branch.head.clone(), observation: Observation::Denied { denial } })
+        Ok(StepResult {
+            step,
+            state: branch.head.clone(),
+            observation: Observation::Denied { denial },
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -702,7 +762,10 @@ impl Kernel {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| {
-                match (op_params.get("owner").and_then(|v| v.as_str()), op_params.get("repo").and_then(|v| v.as_str())) {
+                match (
+                    op_params.get("owner").and_then(|v| v.as_str()),
+                    op_params.get("repo").and_then(|v| v.as_str()),
+                ) {
                     (Some(o), Some(r)) => format!("{o}/{r}"),
                     _ => connector.to_string(),
                 }
@@ -716,12 +779,20 @@ impl Kernel {
             operation: full_op,
             resource,
             arguments,
-            preconditions: op_params.get("preconditions").cloned().unwrap_or(serde_json::json!({})),
+            preconditions: op_params
+                .get("preconditions")
+                .cloned()
+                .unwrap_or(serde_json::json!({})),
             idempotency_key: format!("{}-{}", b.episode, step),
             class,
         };
-        let effect =
-            self.broker.propose(contract, principal.clone(), branch.clone(), step.clone(), action.lease.clone())?;
+        let effect = self.broker.propose(
+            contract,
+            principal.clone(),
+            branch.clone(),
+            step.clone(),
+            action.lease.clone(),
+        )?;
         let tool = writer.record(
             EventKind::ToolInvocation,
             serde_json::json!({
@@ -745,7 +816,12 @@ impl Kernel {
             ..StateDelta::default()
         };
         let node = self.dag.append_step(
-            branch, &step, principal, delta, head.workspace_root.clone(), head.replay_class,
+            branch,
+            &step,
+            principal,
+            delta,
+            head.workspace_root.clone(),
+            head.replay_class,
         )?;
         let delta_ev = writer.record_caused_by(
             EventKind::StateDeltaRecorded,
@@ -762,7 +838,11 @@ impl Kernel {
             serde_json::to_value(&observation)?,
             vec![delta_ev.seq],
         )?;
-        Ok(StepResult { step, state: node.id, observation })
+        Ok(StepResult {
+            step,
+            state: node.id,
+            observation,
+        })
     }
 
     /// Finish a metadata-only step (trace query / branch diff): appends a
@@ -789,7 +869,10 @@ impl Kernel {
             branch,
             &step,
             principal,
-            StateDelta { policy_epoch: head.delta.policy_epoch, ..StateDelta::default() },
+            StateDelta {
+                policy_epoch: head.delta.policy_epoch,
+                ..StateDelta::default()
+            },
             head.workspace_root.clone(),
             head.replay_class,
         )?;
@@ -803,7 +886,11 @@ impl Kernel {
             serde_json::to_value(&observation)?,
             vec![delta_ev.seq],
         )?;
-        Ok(StepResult { step, state: node.id, observation })
+        Ok(StepResult {
+            step,
+            state: node.id,
+            observation,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -838,7 +925,13 @@ impl Kernel {
         )?;
         let outcome = match self
             .scheduler
-            .execute_step(&b.episode, step.clone(), req, RiskTier::Low, &Needs::default())
+            .execute_step(
+                &b.episode,
+                step.clone(),
+                req,
+                RiskTier::Low,
+                &Needs::default(),
+            )
             .await
         {
             Ok(o) => o,
@@ -852,7 +945,8 @@ impl Kernel {
         // Snapshot the workspace and append to the DAG.
         let dir = self.backend.workspace_for(branch)?;
         let node =
-            self.dag.snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?;
+            self.dag
+                .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?;
         let delta_ev = writer.record_caused_by(
             EventKind::StateDeltaRecorded,
             serde_json::json!({ "state_id": node.id, "delta": node.delta }),
@@ -901,7 +995,11 @@ impl Kernel {
             serde_json::to_value(&observation)?,
             vec![delta_ev.seq],
         )?;
-        Ok(StepResult { step, state: node.id, observation })
+        Ok(StepResult {
+            step,
+            state: node.id,
+            observation,
+        })
     }
 
     // -------------------------------------------------------------- effects
@@ -963,7 +1061,9 @@ impl Kernel {
         let writer = self.effect_writer(&e)?;
         match result {
             Ok(receipt) => {
-                if let Err(err) = self.ledger.store_receipt(&receipt, &e.contract.idempotency_key)
+                if let Err(err) = self
+                    .ledger
+                    .store_receipt(&receipt, &e.contract.idempotency_key)
                 {
                     tracing::error!(
                         effect = %effect, receipt = %receipt.id, error = %err,
@@ -1091,8 +1191,12 @@ impl Kernel {
 
     /// Verify a receipt signature against the kernel public key.
     pub fn verify_receipt(&self, receipt: &Receipt) -> KernelResult<bool> {
-        KernelKeypair::verify_canonical(&self.keypair.public_key(), &receipt.body, &receipt.signature)
-            .map_err(KernelError::from)
+        KernelKeypair::verify_canonical(
+            &self.keypair.public_key(),
+            &receipt.body,
+            &receipt.signature,
+        )
+        .map_err(KernelError::from)
     }
 
     // ---------------------------------------------------------------- trace
@@ -1106,8 +1210,10 @@ impl Kernel {
     /// policy decisions, denial, state delta, observation and proposed
     /// effects (`step.explain` in the protocol).
     pub fn step_explain(&self, step: &StepId) -> KernelResult<StepExplanation> {
-        let events =
-            self.ledger.query(&TraceQuery { step: Some(step.clone()), ..TraceQuery::default() })?;
+        let events = self.ledger.query(&TraceQuery {
+            step: Some(step.clone()),
+            ..TraceQuery::default()
+        })?;
         let first = events.first().ok_or_else(|| KernelError::NotFound {
             kind: "step",
             id: step.to_string(),
@@ -1143,9 +1249,7 @@ impl Kernel {
                         .and_then(|v| serde_json::from_value(v).ok());
                     explanation.state_delta = ev.payload.get("delta").cloned();
                 }
-                EventKind::ObservationEmitted => {
-                    explanation.observation = Some(ev.payload.clone())
-                }
+                EventKind::ObservationEmitted => explanation.observation = Some(ev.payload.clone()),
                 EventKind::EffectProposed => explanation.effects_proposed.push(ev.payload.clone()),
                 _ => {}
             }
@@ -1159,26 +1263,31 @@ impl Kernel {
     /// revoked, the retry is denied like any other step.
     pub async fn step_retry(&self, step: &StepId) -> KernelResult<StepResult> {
         let explanation = self.step_explain(step)?;
-        let branch = explanation.branch.clone().ok_or_else(|| KernelError::NotFound {
-            kind: "step_branch",
-            id: step.to_string(),
-        })?;
+        let branch = explanation
+            .branch
+            .clone()
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "step_branch",
+                id: step.to_string(),
+            })?;
         let payload = explanation.action.ok_or_else(|| KernelError::NotFound {
             kind: "tool_invocation",
             id: step.to_string(),
         })?;
-        let kind: ActionKind = serde_json::from_value(
-            payload.get("action").cloned().ok_or_else(|| KernelError::NotFound {
-                kind: "recorded_action",
-                id: step.to_string(),
-            })?,
-        )?;
-        let lease: LeaseId = serde_json::from_value(
-            payload.get("lease").cloned().ok_or_else(|| KernelError::NotFound {
-                kind: "recorded_lease",
-                id: step.to_string(),
-            })?,
-        )?;
+        let kind: ActionKind =
+            serde_json::from_value(payload.get("action").cloned().ok_or_else(|| {
+                KernelError::NotFound {
+                    kind: "recorded_action",
+                    id: step.to_string(),
+                }
+            })?)?;
+        let lease: LeaseId =
+            serde_json::from_value(payload.get("lease").cloned().ok_or_else(|| {
+                KernelError::NotFound {
+                    kind: "recorded_lease",
+                    id: step.to_string(),
+                }
+            })?)?;
         let budget: ResourceBudget = payload
             .get("budget")
             .cloned()
@@ -1189,8 +1298,14 @@ impl Kernel {
             .and_then(|v| v.as_str())
             .map(|s| format!("retry of {step}: {s}"))
             .or_else(|| Some(format!("retry of {step}")));
-        let action = Action { kind, lease, intent_hint, budget };
-        self.execute_step(&explanation.principal, &branch, action).await
+        let action = Action {
+            kind,
+            lease,
+            intent_hint,
+            budget,
+        };
+        self.execute_step(&explanation.principal, &branch, action)
+            .await
     }
 
     // --------------------------------------------------------------- replay
@@ -1198,7 +1313,10 @@ impl Kernel {
     /// Audit replay: stream recorded ledger events for an inclusive sequence
     /// range. Never re-executes anything; available for every step.
     pub fn replay_audit(&self, seq_from: i64, seq_to: i64) -> KernelResult<Vec<LedgerEvent>> {
-        self.ledger.query(&TraceQuery { seq_range: Some((seq_from, seq_to)), ..TraceQuery::default() })
+        self.ledger.query(&TraceQuery {
+            seq_range: Some((seq_from, seq_to)),
+            ..TraceQuery::default()
+        })
     }
 
     /// Sandbox replay: materialize the recorded parent state into a scratch
@@ -1206,23 +1324,30 @@ impl Kernel {
     /// for the exact guarantee.
     pub async fn replay_sandbox(&self, step: &StepId) -> KernelResult<ReplaySandboxReport> {
         // Find the recorded action and the state the step produced.
-        let events = self
-            .ledger
-            .query(&TraceQuery { step: Some(step.clone()), ..TraceQuery::default() })?;
+        let events = self.ledger.query(&TraceQuery {
+            step: Some(step.clone()),
+            ..TraceQuery::default()
+        })?;
         let action_kind: ActionKind = events
             .iter()
             .find(|e| e.kind == EventKind::ToolInvocation)
             .and_then(|e| e.payload.get("action").cloned())
             .map(serde_json::from_value)
             .transpose()?
-            .ok_or_else(|| KernelError::NotFound { kind: "tool_invocation", id: step.to_string() })?;
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "tool_invocation",
+                id: step.to_string(),
+            })?;
         let state_id: StateId = events
             .iter()
             .find(|e| e.kind == EventKind::StateDeltaRecorded)
             .and_then(|e| e.payload.get("state_id").cloned())
             .map(serde_json::from_value)
             .transpose()?
-            .ok_or_else(|| KernelError::NotFound { kind: "state_delta", id: step.to_string() })?;
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "state_delta",
+                id: step.to_string(),
+            })?;
         let original_exit_code = events
             .iter()
             .find(|e| e.kind == EventKind::ObservationEmitted)
@@ -1231,7 +1356,10 @@ impl Kernel {
             .map(|v| v as i32);
 
         let recorded = self.dag.get_state(&state_id)?;
-        if !recorded.replay_class.supports(ak_core::replay::ReplayMode::Sandbox) {
+        if !recorded
+            .replay_class
+            .supports(ak_core::replay::ReplayMode::Sandbox)
+        {
             return Err(KernelError::Other(format!(
                 "step {step} was recorded at replay class {:?}, which does not support sandbox replay",
                 recorded.replay_class
@@ -1240,7 +1368,10 @@ impl Kernel {
         let parent = recorded
             .parent
             .clone()
-            .ok_or_else(|| KernelError::NotFound { kind: "parent_state", id: state_id.to_string() })?;
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "parent_state",
+                id: state_id.to_string(),
+            })?;
 
         // Scratch backend rooted in a temp dir; the replay branch id is fresh.
         let tmp = tempfile::tempdir()?;
@@ -1281,8 +1412,11 @@ impl Kernel {
     ) -> KernelResult<Receipt> {
         let original = self.broker.effect(effect)?;
         let mut contract = original.contract.clone();
-        contract.idempotency_key =
-            format!("{}-replay-{}", contract.idempotency_key, Utc::now().timestamp_millis());
+        contract.idempotency_key = format!(
+            "{}-replay-{}",
+            contract.idempotency_key,
+            Utc::now().timestamp_millis()
+        );
         let replayed = self.broker.propose(
             contract,
             original.proposer.clone(),
@@ -1302,7 +1436,8 @@ impl Kernel {
 }
 
 fn lock<'a, T>(m: &'a Mutex<T>) -> KernelResult<std::sync::MutexGuard<'a, T>> {
-    m.lock().map_err(|_| KernelError::Storage("kernel mutex poisoned".into()))
+    m.lock()
+        .map_err(|_| KernelError::Storage("kernel mutex poisoned".into()))
 }
 
 /// Map an atomic consume-use refusal (lost race, revoked, expired,
@@ -1337,7 +1472,8 @@ fn denial_from_consume_failure(operation: &Operation, err: &ak_identity::Identit
 }
 
 /// Map a deterministic lease-check failure to a machine-readable denial.
-fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure) -> Denial {    let (code, reason) = match failure {
+fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure) -> Denial {
+    let (code, reason) = match failure {
         LeaseCheckFailure::Revoked => {
             (DenialCode::CapabilityDenied, "the presented lease has been revoked".to_string())
         }

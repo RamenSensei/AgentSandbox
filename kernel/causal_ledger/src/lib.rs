@@ -49,9 +49,15 @@ mod tests {
     fn append_chains_hashes_and_verifies() {
         let ledger = Ledger::open_in_memory().unwrap();
         let ep = EpisodeId::generate();
-        let e1 = ledger.append(ev(EventKind::Objective, &ep, json!({"goal": "fix bug"}))).unwrap();
+        let e1 = ledger
+            .append(ev(EventKind::Objective, &ep, json!({"goal": "fix bug"})))
+            .unwrap();
         let e2 = ledger
-            .append(ev(EventKind::DeclaredIntent, &ep, json!({"intent": "edit files"})))
+            .append(ev(
+                EventKind::DeclaredIntent,
+                &ep,
+                json!({"intent": "edit files"}),
+            ))
             .unwrap();
         assert_eq!(e1.seq, 1);
         assert!(e1.prev_event_hash.is_none());
@@ -66,8 +72,12 @@ mod tests {
         let path = dir.path().join("ledger.db");
         let ledger = Ledger::open(&path).unwrap();
         let ep = EpisodeId::generate();
-        ledger.append(ev(EventKind::Objective, &ep, json!({"goal": "honest"}))).unwrap();
-        ledger.append(ev(EventKind::ToolInvocation, &ep, json!({"tool": "bash"}))).unwrap();
+        ledger
+            .append(ev(EventKind::Objective, &ep, json!({"goal": "honest"})))
+            .unwrap();
+        ledger
+            .append(ev(EventKind::ToolInvocation, &ep, json!({"tool": "bash"})))
+            .unwrap();
         assert_eq!(ledger.verify_chain().unwrap(), 2);
         drop(ledger);
 
@@ -86,11 +96,13 @@ mod tests {
 
         // Deleting an interior event also breaks the prev-hash chain.
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute("UPDATE events SET payload = ? WHERE seq = 1", [
-            serde_json::to_string(&json!({"goal": "honest"})).unwrap(),
-        ])
+        conn.execute(
+            "UPDATE events SET payload = ? WHERE seq = 1",
+            [serde_json::to_string(&json!({"goal": "honest"})).unwrap()],
+        )
         .unwrap();
-        conn.execute("DELETE FROM events WHERE seq = 1", []).unwrap();
+        conn.execute("DELETE FROM events WHERE seq = 1", [])
+            .unwrap();
         drop(conn);
         let ledger = Ledger::open(&path).unwrap();
         assert!(ledger.verify_chain().is_err());
@@ -119,14 +131,26 @@ mod tests {
         let branch = BranchId::generate();
         let step = StepId::generate();
 
-        let w = ledger.writer(ep1.clone(), Some(branch.clone()), Some(step.clone()), alice.clone());
+        let w = ledger.writer(
+            ep1.clone(),
+            Some(branch.clone()),
+            Some(step.clone()),
+            alice.clone(),
+        );
         w.record(EventKind::Objective, json!({"n": 1})).unwrap();
-        w.record(EventKind::ToolInvocation, json!({"n": 2})).unwrap();
-        w.record(EventKind::ToolInvocation, json!({"n": 3})).unwrap();
-        ledger.append(ev(EventKind::ToolInvocation, &ep2, json!({"n": 4}))).unwrap();
+        w.record(EventKind::ToolInvocation, json!({"n": 2}))
+            .unwrap();
+        w.record(EventKind::ToolInvocation, json!({"n": 3}))
+            .unwrap();
+        ledger
+            .append(ev(EventKind::ToolInvocation, &ep2, json!({"n": 4})))
+            .unwrap();
 
         let by_ep = ledger
-            .query(&TraceQuery { episode: Some(ep1.clone()), ..Default::default() })
+            .query(&TraceQuery {
+                episode: Some(ep1.clone()),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(by_ep.len(), 3);
         assert!(by_ep.iter().all(|e| e.branch.as_ref() == Some(&branch)));
@@ -142,7 +166,11 @@ mod tests {
         assert_eq!(tools_for_alice.len(), 2);
 
         let ranged = ledger
-            .query(&TraceQuery { seq_range: Some((2, 4)), limit: Some(2), ..Default::default() })
+            .query(&TraceQuery {
+                seq_range: Some((2, 4)),
+                limit: Some(2),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(ranged.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
 
@@ -177,7 +205,11 @@ mod tests {
             ))
             .unwrap();
         ledger
-            .append(ev(EventKind::StateDeltaRecorded, &ep, json!({"state_id": "st-2", "delta": ak_core::StateDelta::default()})))
+            .append(ev(
+                EventKind::StateDeltaRecorded,
+                &ep,
+                json!({"state_id": "st-2", "delta": ak_core::StateDelta::default()}),
+            ))
             .unwrap();
 
         let hits = ledger.events_modifying_path("src/main.rs").unwrap();
@@ -191,10 +223,20 @@ mod tests {
         let ledger = Ledger::open_in_memory().unwrap();
         let ep = EpisodeId::generate();
         let fx = EffectId::generate();
-        let e1 = ledger.append(ev(EventKind::Objective, &ep, json!({}))).unwrap(); // seq 1
-        let e2 = ledger.append(ev(EventKind::DeclaredIntent, &ep, json!({}))).unwrap(); // seq 2
-        ledger.append(ev(EventKind::OsEvent, &ep, json!({"noise": true}))).unwrap(); // seq 3, unrelated
-        let mut proposed = ev(EventKind::EffectProposed, &ep, json!({"effect_id": fx.as_str()}));
+        let e1 = ledger
+            .append(ev(EventKind::Objective, &ep, json!({})))
+            .unwrap(); // seq 1
+        let e2 = ledger
+            .append(ev(EventKind::DeclaredIntent, &ep, json!({})))
+            .unwrap(); // seq 2
+        ledger
+            .append(ev(EventKind::OsEvent, &ep, json!({"noise": true})))
+            .unwrap(); // seq 3, unrelated
+        let mut proposed = ev(
+            EventKind::EffectProposed,
+            &ep,
+            json!({"effect_id": fx.as_str()}),
+        );
         proposed.caused_by = vec![e2.seq];
         let e4 = ledger.append(proposed).unwrap();
         // Link committed -> proposed and objective.
@@ -224,7 +266,11 @@ mod tests {
             ))
             .unwrap();
         ledger
-            .append(ev(EventKind::StateDeltaRecorded, &ep, json!({"state_id": st.as_str(), "delta": {}})))
+            .append(ev(
+                EventKind::StateDeltaRecorded,
+                &ep,
+                json!({"state_id": st.as_str(), "delta": {}}),
+            ))
             .unwrap();
         ledger
             .append(ev(
@@ -279,7 +325,10 @@ mod tests {
         ledger.store_receipt(&r, "ep-1-step-1").unwrap();
         // Same receipt, same key: no-op.
         ledger.store_receipt(&r, "ep-1-step-1").unwrap();
-        assert_eq!(ledger.receipt_by_idempotency_key("ep-1-step-1").unwrap(), Some(r.clone()));
+        assert_eq!(
+            ledger.receipt_by_idempotency_key("ep-1-step-1").unwrap(),
+            Some(r.clone())
+        );
         assert_eq!(ledger.get_receipt(&r.id).unwrap(), r);
         assert_eq!(ledger.receipt_by_idempotency_key("unknown").unwrap(), None);
 

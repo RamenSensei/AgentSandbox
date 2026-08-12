@@ -148,7 +148,10 @@ pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<FileChange> {
     }
     for (path, o) in &old.files {
         if !new.files.contains_key(path) {
-            changes.push(FileChange::Deleted { path: path.clone(), old_blob: o.blob.clone() });
+            changes.push(FileChange::Deleted {
+                path: path.clone(),
+                old_blob: o.blob.clone(),
+            });
         }
     }
     changes
@@ -218,9 +221,15 @@ mod tests {
 
         let changes = diff_manifests(&m1, &m2);
         assert_eq!(changes.len(), 3);
-        assert!(changes.iter().any(|c| matches!(c, FileChange::Modified { path, .. } if path == "a.txt")));
-        assert!(changes.iter().any(|c| matches!(c, FileChange::Deleted { path, .. } if path == "b.txt")));
-        assert!(changes.iter().any(|c| matches!(c, FileChange::Added { path, .. } if path == "c.txt")));
+        assert!(changes
+            .iter()
+            .any(|c| matches!(c, FileChange::Modified { path, .. } if path == "a.txt")));
+        assert!(changes
+            .iter()
+            .any(|c| matches!(c, FileChange::Deleted { path, .. } if path == "b.txt")));
+        assert!(changes
+            .iter()
+            .any(|c| matches!(c, FileChange::Added { path, .. } if path == "c.txt")));
 
         assert!(diff_manifests(&m2, &m2).is_empty());
     }

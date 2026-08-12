@@ -8,7 +8,10 @@ pub type KernelResult<T> = Result<T, KernelError>;
 #[derive(Debug, Error)]
 pub enum KernelError {
     #[error("invalid id: expected prefix `{expected_prefix}`, got `{got}`")]
-    InvalidId { expected_prefix: &'static str, got: String },
+    InvalidId {
+        expected_prefix: &'static str,
+        got: String,
+    },
 
     #[error("unknown object: {kind} `{id}`")]
     NotFound { kind: &'static str, id: String },
@@ -17,7 +20,11 @@ pub enum KernelError {
     Denied(Box<crate::denial::Denial>),
 
     #[error("effect `{effect}` is in phase {phase} but `{expected}` was required")]
-    WrongEffectPhase { effect: String, phase: String, expected: &'static str },
+    WrongEffectPhase {
+        effect: String,
+        phase: String,
+        expected: &'static str,
+    },
 
     #[error("commit-time revalidation failed: {reason}")]
     StaleAuthorization { reason: String },
@@ -95,7 +102,11 @@ impl From<&KernelError> for ErrorEnvelope {
             KernelError::Denied(d) => Some((**d).clone()),
             _ => None,
         };
-        ErrorEnvelope { code: e.code().to_string(), message: e.to_string(), denial }
+        ErrorEnvelope {
+            code: e.code().to_string(),
+            message: e.to_string(),
+            denial,
+        }
     }
 }
 impl From<crate::denial::Denial> for KernelError {

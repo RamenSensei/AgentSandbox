@@ -58,7 +58,9 @@ impl IdentityDb {
     fn from_connection(conn: Connection) -> IdentityResult<Self> {
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Lock the underlying connection. Poisoned locks are recovered: the

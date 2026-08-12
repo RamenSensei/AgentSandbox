@@ -140,7 +140,10 @@ pub fn compile_grant(
         preconditions: IndexMap::new(),
         revoked: false,
     };
-    Ok(CompiledGrant { lease, confinement: compile_confinement(doc, principal) })
+    Ok(CompiledGrant {
+        lease,
+        confinement: compile_confinement(doc, principal),
+    })
 }
 
 #[cfg(test)]
@@ -161,8 +164,18 @@ mod tests {
 
     fn pr_rule() -> PolicyRule {
         let mut constraints = IndexMap::new();
-        constraints.insert("repository".into(), Constraint::Equals { value: json!("org/repo") });
-        constraints.insert("head".into(), Constraint::Prefix { prefix: "sandbox/".into() });
+        constraints.insert(
+            "repository".into(),
+            Constraint::Equals {
+                value: json!("org/repo"),
+            },
+        );
+        constraints.insert(
+            "head".into(),
+            Constraint::Prefix {
+                prefix: "sandbox/".into(),
+            },
+        );
         PolicyRule {
             id: "pr".into(),
             principals: PrincipalSelector::default(),
@@ -183,8 +196,7 @@ mod tests {
         let p = Principal::new_agent("agent");
         let op = Operation::new("github.create_pull_request");
         let now = Utc::now();
-        let grant =
-            compile_grant(&d, &p, &op, &pr_rule(), &IndexMap::new(), None, now).unwrap();
+        let grant = compile_grant(&d, &p, &op, &pr_rule(), &IndexMap::new(), None, now).unwrap();
         assert_eq!(grant.lease.principal, p.id);
         assert_eq!(grant.lease.operation, op);
         assert_eq!(grant.lease.remaining_uses, 2);
@@ -203,11 +215,18 @@ mod tests {
         let op = Operation::new("github.create_pull_request");
         let now = Utc::now();
         let mut narrow = IndexMap::new();
-        narrow.insert("head".into(), Constraint::Equals { value: json!("sandbox/fix-1") });
+        narrow.insert(
+            "head".into(),
+            Constraint::Equals {
+                value: json!("sandbox/fix-1"),
+            },
+        );
         let grant = compile_grant(&d, &p, &op, &pr_rule(), &narrow, None, now).unwrap();
         assert_eq!(
             grant.lease.constraints.get("head"),
-            Some(&Constraint::Equals { value: json!("sandbox/fix-1") })
+            Some(&Constraint::Equals {
+                value: json!("sandbox/fix-1")
+            })
         );
 
         let mut widen = IndexMap::new();

@@ -59,7 +59,9 @@ impl BranchStatus {
             "active" => Ok(BranchStatus::Active),
             "discarded" => Ok(BranchStatus::Discarded),
             "merged" => Ok(BranchStatus::Merged),
-            other => Err(KernelError::Storage(format!("unknown branch status `{other}`"))),
+            other => Err(KernelError::Storage(format!(
+                "unknown branch status `{other}`"
+            ))),
         }
     }
 }
@@ -159,8 +161,10 @@ impl StateDag {
     }
 
     fn init(conn: Connection, cas: Cas) -> KernelResult<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(sql_err)?;
-        conn.pragma_update(None, "foreign_keys", "ON").map_err(sql_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(sql_err)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(sql_err)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS migrations (
                  name TEXT PRIMARY KEY, applied_at TEXT NOT NULL
@@ -169,7 +173,9 @@ impl StateDag {
         .map_err(sql_err)?;
         for (name, sql) in MIGRATIONS {
             let applied: Option<String> = conn
-                .query_row("SELECT name FROM migrations WHERE name = ?1", [name], |r| r.get(0))
+                .query_row("SELECT name FROM migrations WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })
                 .optional()
                 .map_err(sql_err)?;
             if applied.is_none() {
@@ -181,7 +187,10 @@ impl StateDag {
                 .map_err(sql_err)?;
             }
         }
-        Ok(Self { conn: Mutex::new(conn), cas })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            cas,
+        })
     }
 
     /// The underlying content-addressed store.
@@ -233,7 +242,11 @@ impl StateDag {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO episodes (id, root_state, created_at) VALUES (?1, ?2, ?3)",
-            params![episode.as_str(), root.id.as_str(), root.created_at.to_rfc3339()],
+            params![
+                episode.as_str(),
+                root.id.as_str(),
+                root.created_at.to_rfc3339()
+            ],
         )
         .map_err(sql_err)?;
         insert_state(&conn, &root)?;
@@ -250,7 +263,11 @@ impl StateDag {
             ],
         )
         .map_err(sql_err)?;
-        Ok(EpisodeHandle { episode, branch, root })
+        Ok(EpisodeHandle {
+            episode,
+            branch,
+            root,
+        })
     }
 
     // ------------------------------------------------------------------ states
@@ -376,7 +393,9 @@ impl StateDag {
         let conn = self.conn()?;
         let b = load_branch(&conn, branch)?;
         if b.status == BranchStatus::Discarded {
-            return Err(KernelError::BranchDiscarded { branch: branch.to_string() });
+            return Err(KernelError::BranchDiscarded {
+                branch: branch.to_string(),
+            });
         }
         conn.execute(
             "UPDATE branches SET status = ?1 WHERE id = ?2",
@@ -422,7 +441,9 @@ impl StateDag {
             let n = load_state(&conn, &id)?;
             queue.extend(n.parent.into_iter().chain(n.merge_parent));
         }
-        Err(KernelError::Storage(format!("states {a} and {b} share no common ancestor")))
+        Err(KernelError::Storage(format!(
+            "states {a} and {b} share no common ancestor"
+        )))
     }
 
     /// Compare two branches: files changed in each since their lowest
@@ -579,7 +600,8 @@ impl StateDag {
         let mut states_removed = 0;
         for id in all_states {
             if !live_states.contains(&StateId(id.clone())) {
-                conn.execute("DELETE FROM states WHERE id = ?1", [&id]).map_err(sql_err)?;
+                conn.execute("DELETE FROM states WHERE id = ?1", [&id])
+                    .map_err(sql_err)?;
                 states_removed += 1;
             }
         }
@@ -592,7 +614,10 @@ impl StateDag {
                 blobs_removed += 1;
             }
         }
-        let report = GcReport { blobs_removed, states_removed };
+        let report = GcReport {
+            blobs_removed,
+            states_removed,
+        };
         tracing::info!(?report, "gc complete");
         Ok(report)
     }
@@ -607,9 +632,9 @@ fn sql_err(e: rusqlite::Error) -> KernelError {
 fn ensure_active(b: &Branch) -> KernelResult<()> {
     match b.status {
         BranchStatus::Active => Ok(()),
-        BranchStatus::Discarded | BranchStatus::Merged => {
-            Err(KernelError::BranchDiscarded { branch: b.id.to_string() })
-        }
+        BranchStatus::Discarded | BranchStatus::Merged => Err(KernelError::BranchDiscarded {
+            branch: b.id.to_string(),
+        }),
     }
 }
 
@@ -635,10 +660,17 @@ fn insert_state(conn: &Connection, node: &StateNode) -> KernelResult<()> {
 
 fn load_state(conn: &Connection, id: &StateId) -> KernelResult<StateNode> {
     let json: Option<String> = conn
-        .query_row("SELECT node_json FROM states WHERE id = ?1", [id.as_str()], |r| r.get(0))
+        .query_row(
+            "SELECT node_json FROM states WHERE id = ?1",
+            [id.as_str()],
+            |r| r.get(0),
+        )
         .optional()
         .map_err(sql_err)?;
-    let json = json.ok_or_else(|| KernelError::NotFound { kind: "state", id: id.to_string() })?;
+    let json = json.ok_or_else(|| KernelError::NotFound {
+        kind: "state",
+        id: id.to_string(),
+    })?;
     serde_json::from_str(&json).map_err(KernelError::Serde)
 }
 
@@ -658,7 +690,10 @@ fn load_branch(conn: &Connection, id: &BranchId) -> KernelResult<Branch> {
     )
     .optional()
     .map_err(sql_err)?
-    .ok_or_else(|| KernelError::NotFound { kind: "branch", id: id.to_string() })
+    .ok_or_else(|| KernelError::NotFound {
+        kind: "branch",
+        id: id.to_string(),
+    })
     .and_then(|(id, episode, base_state, head, status)| {
         Ok(Branch {
             id: BranchId(id),

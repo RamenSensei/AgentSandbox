@@ -98,6 +98,9 @@ mod tests {
 
     #[test]
     fn different_values_hash_differently() {
-        assert_ne!(hash_canonical(&json!({"x": 1})), hash_canonical(&json!({"x": 2})));
+        assert_ne!(
+            hash_canonical(&json!({"x": 1})),
+            hash_canonical(&json!({"x": 2}))
+        );
     }
 }

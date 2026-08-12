@@ -55,7 +55,11 @@ pub struct CubeConfig {
 
 impl CubeConfig {
     pub fn new(endpoint: impl Into<String>) -> Self {
-        Self { endpoint: endpoint.into(), auth_token: None, request_timeout: Duration::from_secs(30) }
+        Self {
+            endpoint: endpoint.into(),
+            auth_token: None,
+            request_timeout: Duration::from_secs(30),
+        }
     }
 
     /// Read the auth token from `CUBE_API_TOKEN` in the environment.
@@ -122,7 +126,10 @@ struct SnapshotResponse {
 // ---- Client ----------------------------------------------------------------
 
 fn unavailable(reason: impl std::fmt::Display) -> KernelError {
-    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+    KernelError::BackendUnavailable {
+        backend: BACKEND_NAME.into(),
+        reason: reason.to_string(),
+    }
 }
 
 /// Typed HTTP client for the Cube control API.
@@ -162,8 +169,9 @@ impl CubeClient {
     pub async fn create_sandbox(&self, branch: &BranchId) -> KernelResult<String> {
         let mut metadata = BTreeMap::new();
         metadata.insert("branch", branch.as_str());
-        let resp: CreateSandboxResponse =
-            self.post("/v1/sandboxes", &CreateSandboxRequest { metadata }).await?;
+        let resp: CreateSandboxResponse = self
+            .post("/v1/sandboxes", &CreateSandboxRequest { metadata })
+            .await?;
         Ok(resp.sandbox_id)
     }
 
@@ -178,13 +186,23 @@ impl CubeClient {
         let resp: ExecResponse = self
             .post(
                 &format!("/v1/sandboxes/{sandbox}/exec"),
-                &ExecRequest { command, cwd, env, timeout_ms },
+                &ExecRequest {
+                    command,
+                    cwd,
+                    env,
+                    timeout_ms,
+                },
             )
             .await?;
         Ok((resp.exit_code, resp.stdout, resp.stderr, resp.duration_ms))
     }
 
-    pub async fn write_file(&self, sandbox: &str, path: &str, contents_b64: &str) -> KernelResult<()> {
+    pub async fn write_file(
+        &self,
+        sandbox: &str,
+        path: &str,
+        contents_b64: &str,
+    ) -> KernelResult<()> {
         let _: serde_json::Value = self
             .post(
                 &format!("/v1/sandboxes/{sandbox}/files/write"),
@@ -196,7 +214,10 @@ impl CubeClient {
 
     pub async fn read_file(&self, sandbox: &str, path: &str) -> KernelResult<Vec<u8>> {
         let resp: FileReadResponse = self
-            .post(&format!("/v1/sandboxes/{sandbox}/files/read"), &FilePathRequest { path })
+            .post(
+                &format!("/v1/sandboxes/{sandbox}/files/read"),
+                &FilePathRequest { path },
+            )
             .await?;
         b64_decode(&resp.contents_b64)
             .map_err(|e| unavailable(format!("service returned invalid base64: {e}")))
@@ -204,14 +225,20 @@ impl CubeClient {
 
     pub async fn delete_path(&self, sandbox: &str, path: &str) -> KernelResult<()> {
         let _: serde_json::Value = self
-            .post(&format!("/v1/sandboxes/{sandbox}/files/delete"), &FilePathRequest { path })
+            .post(
+                &format!("/v1/sandboxes/{sandbox}/files/delete"),
+                &FilePathRequest { path },
+            )
             .await?;
         Ok(())
     }
 
     pub async fn snapshot(&self, sandbox: &str) -> KernelResult<String> {
         let resp: SnapshotResponse = self
-            .post(&format!("/v1/sandboxes/{sandbox}/snapshot"), &serde_json::json!({}))
+            .post(
+                &format!("/v1/sandboxes/{sandbox}/snapshot"),
+                &serde_json::json!({}),
+            )
             .await?;
         Ok(resp.snapshot_id)
     }
@@ -220,7 +247,10 @@ impl CubeClient {
         let mut metadata = BTreeMap::new();
         metadata.insert("branch", branch.as_str());
         let resp: CreateSandboxResponse = self
-            .post(&format!("/v1/snapshots/{snapshot}/clone"), &CreateSandboxRequest { metadata })
+            .post(
+                &format!("/v1/snapshots/{snapshot}/clone"),
+                &CreateSandboxRequest { metadata },
+            )
             .await?;
         Ok(resp.sandbox_id)
     }
@@ -268,7 +298,10 @@ impl CubeBackend {
             return Ok(id.clone());
         }
         let id = self.client.create_sandbox(branch).await?;
-        self.sandboxes.lock().await.insert(branch.clone(), id.clone());
+        self.sandboxes
+            .lock()
+            .await
+            .insert(branch.clone(), id.clone());
         Ok(id)
     }
 }
@@ -292,7 +325,13 @@ impl Backend for CubeBackend {
         let (exit_code, stdout, stderr, duration_ms) = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.client
-                    .exec(&sandbox, command, cwd.as_deref(), env, req.budget.cpu_ms.max(1))
+                    .exec(
+                        &sandbox,
+                        command,
+                        cwd.as_deref(),
+                        env,
+                        req.budget.cpu_ms.max(1),
+                    )
                     .await?
             }
             ActionKind::ReadFile { path } => {
@@ -342,7 +381,9 @@ impl Backend for CubeBackend {
     /// is unknown to this backend (kernel then re-materializes from the CAS).
     async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
         let source = { self.state_sandboxes.lock().await.get(from).cloned() };
-        let Some(source) = source else { return Ok(false) };
+        let Some(source) = source else {
+            return Ok(false);
+        };
         let snapshot = self.client.snapshot(&source).await?;
         let clone = self.client.clone_snapshot(&snapshot, to_branch).await?;
         self.sandboxes.lock().await.insert(to_branch.clone(), clone);
@@ -370,8 +411,10 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
             _ => Err(format!("invalid base64 byte 0x{c:02x}")),
         }
     }
-    let cleaned: Vec<u8> =
-        input.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=').collect();
+    let cleaned: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
     let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
     for chunk in cleaned.chunks(4) {
         if chunk.len() == 1 {

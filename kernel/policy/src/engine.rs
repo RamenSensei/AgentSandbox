@@ -20,7 +20,7 @@ pub enum Decision {
         /// Id of the rule that granted.
         rule_id: String,
         /// Compiled grant (lease + backend confinement).
-        grant: CompiledGrant,
+        grant: Box<CompiledGrant>,
     },
     /// The operation is allowed only with out-of-band approval. The caller
     /// should surface the sketch to an approver, then call
@@ -146,7 +146,10 @@ impl PolicyEngine {
                         now,
                     ) {
                         Ok(grant) => {
-                            return Decision::Allow { rule_id: rule.id.clone(), grant }
+                            return Decision::Allow {
+                                rule_id: rule.id.clone(),
+                                grant: Box::new(grant),
+                            }
                         }
                         Err(_) => {
                             // A rule that matched but failed to compile is a
@@ -186,7 +189,9 @@ impl PolicyEngine {
             requestable_scopes: self.requestable_scopes(operation),
             escalation_allowed: self.doc.escalation.allow_requests,
         };
-        Decision::Deny { denial: denial.redact_for(principal.trust) }
+        Decision::Deny {
+            denial: denial.redact_for(principal.trust),
+        }
     }
 
     /// Operations (from *allow* rules matching this principal) the principal
@@ -224,11 +229,18 @@ impl PolicyEngine {
             .escalation
             .requestable
             .iter()
-            .filter(|s| glob_match(&s.operation, &attempted.0) || glob_match(&attempted.0, &s.operation))
+            .filter(|s| {
+                glob_match(&s.operation, &attempted.0) || glob_match(&attempted.0, &s.operation)
+            })
             .map(to_scope)
             .collect();
         if matching.is_empty() {
-            self.doc.escalation.requestable.iter().map(to_scope).collect()
+            self.doc
+                .escalation
+                .requestable
+                .iter()
+                .map(to_scope)
+                .collect()
         } else {
             matching
         }
@@ -283,7 +295,12 @@ mod tests {
             effect: RuleEffect::Allow,
             constraints: {
                 let mut c = IndexMap::new();
-                c.insert("path".into(), Constraint::Prefix { prefix: "src/".into() });
+                c.insert(
+                    "path".into(),
+                    Constraint::Prefix {
+                        prefix: "src/".into(),
+                    },
+                );
                 c
             },
             max_uses: 20,
@@ -327,7 +344,13 @@ mod tests {
                 assert_eq!(grant.lease.remaining_uses, 20);
                 assert!(grant
                     .lease
-                    .check(&p.id, &Operation::new("fs.write"), &json!({"path": "src/x"}), None, now)
+                    .check(
+                        &p.id,
+                        &Operation::new("fs.write"),
+                        &json!({"path": "src/x"}),
+                        None,
+                        now
+                    )
                     .is_ok());
             }
             other => panic!("expected allow, got {other:?}"),
@@ -361,11 +384,19 @@ mod tests {
     fn unmatched_operation_default_denies_with_alternatives_and_scopes() {
         let e = engine();
         let p = Principal::new_agent("agent");
-        let d = e.evaluate(&p, &Operation::new("net.raw_socket"), &json!({}), None, Utc::now());
+        let d = e.evaluate(
+            &p,
+            &Operation::new("net.raw_socket"),
+            &json!({}),
+            None,
+            Utc::now(),
+        );
         match d {
             Decision::Deny { denial } => {
                 assert_eq!(denial.code, DenialCode::CapabilityDenied);
-                assert!(denial.safe_alternatives.contains(&Operation::new("fs.write")));
+                assert!(denial
+                    .safe_alternatives
+                    .contains(&Operation::new("fs.write")));
                 assert_eq!(denial.requestable_scopes.len(), 1);
                 assert_eq!(denial.requestable_scopes[0].operation.0, "net.http_read");
             }
@@ -378,10 +409,21 @@ mod tests {
         let e = engine();
         let mut tool = Principal::new_agent("tool");
         tool.kind = ak_core::principal::PrincipalKind::Tool;
-        let d = e.evaluate(&tool, &Operation::new("proc.shell"), &json!({}), None, Utc::now());
+        let d = e.evaluate(
+            &tool,
+            &Operation::new("proc.shell"),
+            &json!({}),
+            None,
+            Utc::now(),
+        );
         assert!(matches!(
             d,
-            Decision::Deny { denial: Denial { code: DenialCode::PolicyForbidden, .. } }
+            Decision::Deny {
+                denial: Denial {
+                    code: DenialCode::PolicyForbidden,
+                    ..
+                }
+            }
         ));
 
         let agent = Principal::new_agent("agent");
@@ -393,7 +435,11 @@ mod tests {
             Utc::now(),
         );
         match d {
-            Decision::RequireApproval { rule_id, policy_epoch, .. } => {
+            Decision::RequireApproval {
+                rule_id,
+                policy_epoch,
+                ..
+            } => {
                 assert_eq!(rule_id, "approve-pr");
                 assert_eq!(policy_epoch, e.document().policy_epoch);
             }

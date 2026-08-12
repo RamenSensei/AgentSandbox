@@ -169,7 +169,7 @@ pub struct EscalationPolicy {
 /// five explicit inputs of [`crate::PolicyEngine::evaluate`]. `policy_epoch`
 /// bumps on **every** mutation, so approvals pinned to an epoch are invalidated
 /// by any policy change.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDocument {
     /// Monotonic epoch, bumped by every mutating call.
@@ -190,19 +190,6 @@ pub struct PolicyDocument {
     /// Escalation policy.
     #[serde(default)]
     pub escalation: EscalationPolicy,
-}
-
-impl Default for PolicyDocument {
-    fn default() -> Self {
-        Self {
-            policy_epoch: 0,
-            rules: Vec::new(),
-            paths: PathPolicy::default(),
-            egress_domains: Vec::new(),
-            tools: ToolPolicy::default(),
-            escalation: EscalationPolicy::default(),
-        }
-    }
 }
 
 impl PolicyDocument {
@@ -234,7 +221,10 @@ impl PolicyDocument {
                 )));
             }
             if !seen.insert(rule.id.as_str()) {
-                return Err(PolicyError::Invalid(format!("duplicate rule id `{}`", rule.id)));
+                return Err(PolicyError::Invalid(format!(
+                    "duplicate rule id `{}`",
+                    rule.id
+                )));
             }
         }
         Ok(())
@@ -243,7 +233,10 @@ impl PolicyDocument {
     /// Append a rule, bumping the epoch.
     pub fn add_rule(&mut self, rule: PolicyRule) -> PolicyResult<()> {
         if self.rules.iter().any(|r| r.id == rule.id) {
-            return Err(PolicyError::Invalid(format!("duplicate rule id `{}`", rule.id)));
+            return Err(PolicyError::Invalid(format!(
+                "duplicate rule id `{}`",
+                rule.id
+            )));
         }
         self.rules.push(rule);
         self.bump_epoch();
@@ -306,7 +299,10 @@ mod tests {
         p.trust = TrustLevel::Quarantined;
         assert!(!sel.matches(&p));
         assert!(PrincipalSelector::default().matches(&p));
-        let by_id = PrincipalSelector { ids: vec![p.id.clone()], ..Default::default() };
+        let by_id = PrincipalSelector {
+            ids: vec![p.id.clone()],
+            ..Default::default()
+        };
         assert!(by_id.matches(&p));
     }
 
@@ -354,7 +350,12 @@ mod tests {
             effect: RuleEffect::Allow,
             constraints: {
                 let mut c = IndexMap::new();
-                c.insert("path".into(), Constraint::Prefix { prefix: "src/".into() });
+                c.insert(
+                    "path".into(),
+                    Constraint::Prefix {
+                        prefix: "src/".into(),
+                    },
+                );
                 c
             },
             max_uses: 10,
@@ -372,7 +373,10 @@ mod tests {
 
     #[test]
     fn invalid_documents_are_rejected() {
-        assert!(PolicyDocument::from_yaml_str("rules:\n  - id: r\n    operations: []\n    effect: allow\n").is_err());
+        assert!(PolicyDocument::from_yaml_str(
+            "rules:\n  - id: r\n    operations: []\n    effect: allow\n"
+        )
+        .is_err());
         let dup = r#"
 rules:
   - id: r

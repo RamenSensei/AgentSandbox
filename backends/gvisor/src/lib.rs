@@ -100,7 +100,10 @@ struct ExecResponse {
 }
 
 fn unavailable(reason: impl std::fmt::Display) -> KernelError {
-    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+    KernelError::BackendUnavailable {
+        backend: BACKEND_NAME.into(),
+        reason: reason.to_string(),
+    }
 }
 
 fn shq(s: &str) -> String {
@@ -145,7 +148,10 @@ impl GvisorClient {
         let resp: CreateContainerResponse = self
             .post(
                 "/v1/containers",
-                &CreateContainerRequest { branch: branch.as_str(), image: self.config.image.as_deref() },
+                &CreateContainerRequest {
+                    branch: branch.as_str(),
+                    image: self.config.image.as_deref(),
+                },
             )
             .await?;
         Ok(resp.container_id)
@@ -162,15 +168,22 @@ impl GvisorClient {
         let resp: ExecResponse = self
             .post(
                 &format!("/v1/containers/{container}/exec"),
-                &ExecRequest { command, cwd, env, timeout_ms },
+                &ExecRequest {
+                    command,
+                    cwd,
+                    env,
+                    timeout_ms,
+                },
             )
             .await?;
         Ok((resp.exit_code, resp.stdout, resp.stderr, resp.duration_ms))
     }
 
     pub async fn delete_container(&self, container: &str) -> KernelResult<()> {
-        let url =
-            format!("{}/v1/containers/{container}", self.config.endpoint.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/containers/{container}",
+            self.config.endpoint.trim_end_matches('/')
+        );
         let mut req = self.http.delete(&url);
         if let Some(token) = &self.config.auth_token {
             req = req.bearer_auth(token);
@@ -191,7 +204,10 @@ pub struct GvisorBackend {
 
 impl GvisorBackend {
     pub fn new(config: GvisorConfig) -> KernelResult<Self> {
-        Ok(Self { client: GvisorClient::new(config)?, containers: Mutex::new(HashMap::new()) })
+        Ok(Self {
+            client: GvisorClient::new(config)?,
+            containers: Mutex::new(HashMap::new()),
+        })
     }
 
     async fn container_for(&self, branch: &BranchId) -> KernelResult<String> {
@@ -199,7 +215,10 @@ impl GvisorBackend {
             return Ok(id.clone());
         }
         let id = self.client.create_container(branch).await?;
-        self.containers.lock().await.insert(branch.clone(), id.clone());
+        self.containers
+            .lock()
+            .await
+            .insert(branch.clone(), id.clone());
         Ok(id)
     }
 }
@@ -224,11 +243,19 @@ impl Backend for GvisorBackend {
         let empty = BTreeMap::new();
         let (exit_code, stdout, stderr, duration_ms) = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
-                self.client.exec(&container, command, cwd.as_deref(), env, timeout_ms).await?
+                self.client
+                    .exec(&container, command, cwd.as_deref(), env, timeout_ms)
+                    .await?
             }
             ActionKind::ReadFile { path } => {
                 self.client
-                    .exec(&container, &format!("cat {}", shq(path)), None, &empty, timeout_ms)
+                    .exec(
+                        &container,
+                        &format!("cat {}", shq(path)),
+                        None,
+                        &empty,
+                        timeout_ms,
+                    )
                     .await?
             }
             ActionKind::WriteFile { path, contents_b64 } => {
@@ -237,11 +264,19 @@ impl Backend for GvisorBackend {
                     p = shq(path),
                     b = shq(contents_b64)
                 );
-                self.client.exec(&container, &cmd, None, &empty, timeout_ms).await?
+                self.client
+                    .exec(&container, &cmd, None, &empty, timeout_ms)
+                    .await?
             }
             ActionKind::DeletePath { path } => {
                 self.client
-                    .exec(&container, &format!("rm -rf -- {}", shq(path)), None, &empty, timeout_ms)
+                    .exec(
+                        &container,
+                        &format!("rm -rf -- {}", shq(path)),
+                        None,
+                        &empty,
+                        timeout_ms,
+                    )
                     .await?
             }
             other => {

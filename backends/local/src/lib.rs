@@ -65,7 +65,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod b64;
-mod sandbox;
+pub mod sandbox;
 
 pub use sandbox::SandboxTech;
 
@@ -264,7 +264,9 @@ fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
     let mut out = BTreeMap::new();
     let mut stack = vec![workspace.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.file_name().is_some_and(|n| n == sandbox::SCRATCH_DIR)
@@ -355,8 +357,16 @@ impl LocalBackend {
         let mut cmd = match self.tech {
             SandboxTech::Bwrap => {
                 let mut c = tokio::process::Command::new("bwrap");
-                c.args(sandbox::bwrap_args(&ws_canon, readable_prefixes, writable_prefixes));
-                c.arg("--chdir").arg(&cwd).arg("/bin/sh").arg("-c").arg(command);
+                c.args(sandbox::bwrap_args(
+                    &ws_canon,
+                    readable_prefixes,
+                    writable_prefixes,
+                ));
+                c.arg("--chdir")
+                    .arg(&cwd)
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg(command);
                 c
             }
             SandboxTech::SandboxExec => {
@@ -369,7 +379,12 @@ impl LocalBackend {
                     .map_err(KernelError::Io)?;
                 std::fs::write(file.path(), profile)?;
                 let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
-                c.arg("-f").arg(file.path()).arg("/bin/sh").arg("-c").arg(command).current_dir(&cwd);
+                c.arg("-f")
+                    .arg(file.path())
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(&cwd);
                 profile_file = Some(file);
                 c
             }
@@ -503,13 +518,21 @@ impl Backend for LocalBackend {
             ActionKind::WriteFile { path, contents_b64 } => {
                 let full = resolve_confined("fs.write", &workspace, path, &req.writable_prefixes)?;
                 let contents = b64::decode(contents_b64).map_err(|e| {
-                    denial(DenialCode::ConstraintViolated, "fs.write", format!("invalid base64: {e}"))
+                    denial(
+                        DenialCode::ConstraintViolated,
+                        "fs.write",
+                        format!("invalid base64: {e}"),
+                    )
                 })?;
                 if let Some(parent) = full.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&full, &contents)?;
-                ExecResult { exit_code: 0, stdout: Vec::new(), stderr: Vec::new() }
+                ExecResult {
+                    exit_code: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
             }
             ActionKind::DeletePath { path } => {
                 let full = resolve_confined("fs.delete", &workspace, path, &req.writable_prefixes)?;
@@ -519,7 +542,11 @@ impl Backend for LocalBackend {
                     std::fs::remove_file(&full)
                 };
                 match outcome {
-                    Ok(()) => ExecResult { exit_code: 0, stdout: Vec::new(), stderr: Vec::new() },
+                    Ok(()) => ExecResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    },
                     Err(e) => ExecResult {
                         exit_code: 1,
                         stdout: Vec::new(),

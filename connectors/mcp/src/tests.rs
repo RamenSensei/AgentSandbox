@@ -19,7 +19,9 @@ fn spawn_test_server() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
             if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
                 break;
             }
-            let Ok(req) = serde_json::from_str::<Value>(line.trim()) else { continue };
+            let Ok(req) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
             let id = req["id"].clone();
             let result = match req["method"].as_str() {
                 Some("tools/list") => json!({
@@ -43,7 +45,11 @@ fn spawn_test_server() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
                 }
             };
             let resp = json!({"jsonrpc": "2.0", "id": id, "result": result});
-            if writer.write_all(format!("{resp}\n").as_bytes()).await.is_err() {
+            if writer
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -107,7 +113,10 @@ async fn tools_list_and_call_round_trip() {
 
     let c = contract("notes.echo", json!({"text": "hi"}), EffectClass::Pure);
     let prepared = g.prepare(&c).await.expect("prepare");
-    assert_eq!(prepared.observed_preconditions, json!({"tool_listed": true}));
+    assert_eq!(
+        prepared.observed_preconditions,
+        json!({"tool_listed": true})
+    );
     assert_eq!(prepared.preview["declared_class"], "pure");
     assert_eq!(prepared.preview["manifest_backed"], true);
 
@@ -118,7 +127,10 @@ async fn tools_list_and_call_round_trip() {
 #[tokio::test]
 async fn undeclared_tools_default_to_opaque_external() {
     let g = gateway(true);
-    assert_eq!(g.effect_class("delete_everything"), EffectClass::OpaqueExternal);
+    assert_eq!(
+        g.effect_class("delete_everything"),
+        EffectClass::OpaqueExternal
+    );
     assert_eq!(g.effect_class("echo"), EffectClass::Pure);
     // Without any manifest, everything is opaque and nothing is advertised.
     let g2 = gateway(false);
@@ -137,15 +149,27 @@ async fn manifest_constraints_are_enforced_before_forwarding() {
     // wrong type
     assert!(g.canonicalize("notes.echo", &json!({"text": 5})).is_err());
     // undeclared param
-    assert!(g.canonicalize("notes.echo", &json!({"text": "hi", "evil": true})).is_err());
+    assert!(g
+        .canonicalize("notes.echo", &json!({"text": "hi", "evil": true}))
+        .is_err());
     // value outside one_of
-    assert!(g.canonicalize("notes.echo", &json!({"text": "hi", "mode": "shout"})).is_err());
+    assert!(g
+        .canonicalize("notes.echo", &json!({"text": "hi", "mode": "shout"}))
+        .is_err());
     // over max_len
-    assert!(g.canonicalize("notes.echo", &json!({"text": "x".repeat(200)})).is_err());
+    assert!(g
+        .canonicalize("notes.echo", &json!({"text": "x".repeat(200)}))
+        .is_err());
     // ok
-    assert!(g.canonicalize("notes.echo", &json!({"text": "hi", "mode": "loud"})).is_ok());
+    assert!(g
+        .canonicalize("notes.echo", &json!({"text": "hi", "mode": "loud"}))
+        .is_ok());
     // commit re-enforces even if canonicalize was bypassed
-    let bad = contract("notes.echo", json!({"evil": true, "text": "hi"}), EffectClass::Pure);
+    let bad = contract(
+        "notes.echo",
+        json!({"evil": true, "text": "hi"}),
+        EffectClass::Pure,
+    );
     assert!(g.commit(&bad).await.is_err());
 }
 
@@ -154,7 +178,11 @@ async fn prepare_refuses_unlisted_tools_and_foreign_operations() {
     let g = gateway(true);
     let c = contract("notes.nonexistent", json!({}), EffectClass::OpaqueExternal);
     assert!(g.prepare(&c).await.is_err());
-    let foreign = contract("github.create_branch", json!({}), EffectClass::Compensatable);
+    let foreign = contract(
+        "github.create_branch",
+        json!({}),
+        EffectClass::Compensatable,
+    );
     assert!(g.prepare(&foreign).await.is_err());
     assert!(g.canonicalize("github.create_branch", &json!({})).is_err());
 }

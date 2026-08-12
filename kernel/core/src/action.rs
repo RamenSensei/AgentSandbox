@@ -11,7 +11,13 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ActionKind {
     /// Run a shell command inside the branch workspace.
-    Shell { command: String, #[serde(default)] cwd: Option<String>, #[serde(default)] env: BTreeMap<String, String> },
+    Shell {
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
     /// Read a file from the branch workspace.
     ReadFile { path: String },
     /// Write a file into the branch workspace.
@@ -21,11 +27,19 @@ pub enum ActionKind {
     /// Read-only HTTP fetch through the egress proxy.
     HttpRead { url: String },
     /// Invoke an MCP tool through the gateway.
-    McpInvoke { server: String, tool: String, arguments: serde_json::Value },
+    McpInvoke {
+        server: String,
+        tool: String,
+        arguments: serde_json::Value,
+    },
     /// A typed connector operation that may produce an external effect
     /// (e.g. `github.create_pull_request`). Never executed inline: the kernel
     /// turns it into a proposed effect.
-    ConnectorOp { connector: String, operation: String, params: serde_json::Value },
+    ConnectorOp {
+        connector: String,
+        operation: String,
+        params: serde_json::Value,
+    },
     /// Query the causal ledger (`trace.query`).
     TraceQuery { query: String },
     /// Ask for a semantic diff of a branch since a state.
@@ -43,9 +57,11 @@ impl ActionKind {
             ActionKind::DeletePath { .. } => Operation::new("fs.delete"),
             ActionKind::HttpRead { .. } => Operation::new("net.http_read"),
             ActionKind::McpInvoke { .. } => Operation::new("mcp.invoke"),
-            ActionKind::ConnectorOp { connector, operation, .. } => {
-                Operation::new(format!("{connector}.{operation}"))
-            }
+            ActionKind::ConnectorOp {
+                connector,
+                operation,
+                ..
+            } => Operation::new(format!("{connector}.{operation}")),
             ActionKind::TraceQuery { .. } => Operation::new("trace.query"),
             ActionKind::BranchDiff { .. } => Operation::new("state.diff"),
         }
@@ -54,11 +70,19 @@ impl ActionKind {
     /// Canonical parameters used for constraint checking.
     pub fn params(&self) -> serde_json::Value {
         match self {
-            ActionKind::Shell { command, cwd, .. } => serde_json::json!({"command": command, "cwd": cwd}),
-            ActionKind::ReadFile { path } | ActionKind::DeletePath { path } => serde_json::json!({"path": path}),
+            ActionKind::Shell { command, cwd, .. } => {
+                serde_json::json!({"command": command, "cwd": cwd})
+            }
+            ActionKind::ReadFile { path } | ActionKind::DeletePath { path } => {
+                serde_json::json!({"path": path})
+            }
             ActionKind::WriteFile { path, .. } => serde_json::json!({"path": path}),
             ActionKind::HttpRead { url } => serde_json::json!({"url": url}),
-            ActionKind::McpInvoke { server, tool, arguments } => {
+            ActionKind::McpInvoke {
+                server,
+                tool,
+                arguments,
+            } => {
                 serde_json::json!({"server": server, "tool": tool, "arguments": arguments})
             }
             ActionKind::ConnectorOp { params, .. } => params.clone(),

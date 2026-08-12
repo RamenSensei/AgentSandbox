@@ -81,7 +81,9 @@ impl AutonomyEnvelope {
     /// drop: the human should see exactly what they are approving.
     pub fn validate(&self) -> PolicyResult<()> {
         if self.allow.is_empty() {
-            return Err(PolicyError::EnvelopeRejected("envelope allows nothing".into()));
+            return Err(PolicyError::EnvelopeRejected(
+                "envelope allows nothing".into(),
+            ));
         }
         for grant in &self.allow {
             if grant.operation.contains('*') {
@@ -175,10 +177,22 @@ forbid:
         assert_eq!(write.remaining_uses, 50);
         assert_eq!(write.expires_at, now + Duration::seconds(1800));
         assert!(write
-            .check(&principal, &write.operation, &json!({"path": "src/a.rs"}), None, now)
+            .check(
+                &principal,
+                &write.operation,
+                &json!({"path": "src/a.rs"}),
+                None,
+                now
+            )
             .is_ok());
         assert!(write
-            .check(&principal, &write.operation, &json!({"path": "/etc/x"}), None, now)
+            .check(
+                &principal,
+                &write.operation,
+                &json!({"path": "/etc/x"}),
+                None,
+                now
+            )
             .is_err());
         let pr = &leases[1];
         assert_eq!(pr.expires_at, now + Duration::seconds(600));

@@ -52,7 +52,9 @@ pub struct GithubConnector {
 
 impl std::fmt::Debug for GithubConnector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GithubConnector").field("base_url", &self.base_url).finish_non_exhaustive()
+        f.debug_struct("GithubConnector")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
     }
 }
 
@@ -73,7 +75,11 @@ impl GithubConnector {
         while base_url.ends_with('/') {
             base_url.pop();
         }
-        Self { base_url, client: reqwest::Client::new(), tokens }
+        Self {
+            base_url,
+            client: reqwest::Client::new(),
+            tokens,
+        }
     }
 
     async fn request(
@@ -117,7 +123,11 @@ impl GithubConnector {
 
     async fn branch_head_sha(&self, owner: &str, repo: &str, branch: &str) -> KernelResult<String> {
         let v = self
-            .request(reqwest::Method::GET, &format!("/repos/{owner}/{repo}/git/ref/heads/{branch}"), None)
+            .request(
+                reqwest::Method::GET,
+                &format!("/repos/{owner}/{repo}/git/ref/heads/{branch}"),
+                None,
+            )
             .await?;
         v.pointer("/object/sha")
             .and_then(Value::as_str)
@@ -140,7 +150,7 @@ fn validate_fields(args: &Value, required: &[&str], optional: &[&str]) -> Kernel
     for key in required {
         GithubConnector::get_str(args, key)?;
     }
-    for key in *&optional {
+    for key in optional {
         if let Some(v) = obj.get(*key) {
             if !v.is_string() {
                 return Err(conn_err(format!("field `{key}` must be a string")));
@@ -172,11 +182,9 @@ impl Connector for GithubConnector {
             OP_CREATE_BRANCH => {
                 validate_fields(args, &["owner", "repo", "branch", "from_branch"], &[])?
             }
-            OP_CREATE_DRAFT_PR => validate_fields(
-                args,
-                &["owner", "repo", "title", "head", "base"],
-                &["body"],
-            )?,
+            OP_CREATE_DRAFT_PR => {
+                validate_fields(args, &["owner", "repo", "title", "head", "base"], &["body"])?
+            }
             OP_COMMENT_ISSUE => {
                 validate_fields(args, &["owner", "repo", "body"], &["issue_number"])?;
                 // issue_number is required, but numeric.
@@ -202,7 +210,13 @@ impl Connector for GithubConnector {
         match contract.operation.as_str() {
             OP_READ_REPO => {
                 let (owner, repo) = (Self::get_str(args, "owner")?, Self::get_str(args, "repo")?);
-                let v = self.request(reqwest::Method::GET, &format!("/repos/{owner}/{repo}"), None).await?;
+                let v = self
+                    .request(
+                        reqwest::Method::GET,
+                        &format!("/repos/{owner}/{repo}"),
+                        None,
+                    )
+                    .await?;
                 Ok(PreparedEffect {
                     preview: json!({
                         "action": "read repository metadata",
@@ -249,7 +263,11 @@ impl Connector for GithubConnector {
                     .and_then(Value::as_u64)
                     .ok_or_else(|| conn_err("`issue_number` must be an unsigned integer"))?;
                 let v = self
-                    .request(reqwest::Method::GET, &format!("/repos/{owner}/{repo}/issues/{n}"), None)
+                    .request(
+                        reqwest::Method::GET,
+                        &format!("/repos/{owner}/{repo}/issues/{n}"),
+                        None,
+                    )
                     .await?;
                 let state = v
                     .get("state")
@@ -273,7 +291,13 @@ impl Connector for GithubConnector {
         match contract.operation.as_str() {
             OP_READ_REPO => {
                 let (owner, repo) = (Self::get_str(args, "owner")?, Self::get_str(args, "repo")?);
-                let v = self.request(reqwest::Method::GET, &format!("/repos/{owner}/{repo}"), None).await?;
+                let v = self
+                    .request(
+                        reqwest::Method::GET,
+                        &format!("/repos/{owner}/{repo}"),
+                        None,
+                    )
+                    .await?;
                 Ok(CommitResult {
                     response: json!({
                         "full_name": v.get("full_name").cloned().unwrap_or(Value::Null),
@@ -311,7 +335,11 @@ impl Connector for GithubConnector {
                     "draft": true,
                 });
                 let v = self
-                    .request(reqwest::Method::POST, &format!("/repos/{owner}/{repo}/pulls"), Some(&body))
+                    .request(
+                        reqwest::Method::POST,
+                        &format!("/repos/{owner}/{repo}/pulls"),
+                        Some(&body),
+                    )
                     .await?;
                 Ok(CommitResult {
                     response: json!({
@@ -357,7 +385,9 @@ impl Connector for GithubConnector {
                     None,
                 )
                 .await?;
-                Ok(CommitResult { response: json!({ "deleted_ref": format!("refs/heads/{branch}") }) })
+                Ok(CommitResult {
+                    response: json!({ "deleted_ref": format!("refs/heads/{branch}") }),
+                })
             }
             OP_CREATE_DRAFT_PR => {
                 let (owner, repo) = (Self::get_str(args, "owner")?, Self::get_str(args, "repo")?);
@@ -390,7 +420,9 @@ impl Connector for GithubConnector {
                     }),
                 })
             }
-            other => Err(conn_err(format!("operation `{other}` is not compensatable"))),
+            other => Err(conn_err(format!(
+                "operation `{other}` is not compensatable"
+            ))),
         }
     }
 }

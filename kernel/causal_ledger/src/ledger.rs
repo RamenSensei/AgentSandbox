@@ -86,7 +86,8 @@ impl Ledger {
     }
 
     fn init(conn: Connection) -> KernelResult<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(sql_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(sql_err)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS migrations (
                  name TEXT PRIMARY KEY, applied_at TEXT NOT NULL
@@ -95,7 +96,9 @@ impl Ledger {
         .map_err(sql_err)?;
         for (name, sql) in MIGRATIONS {
             let applied: Option<String> = conn
-                .query_row("SELECT name FROM migrations WHERE name = ?1", [name], |r| r.get(0))
+                .query_row("SELECT name FROM migrations WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })
                 .optional()
                 .map_err(sql_err)?;
             if applied.is_none() {
@@ -107,7 +110,9 @@ impl Ledger {
                 .map_err(sql_err)?;
             }
         }
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn conn(&self) -> KernelResult<MutexGuard<'_, Connection>> {
@@ -178,7 +183,13 @@ impl Ledger {
         step: Option<StepId>,
         principal: PrincipalId,
     ) -> EventWriter {
-        EventWriter { ledger: Arc::clone(self), episode, branch, step, principal }
+        EventWriter {
+            ledger: Arc::clone(self),
+            episode,
+            branch,
+            step,
+            principal,
+        }
     }
 
     // ---------------------------------------------------------------- verify
@@ -190,7 +201,9 @@ impl Ledger {
     #[tracing::instrument(level = "info", skip(self))]
     pub fn verify_chain(&self) -> KernelResult<u64> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT * FROM events ORDER BY seq ASC").map_err(sql_err)?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM events ORDER BY seq ASC")
+            .map_err(sql_err)?;
         let events = stmt
             .query_map([], row_to_event)
             .map_err(sql_err)?
@@ -238,12 +251,17 @@ impl Ledger {
     /// Retrieve a raw output by hash (`trace.fetch`).
     pub fn fetch_raw(&self, hash: &ContentHash) -> KernelResult<Vec<u8>> {
         self.conn()?
-            .query_row("SELECT bytes FROM raw_outputs WHERE hash = ?1", [hash.as_str()], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT bytes FROM raw_outputs WHERE hash = ?1",
+                [hash.as_str()],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(sql_err)?
-            .ok_or_else(|| KernelError::NotFound { kind: "raw_output", id: hash.to_string() })
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "raw_output",
+                id: hash.to_string(),
+            })
     }
 
     // --------------------------------------------------------------- queries
@@ -258,16 +276,36 @@ impl Ledger {
             sql.push_str(&clause.replace('?', &format!("?{}", binds.len())));
         };
         if let Some(ep) = &q.episode {
-            push(&mut sql, " AND episode = ?", SqlValue::Text(ep.to_string()), &mut binds);
+            push(
+                &mut sql,
+                " AND episode = ?",
+                SqlValue::Text(ep.to_string()),
+                &mut binds,
+            );
         }
         if let Some(b) = &q.branch {
-            push(&mut sql, " AND branch = ?", SqlValue::Text(b.to_string()), &mut binds);
+            push(
+                &mut sql,
+                " AND branch = ?",
+                SqlValue::Text(b.to_string()),
+                &mut binds,
+            );
         }
         if let Some(s) = &q.step {
-            push(&mut sql, " AND step = ?", SqlValue::Text(s.to_string()), &mut binds);
+            push(
+                &mut sql,
+                " AND step = ?",
+                SqlValue::Text(s.to_string()),
+                &mut binds,
+            );
         }
         if let Some(p) = &q.principal {
-            push(&mut sql, " AND principal = ?", SqlValue::Text(p.to_string()), &mut binds);
+            push(
+                &mut sql,
+                " AND principal = ?",
+                SqlValue::Text(p.to_string()),
+                &mut binds,
+            );
         }
         if let Some((lo, hi)) = q.seq_range {
             push(&mut sql, " AND seq >= ?", SqlValue::Integer(lo), &mut binds);
@@ -313,7 +351,10 @@ impl Ledger {
         conn.query_row("SELECT * FROM events WHERE seq = ?1", [seq], row_to_event)
             .optional()
             .map_err(sql_err)?
-            .ok_or_else(|| KernelError::NotFound { kind: "ledger_event", id: seq.to_string() })?
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "ledger_event",
+                id: seq.to_string(),
+            })?
     }
 
     /// Causal query: every event that recorded a state delta touching `path`.
@@ -347,9 +388,7 @@ impl Ledger {
         let all = self.query(&TraceQuery::default())?;
         let mut wanted: BTreeSet<i64> = all
             .iter()
-            .filter(|e| {
-                e.body.payload.get("effect_id").and_then(|v| v.as_str()) == Some(effect_id)
-            })
+            .filter(|e| e.body.payload.get("effect_id").and_then(|v| v.as_str()) == Some(effect_id))
             .map(|e| e.body.seq)
             .collect();
         // Transitive closure over caused_by links.
@@ -364,7 +403,10 @@ impl Ledger {
                 break;
             }
         }
-        Ok(all.into_iter().filter(|e| wanted.contains(&e.body.seq)).collect())
+        Ok(all
+            .into_iter()
+            .filter(|e| wanted.contains(&e.body.seq))
+            .collect())
     }
 
     /// Causal query: irreversible effects committed since state `state`.
@@ -454,7 +496,10 @@ impl Ledger {
             .map_err(sql_err)?
             .map(|json| serde_json::from_str(&json).map_err(KernelError::Serde))
             .transpose()?
-            .ok_or_else(|| KernelError::NotFound { kind: "receipt", id: id.to_string() })
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "receipt",
+                id: id.to_string(),
+            })
     }
 }
 

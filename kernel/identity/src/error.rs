@@ -57,9 +57,10 @@ pub enum IdentityError {
 impl From<IdentityError> for KernelError {
     fn from(e: IdentityError) -> Self {
         match e {
-            IdentityError::UnknownPrincipal(id) => {
-                KernelError::NotFound { kind: "principal", id }
-            }
+            IdentityError::UnknownPrincipal(id) => KernelError::NotFound {
+                kind: "principal",
+                id,
+            },
             IdentityError::UnknownLease(id) => KernelError::NotFound { kind: "lease", id },
             IdentityError::Storage(err) => KernelError::Storage(err.to_string()),
             IdentityError::Serde(err) => KernelError::Serde(err),

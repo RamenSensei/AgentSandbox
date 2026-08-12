@@ -100,8 +100,9 @@ impl LeaseStore {
     pub fn revoke_cascading(&self, id: &LeaseId) -> IdentityResult<Vec<LeaseId>> {
         let mut conn = self.db.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let exists =
-            tx.prepare("SELECT 1 FROM leases WHERE id = ?1")?.exists(params![id.as_str()])?;
+        let exists = tx
+            .prepare("SELECT 1 FROM leases WHERE id = ?1")?
+            .exists(params![id.as_str()])?;
         if !exists {
             return Err(IdentityError::UnknownLease(id.to_string()));
         }
@@ -330,7 +331,10 @@ mod tests {
                 h.join().unwrap();
             }
             let winners = successes.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(winners, 1, "round {round}: {winners} consumers won a single-use lease");
+            assert_eq!(
+                winners, 1,
+                "round {round}: {winners} consumers won a single-use lease"
+            );
             assert_eq!(s.get(&l.id).unwrap().remaining_uses, 0);
         }
     }
@@ -376,7 +380,9 @@ mod tests {
         s.issue(&l).unwrap();
         s.revoke_cascading(&l.id).unwrap();
         let err = s.consume_use(&l.id, now).unwrap_err();
-        assert!(matches!(err, IdentityError::LeaseUnusable { ref reason, .. } if reason == "revoked"));
+        assert!(
+            matches!(err, IdentityError::LeaseUnusable { ref reason, .. } if reason == "revoked")
+        );
         // The JSON mirror agrees with the authoritative column.
         assert!(s.get(&l.id).unwrap().revoked);
     }

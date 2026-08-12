@@ -101,8 +101,7 @@ impl PrincipalRegistry {
     /// Direct children of a principal.
     pub fn children(&self, id: &PrincipalId) -> IdentityResult<Vec<Principal>> {
         let conn = self.db.lock();
-        let mut stmt =
-            conn.prepare("SELECT json FROM principals WHERE parent = ?1 ORDER BY id")?;
+        let mut stmt = conn.prepare("SELECT json FROM principals WHERE parent = ?1 ORDER BY id")?;
         let rows = stmt.query_map(params![id.as_str()], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {
@@ -199,7 +198,10 @@ mod tests {
         let unregistered = Principal::new_agent("ghost");
         let mut bad = orphan;
         bad.parent = Some(unregistered.id);
-        assert!(matches!(reg.register(&bad), Err(IdentityError::UnknownParent(_))));
+        assert!(matches!(
+            reg.register(&bad),
+            Err(IdentityError::UnknownParent(_))
+        ));
     }
 
     #[test]

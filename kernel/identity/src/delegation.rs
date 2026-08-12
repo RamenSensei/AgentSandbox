@@ -88,7 +88,14 @@ impl DelegationService {
                 "parent lease is not held by the delegator".into(),
             ));
         }
-        let child = parent.attenuate(delegatee.clone(), constraints, uses, expires_at, budget, now)?;
+        let child = parent.attenuate(
+            delegatee.clone(),
+            constraints,
+            uses,
+            expires_at,
+            budget,
+            now,
+        )?;
         self.leases.issue(&child)?;
         self.db.lock().execute(
             "INSERT INTO delegations (parent_lease, child_lease, delegator, delegatee, delegated_at)
@@ -157,7 +164,13 @@ mod tests {
     use chrono::Duration;
     use serde_json::json;
 
-    fn setup() -> (DelegationService, Principal, Principal, CapabilityLease, DateTime<Utc>) {
+    fn setup() -> (
+        DelegationService,
+        Principal,
+        Principal,
+        CapabilityLease,
+        DateTime<Utc>,
+    ) {
         let db = IdentityDb::open_in_memory().expect("db");
         let svc = DelegationService::new(db);
         let now = Utc::now();
@@ -166,7 +179,12 @@ mod tests {
         svc.registry().register(&root).unwrap();
         svc.registry().register(&child).unwrap();
         let mut constraints = IndexMap::new();
-        constraints.insert("path".into(), Constraint::Prefix { prefix: "src/".into() });
+        constraints.insert(
+            "path".into(),
+            Constraint::Prefix {
+                prefix: "src/".into(),
+            },
+        );
         let lease = CapabilityLease {
             id: LeaseId::generate(),
             principal: root.id.clone(),
@@ -189,7 +207,12 @@ mod tests {
     fn delegation_to_descendant_succeeds_and_is_audited() {
         let (svc, root, child, lease, now) = setup();
         let mut narrowed = lease.constraints.clone();
-        narrowed.insert("path".into(), Constraint::Prefix { prefix: "src/gen/".into() });
+        narrowed.insert(
+            "path".into(),
+            Constraint::Prefix {
+                prefix: "src/gen/".into(),
+            },
+        );
         let child_lease = svc
             .delegate(
                 &root.id,

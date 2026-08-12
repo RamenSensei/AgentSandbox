@@ -116,8 +116,11 @@ pub trait Connector: Send + Sync {
     fn operations(&self) -> Vec<(String, EffectClass)>;
 
     /// Validate + canonicalize arguments for an operation.
-    fn canonicalize(&self, operation: &str, args: &serde_json::Value)
-        -> KernelResult<serde_json::Value>;
+    fn canonicalize(
+        &self,
+        operation: &str,
+        args: &serde_json::Value,
+    ) -> KernelResult<serde_json::Value>;
 
     /// Observe the live world and produce a preview (dry-run). Must not
     /// cause any external side effect.

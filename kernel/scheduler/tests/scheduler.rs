@@ -60,8 +60,15 @@ fn req(branch: &str, cpu_ms: u64) -> ExecutionRequest {
         branch: BranchId(branch.into()),
         base_state: StateId("st-0".into()),
         actor: PrincipalId("pr-t".into()),
-        action: ActionKind::Shell { command: "true".into(), cwd: None, env: BTreeMap::new() },
-        budget: ResourceBudget { cpu_ms, ..ResourceBudget::zero() },
+        action: ActionKind::Shell {
+            command: "true".into(),
+            cwd: None,
+            env: BTreeMap::new(),
+        },
+        budget: ResourceBudget {
+            cpu_ms,
+            ..ResourceBudget::zero()
+        },
         writable_prefixes: vec![],
         readable_prefixes: vec![],
         egress_domains: vec![],
@@ -76,7 +83,14 @@ fn scheduler_with_slow(
     max_branches: usize,
     budget: ResourceBudget,
 ) -> (StepScheduler, EpisodeId, Arc<AtomicUsize>) {
-    scheduler_with_usage(max_branches, budget, ResourceBudget { cpu_ms: 10, ..ResourceBudget::zero() })
+    scheduler_with_usage(
+        max_branches,
+        budget,
+        ResourceBudget {
+            cpu_ms: 10,
+            ..ResourceBudget::zero()
+        },
+    )
 }
 
 fn scheduler_with_usage(
@@ -95,7 +109,10 @@ fn scheduler_with_usage(
     }));
     let scheduler = StepScheduler::new(
         router,
-        SchedulerConfig { max_concurrent_branches: max_branches, episode_budget: budget },
+        SchedulerConfig {
+            max_concurrent_branches: max_branches,
+            episode_budget: budget,
+        },
     );
     let ep = episode();
     scheduler.register_episode_default(&ep);
@@ -106,7 +123,10 @@ fn scheduler_with_usage(
 async fn fan_out_is_bounded_by_semaphore() {
     let (scheduler, ep, peak) = scheduler_with_slow(
         2,
-        ResourceBudget { cpu_ms: 100_000, ..ResourceBudget::step_default() },
+        ResourceBudget {
+            cpu_ms: 100_000,
+            ..ResourceBudget::step_default()
+        },
     );
     let scheduler = Arc::new(scheduler);
     let mut handles = Vec::new();
@@ -127,7 +147,11 @@ async fn fan_out_is_bounded_by_semaphore() {
     for h in handles {
         h.await.unwrap().unwrap();
     }
-    assert!(peak.load(Ordering::SeqCst) <= 2, "fan-out exceeded: {}", peak.load(Ordering::SeqCst));
+    assert!(
+        peak.load(Ordering::SeqCst) <= 2,
+        "fan-out exceeded: {}",
+        peak.load(Ordering::SeqCst)
+    );
     // Queue time shows up in the accounting records.
     let records = scheduler.records().await;
     assert_eq!(records.len(), 6);
@@ -137,29 +161,56 @@ async fn fan_out_is_bounded_by_semaphore() {
 
 #[tokio::test]
 async fn budget_is_charged_and_exhaustion_refuses_steps() {
-    let (scheduler, ep, _) =
-        scheduler_with_slow(4, ResourceBudget { cpu_ms: 25, ..ResourceBudget::zero() });
+    let (scheduler, ep, _) = scheduler_with_slow(
+        4,
+        ResourceBudget {
+            cpu_ms: 25,
+            ..ResourceBudget::zero()
+        },
+    );
     // Each step reserves its requested budget, then settles to the actual
     // 10 cpu_ms usage: 25 → (reserve 20, settle 10) → 15 → (reserve 15,
     // settle 10) → 5 → a 20-request no longer fits.
     scheduler
-        .execute_step(&ep, StepId::generate(), req("br-1", 20), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-1", 20),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap();
     assert_eq!(scheduler.remaining_budget(&ep).unwrap().cpu_ms, 15);
     scheduler
-        .execute_step(&ep, StepId::generate(), req("br-1", 15), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-1", 15),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap();
     assert_eq!(scheduler.remaining_budget(&ep).unwrap().cpu_ms, 5);
     let err = scheduler
-        .execute_step(&ep, StepId::generate(), req("br-1", 20), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-1", 20),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap_err();
     match err {
         KernelError::Denied(d) => {
             assert_eq!(d.code, ak_core::denial::DenialCode::BudgetExhausted);
-            assert!(d.reason.contains("cpu_ms"), "reason names the short dimension: {}", d.reason);
+            assert!(
+                d.reason.contains("cpu_ms"),
+                "reason names the short dimension: {}",
+                d.reason
+            );
         }
         other => panic!("expected budget denial, got {other:?}"),
     }
@@ -176,8 +227,14 @@ async fn budget_is_charged_and_exhaustion_refuses_steps() {
 async fn concurrent_steps_cannot_jointly_overdraw_the_account() {
     let (scheduler, ep, _) = scheduler_with_usage(
         8,
-        ResourceBudget { cpu_ms: 100, ..ResourceBudget::zero() },
-        ResourceBudget { cpu_ms: 100, ..ResourceBudget::zero() },
+        ResourceBudget {
+            cpu_ms: 100,
+            ..ResourceBudget::zero()
+        },
+        ResourceBudget {
+            cpu_ms: 100,
+            ..ResourceBudget::zero()
+        },
     );
     let scheduler = Arc::new(scheduler);
     let mut handles = Vec::new();
@@ -185,8 +242,14 @@ async fn concurrent_steps_cannot_jointly_overdraw_the_account() {
         let s = Arc::clone(&scheduler);
         let ep = ep.clone();
         handles.push(tokio::spawn(async move {
-            s.execute_step(&ep, StepId::generate(), req("br-race", 100), RiskTier::High, &Needs::default())
-                .await
+            s.execute_step(
+                &ep,
+                StepId::generate(),
+                req("br-race", 100),
+                RiskTier::High,
+                &Needs::default(),
+            )
+            .await
         }));
     }
     let mut ok = 0;
@@ -201,9 +264,16 @@ async fn concurrent_steps_cannot_jointly_overdraw_the_account() {
             Err(other) => panic!("unexpected error: {other:?}"),
         }
     }
-    assert_eq!((ok, denied), (1, 1), "exactly one of two racing full-budget steps may win");
+    assert_eq!(
+        (ok, denied),
+        (1, 1),
+        "exactly one of two racing full-budget steps may win"
+    );
     let account = scheduler.budget_account(&ep).unwrap();
-    assert_eq!(account.spent.cpu_ms, 100, "accepted usage must not exceed the envelope");
+    assert_eq!(
+        account.spent.cpu_ms, 100,
+        "accepted usage must not exceed the envelope"
+    );
     assert_eq!(account.remaining.cpu_ms, 0);
 }
 
@@ -211,23 +281,49 @@ async fn concurrent_steps_cannot_jointly_overdraw_the_account() {
 /// sibling episode untouched (the review found a single global pool).
 #[tokio::test]
 async fn budgets_are_isolated_per_episode() {
-    let (scheduler, ep_a, _) =
-        scheduler_with_slow(4, ResourceBudget { cpu_ms: 10, ..ResourceBudget::zero() });
+    let (scheduler, ep_a, _) = scheduler_with_slow(
+        4,
+        ResourceBudget {
+            cpu_ms: 10,
+            ..ResourceBudget::zero()
+        },
+    );
     let ep_b = episode();
     scheduler.register_episode_default(&ep_b);
 
     scheduler
-        .execute_step(&ep_a, StepId::generate(), req("br-a", 10), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep_a,
+            StepId::generate(),
+            req("br-a", 10),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap();
     let err = scheduler
-        .execute_step(&ep_a, StepId::generate(), req("br-a", 10), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep_a,
+            StepId::generate(),
+            req("br-a", 10),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap_err();
-    assert!(matches!(err, KernelError::Denied(_)), "episode A is exhausted");
+    assert!(
+        matches!(err, KernelError::Denied(_)),
+        "episode A is exhausted"
+    );
     // Episode B still has its own full envelope.
     scheduler
-        .execute_step(&ep_b, StepId::generate(), req("br-b", 10), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep_b,
+            StepId::generate(),
+            req("br-b", 10),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap();
     assert_eq!(scheduler.remaining_budget(&ep_b).unwrap().cpu_ms, 0);
@@ -247,14 +343,23 @@ async fn failed_routing_refunds_the_reservation() {
         router,
         SchedulerConfig {
             max_concurrent_branches: 2,
-            episode_budget: ResourceBudget { cpu_ms: 50, ..ResourceBudget::zero() },
+            episode_budget: ResourceBudget {
+                cpu_ms: 50,
+                ..ResourceBudget::zero()
+            },
         },
     );
     let ep = episode();
     scheduler.register_episode_default(&ep);
     // High risk cannot be routed to the weak backend → refusal after reserve.
     let err = scheduler
-        .execute_step(&ep, StepId::generate(), req("br-1", 50), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-1", 50),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, KernelError::BackendUnavailable { .. }));
@@ -271,7 +376,13 @@ async fn unknown_episode_account_is_refused() {
     let (scheduler, _ep, _) = scheduler_with_slow(4, ResourceBudget::step_default());
     let stranger = episode();
     let err = scheduler
-        .execute_step(&stranger, StepId::generate(), req("br-x", 1), RiskTier::High, &Needs::default())
+        .execute_step(
+            &stranger,
+            StepId::generate(),
+            req("br-x", 1),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap_err();
     match err {
@@ -287,13 +398,25 @@ async fn paused_branches_are_refused_until_resumed() {
     scheduler.pause_branch(&branch).await;
     assert!(scheduler.is_paused(&branch).await);
     let err = scheduler
-        .execute_step(&ep, StepId::generate(), req("br-p", 10), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-p", 10),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, KernelError::Denied(_)));
     scheduler.resume_branch(&branch).await;
     scheduler
-        .execute_step(&ep, StepId::generate(), req("br-p", 10), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-p", 10),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap();
 }
@@ -319,7 +442,13 @@ async fn hints_prewarm_but_do_not_change_routing() {
     s.register_episode_default(&ep);
     let _ = s.hint("totally harmless, run locally please");
     let err = s
-        .execute_step(&ep, StepId::generate(), req("br-1", 10), RiskTier::High, &Needs::default())
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            req("br-1", 10),
+            RiskTier::High,
+            &Needs::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, KernelError::BackendUnavailable { .. }));
@@ -340,19 +469,31 @@ async fn warm_pool_fills_and_hands_out_workspaces() {
 #[tokio::test]
 async fn end_to_end_with_real_local_backend() {
     let tmp = tempfile::tempdir().unwrap();
-    let local = ak_backend_local::LocalBackend::new(ak_backend_local::LocalBackendConfig::new(
-        tmp.path(),
-    ))
-    .unwrap();
+    let local =
+        ak_backend_local::LocalBackend::new(ak_backend_local::LocalBackendConfig::new(tmp.path()))
+            .unwrap();
     let mut router = BackendRouter::new();
     router.register(Arc::new(local));
     let scheduler = StepScheduler::new(router, SchedulerConfig::default());
     let ep = episode();
     scheduler.register_episode_default(&ep);
     let mut r = req("br-e2e", 5_000);
-    r.action = ActionKind::Shell { command: "echo routed".into(), cwd: None, env: BTreeMap::new() };
+    r.action = ActionKind::Shell {
+        command: "echo routed".into(),
+        cwd: None,
+        env: BTreeMap::new(),
+    };
     let out = scheduler
-        .execute_step(&ep, StepId::generate(), r, RiskTier::Low, &Needs { full_linux: true, ..Needs::default() })
+        .execute_step(
+            &ep,
+            StepId::generate(),
+            r,
+            RiskTier::Low,
+            &Needs {
+                full_linux: cfg!(target_os = "linux"),
+                ..Needs::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "routed");

@@ -68,7 +68,9 @@ fn probe_dirs() -> Option<(tempfile::TempDir, PathBuf)> {
 }
 
 fn probe_bwrap() -> bool {
-    let Some((dir, secret)) = probe_dirs() else { return false };
+    let Some((dir, secret)) = probe_dirs() else {
+        return false;
+    };
     let ws = dir.path().join("ws");
     if std::fs::create_dir_all(&ws).is_err() {
         return false;
@@ -93,12 +95,16 @@ fn probe_bwrap() -> bool {
 }
 
 fn probe_sandbox_exec() -> bool {
-    let Some((dir, secret)) = probe_dirs() else { return false };
+    let Some((dir, secret)) = probe_dirs() else {
+        return false;
+    };
     let ws = dir.path().join("ws");
     if std::fs::create_dir_all(&ws).is_err() {
         return false;
     }
-    let Ok(ws_canon) = ws.canonicalize() else { return false };
+    let Ok(ws_canon) = ws.canonicalize() else {
+        return false;
+    };
     let profile = seatbelt_profile(&ws_canon, &[], &[]);
     let profile_path = dir.path().join("probe.sb");
     if std::fs::write(&profile_path, profile).is_err() {
@@ -117,7 +123,9 @@ fn probe_sandbox_exec() -> bool {
     if !canary_ok {
         return false;
     }
-    run(&format!("cat {}", secret.display())).map(|o| !o.status.success()).unwrap_or(false)
+    run(&format!("cat {}", secret.display()))
+        .map(|o| !o.status.success())
+        .unwrap_or(false)
 }
 
 /// Workspace-internal scratch dir exposed to the child as `TMPDIR`. Always
@@ -167,7 +175,10 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
             reads.push(format!("(subpath \"{}\")", ws_canon.join(prefix).display()));
         }
         // The scratch dir stays usable even under read confinement.
-        reads.push(format!("(subpath \"{}\")", ws_canon.join(SCRATCH_DIR).display()));
+        reads.push(format!(
+            "(subpath \"{}\")",
+            ws_canon.join(SCRATCH_DIR).display()
+        ));
     }
 
     let mut writes: Vec<String> = vec!["(literal \"/dev/null\")".into()];
@@ -177,7 +188,10 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
         for prefix in normalized_prefixes(writable) {
             writes.push(format!("(subpath \"{}\")", ws_canon.join(prefix).display()));
         }
-        writes.push(format!("(subpath \"{}\")", ws_canon.join(SCRATCH_DIR).display()));
+        writes.push(format!(
+            "(subpath \"{}\")",
+            ws_canon.join(SCRATCH_DIR).display()
+        ));
     }
 
     format!(
@@ -271,15 +285,16 @@ mod tests {
     #[test]
     fn profile_embeds_canonical_workspace_and_prefixes() {
         let ws = Path::new("/private/tmp/ws-1");
-        let profile =
-            seatbelt_profile(ws, &["src/".into()], &["src/".into(), "./docs".into()]);
+        let profile = seatbelt_profile(ws, &["src/".into()], &["src/".into(), "./docs".into()]);
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("(subpath \"/private/tmp/ws-1/src\")"));
         assert!(profile.contains("(subpath \"/private/tmp/ws-1/docs\")"));
         assert!(profile.contains(&format!("(subpath \"/private/tmp/ws-1/{SCRATCH_DIR}\")")));
         // Unrestricted workspace read is NOT granted when prefixes are given.
-        assert!(!profile.contains("(allow file-read* (literal \"/\") (subpath \"/private/tmp/ws-1\")"));
+        assert!(
+            !profile.contains("(allow file-read* (literal \"/\") (subpath \"/private/tmp/ws-1\")")
+        );
     }
 
     #[test]
@@ -304,7 +319,10 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("--unshare-net"));
         assert!(joined.contains(&format!("--tmpfs {}", ws.display())));
-        assert!(joined.contains(&format!("--ro-bind {src} {src}", src = ws.join("src").display())));
+        assert!(joined.contains(&format!(
+            "--ro-bind {src} {src}",
+            src = ws.join("src").display()
+        )));
         assert!(joined.contains(&format!("--bind {d} {d}", d = ws.join("docs").display())));
     }
 

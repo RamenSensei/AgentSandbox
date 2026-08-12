@@ -21,7 +21,14 @@ pub struct ResourceBudget {
 
 impl ResourceBudget {
     pub const fn zero() -> Self {
-        Self { cpu_ms: 0, memory_bytes: 0, network_bytes: 0, tokens: 0, cost_micro_usd: 0, risk_units: 0 }
+        Self {
+            cpu_ms: 0,
+            memory_bytes: 0,
+            network_bytes: 0,
+            tokens: 0,
+            cost_micro_usd: 0,
+            risk_units: 0,
+        }
     }
 
     /// A generous default envelope for a single local step.
@@ -121,8 +128,16 @@ mod tests {
 
     #[test]
     fn charge_reports_exhausted_dimensions() {
-        let mut b = ResourceBudget { cpu_ms: 100, tokens: 10, ..ResourceBudget::zero() };
-        let over = ResourceBudget { cpu_ms: 50, tokens: 20, ..ResourceBudget::zero() };
+        let mut b = ResourceBudget {
+            cpu_ms: 100,
+            tokens: 10,
+            ..ResourceBudget::zero()
+        };
+        let over = ResourceBudget {
+            cpu_ms: 50,
+            tokens: 20,
+            ..ResourceBudget::zero()
+        };
         assert_eq!(b.charge(&over), vec!["tokens"]);
         assert_eq!(b.cpu_ms, 50);
         assert_eq!(b.tokens, 0);
@@ -140,15 +155,26 @@ mod tests {
 
     #[test]
     fn saturating_arithmetic_never_wraps() {
-        let a = ResourceBudget { cpu_ms: 10, tokens: 5, ..ResourceBudget::zero() };
-        let b = ResourceBudget { cpu_ms: 25, tokens: 2, ..ResourceBudget::zero() };
+        let a = ResourceBudget {
+            cpu_ms: 10,
+            tokens: 5,
+            ..ResourceBudget::zero()
+        };
+        let b = ResourceBudget {
+            cpu_ms: 25,
+            tokens: 2,
+            ..ResourceBudget::zero()
+        };
         let diff = a.saturating_sub(&b);
         assert_eq!(diff.cpu_ms, 0);
         assert_eq!(diff.tokens, 3);
         let sum = a.saturating_add(&b);
         assert_eq!(sum.cpu_ms, 35);
         assert_eq!(sum.tokens, 7);
-        let max = ResourceBudget { cpu_ms: u64::MAX, ..ResourceBudget::zero() };
+        let max = ResourceBudget {
+            cpu_ms: u64::MAX,
+            ..ResourceBudget::zero()
+        };
         assert_eq!(max.saturating_add(&max).cpu_ms, u64::MAX);
     }
 }

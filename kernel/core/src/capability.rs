@@ -86,10 +86,10 @@ impl Constraint {
                 .map(|s| s.starts_with(prefix.as_str()))
                 .unwrap_or(false),
             (Equals { value }, Max { max }) => value.as_f64().map(|n| n <= *max).unwrap_or(false),
-            (OneOf { values }, parent) => values
-                .iter()
-                .all(|v| parent.allows(Some(v))),
-            (Prefix { prefix: child }, Prefix { prefix: parent_p }) => child.starts_with(parent_p.as_str()),
+            (OneOf { values }, parent) => values.iter().all(|v| parent.allows(Some(v))),
+            (Prefix { prefix: child }, Prefix { prefix: parent_p }) => {
+                child.starts_with(parent_p.as_str())
+            }
             (Max { max: child }, Max { max: parent_m }) => child <= parent_m,
             (Forbidden, _) => true,
             _ => false,
@@ -180,7 +180,9 @@ impl CapabilityLease {
             return Err(LeaseCheckFailure::Revoked);
         }
         if now >= self.expires_at {
-            return Err(LeaseCheckFailure::Expired { expired_at: self.expires_at });
+            return Err(LeaseCheckFailure::Expired {
+                expired_at: self.expires_at,
+            });
         }
         if self.remaining_uses == 0 {
             return Err(LeaseCheckFailure::Exhausted);
@@ -189,16 +191,22 @@ impl CapabilityLease {
             return Err(LeaseCheckFailure::WrongPrincipal);
         }
         if &self.operation != operation {
-            return Err(LeaseCheckFailure::WrongOperation { granted: self.operation.clone() });
+            return Err(LeaseCheckFailure::WrongOperation {
+                granted: self.operation.clone(),
+            });
         }
         if let Some(bound) = &self.bound_branch {
             if branch != Some(bound) {
-                return Err(LeaseCheckFailure::WrongBranch { bound: bound.clone() });
+                return Err(LeaseCheckFailure::WrongBranch {
+                    bound: bound.clone(),
+                });
             }
         }
         for (param, constraint) in &self.constraints {
             if !constraint.allows(params.get(param)) {
-                return Err(LeaseCheckFailure::ConstraintViolated { parameter: param.clone() });
+                return Err(LeaseCheckFailure::ConstraintViolated {
+                    parameter: param.clone(),
+                });
             }
         }
         Ok(())
@@ -233,7 +241,9 @@ impl CapabilityLease {
             match constraints.get(param) {
                 Some(child_c) if child_c.narrows(parent_c) => {}
                 _ => {
-                    return Err(AttenuationError::ConstraintWidened { parameter: param.clone() })
+                    return Err(AttenuationError::ConstraintWidened {
+                        parameter: param.clone(),
+                    })
                 }
             }
         }
@@ -277,11 +287,23 @@ mod tests {
 
     fn lease(now: DateTime<Utc>) -> CapabilityLease {
         let mut constraints = IndexMap::new();
-        constraints.insert("repository".into(), Constraint::Equals { value: json!("org/repo") });
-        constraints.insert("base".into(), Constraint::Equals { value: json!("main") });
+        constraints.insert(
+            "repository".into(),
+            Constraint::Equals {
+                value: json!("org/repo"),
+            },
+        );
+        constraints.insert(
+            "base".into(),
+            Constraint::Equals {
+                value: json!("main"),
+            },
+        );
         constraints.insert(
             "head".into(),
-            Constraint::Prefix { prefix: "sandbox/".into() },
+            Constraint::Prefix {
+                prefix: "sandbox/".into(),
+            },
         );
         constraints.insert("merge".into(), Constraint::Forbidden);
         CapabilityLease {
@@ -306,19 +328,48 @@ mod tests {
         let l = lease(now);
         let ok = json!({"repository": "org/repo", "base": "main", "head": "sandbox/fix-1"});
         assert!(l
-            .check(&l.principal, &l.operation, &ok, Some(&BranchId("br-42".into())), now)
+            .check(
+                &l.principal,
+                &l.operation,
+                &ok,
+                Some(&BranchId("br-42".into())),
+                now
+            )
             .is_ok());
 
         let merge = json!({"repository": "org/repo", "base": "main", "head": "sandbox/fix-1", "merge": true});
         assert_eq!(
-            l.check(&l.principal, &l.operation, &merge, Some(&BranchId("br-42".into())), now),
-            Err(LeaseCheckFailure::ConstraintViolated { parameter: "merge".into() })
+            l.check(
+                &l.principal,
+                &l.operation,
+                &merge,
+                Some(&BranchId("br-42".into())),
+                now
+            ),
+            Err(LeaseCheckFailure::ConstraintViolated {
+                parameter: "merge".into()
+            })
         );
 
-        let wrong_branch = l.check(&l.principal, &l.operation, &ok, Some(&BranchId("br-7".into())), now);
-        assert!(matches!(wrong_branch, Err(LeaseCheckFailure::WrongBranch { .. })));
+        let wrong_branch = l.check(
+            &l.principal,
+            &l.operation,
+            &ok,
+            Some(&BranchId("br-7".into())),
+            now,
+        );
+        assert!(matches!(
+            wrong_branch,
+            Err(LeaseCheckFailure::WrongBranch { .. })
+        ));
 
-        let expired = l.check(&l.principal, &l.operation, &ok, Some(&BranchId("br-42".into())), now + Duration::minutes(11));
+        let expired = l.check(
+            &l.principal,
+            &l.operation,
+            &ok,
+            Some(&BranchId("br-42".into())),
+            now + Duration::minutes(11),
+        );
         assert!(matches!(expired, Err(LeaseCheckFailure::Expired { .. })));
     }
 
@@ -331,15 +382,39 @@ mod tests {
         let mut widened = l.constraints.clone();
         widened.insert("head".into(), Constraint::Prefix { prefix: "".into() });
         let err = l
-            .attenuate(child.clone(), widened, 1, l.expires_at, ResourceBudget::default(), now)
+            .attenuate(
+                child.clone(),
+                widened,
+                1,
+                l.expires_at,
+                ResourceBudget::default(),
+                now,
+            )
             .unwrap_err();
-        assert_eq!(err, AttenuationError::ConstraintWidened { parameter: "head".into() });
+        assert_eq!(
+            err,
+            AttenuationError::ConstraintWidened {
+                parameter: "head".into()
+            }
+        );
 
         // A proper narrowing succeeds and records lineage.
         let mut narrowed = l.constraints.clone();
-        narrowed.insert("head".into(), Constraint::Equals { value: json!("sandbox/fix-1") });
+        narrowed.insert(
+            "head".into(),
+            Constraint::Equals {
+                value: json!("sandbox/fix-1"),
+            },
+        );
         let child_lease = l
-            .attenuate(child, narrowed, 1, l.expires_at, ResourceBudget::default(), now)
+            .attenuate(
+                child,
+                narrowed,
+                1,
+                l.expires_at,
+                ResourceBudget::default(),
+                now,
+            )
             .unwrap();
         assert_eq!(child_lease.parent_lease.as_ref(), Some(&l.id));
     }

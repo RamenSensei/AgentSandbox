@@ -16,8 +16,8 @@
 //! *anything* the approval was based on has drifted: preconditions, the
 //! contract hash, the policy epoch, or the capability lease.
 //!
-//! Effects classified [`EffectClass::Irreversible`] or
-//! [`EffectClass::OpaqueExternal`] can never be committed without an explicit
+//! Effects classified [`ak_core::effect::EffectClass::Irreversible`] or
+//! [`ak_core::effect::EffectClass::OpaqueExternal`] can never be committed without an explicit
 //! [`EffectBroker::approve`] step; the state machine enforces this.
 //!
 //! The [`secrets`] module holds real credentials. **No raw credential ever

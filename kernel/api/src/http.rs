@@ -115,7 +115,9 @@ async fn describe_episode(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let desc = k.describe_episode(&EpisodeId::parse(&id)?).await?;
-    Ok(Json(serde_json::to_value(&desc).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&desc).map_err(KernelError::from)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -129,7 +131,9 @@ async fn execute_step(
     State(k): State<Arc<Kernel>>,
     Json(req): Json<ExecuteStepRequest>,
 ) -> ApiResult<Response> {
-    let result = k.execute_step(&req.principal, &req.branch, req.action).await?;
+    let result = k
+        .execute_step(&req.principal, &req.branch, req.action)
+        .await?;
     // Denials are full observations *and* HTTP 403 with the structured
     // denial, per the protocol.
     if let ak_core::Observation::Denied { denial } = &result.observation {
@@ -138,13 +142,16 @@ async fn execute_step(
             message: denial.reason.clone(),
             denial: Some(denial.clone()),
         };
-        return Ok((StatusCode::FORBIDDEN, Json(serde_json::json!({
-            "step": result.step,
-            "state": result.state,
-            "observation": result.observation,
-            "error": envelope,
-        })))
-        .into_response());
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "step": result.step,
+                "state": result.state,
+                "observation": result.observation,
+                "error": envelope,
+            })),
+        )
+            .into_response());
     }
     Ok(Json(serde_json::to_value(&result).map_err(KernelError::from)?).into_response())
 }
@@ -154,7 +161,9 @@ async fn fork_branch(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let branch = k.fork_branch(&BranchId::parse(&id)?)?;
-    Ok(Json(serde_json::to_value(&branch).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&branch).map_err(KernelError::from)?,
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -169,7 +178,9 @@ async fn diff_branch(
     Json(req): Json<DiffRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let changes = k.branch_diff(&BranchId::parse(&id)?, req.since.as_ref())?;
-    Ok(Json(serde_json::to_value(&changes).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&changes).map_err(KernelError::from)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -184,7 +195,9 @@ async fn merge_branch(
     Json(req): Json<MergeRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let node = k.merge_branch(&BranchId::parse(&id)?, &req.source, &req.actor)?;
-    Ok(Json(serde_json::to_value(&node).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&node).map_err(KernelError::from)?,
+    ))
 }
 
 async fn discard_branch(
@@ -227,7 +240,10 @@ async fn request_capability(
         &req.params,
         req.branch.as_ref(),
     )?;
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(&lease).map_err(KernelError::from)?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(&lease).map_err(KernelError::from)?),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -256,7 +272,10 @@ async fn delegate_capability(
         req.expires_at,
         req.budget,
     )?;
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(&lease).map_err(KernelError::from)?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(&lease).map_err(KernelError::from)?),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -280,7 +299,9 @@ async fn list_capabilities(
         .leases()
         .active_for_principal(&PrincipalId::parse(&principal)?, chrono::Utc::now())
         .map_err(KernelError::from)?;
-    Ok(Json(serde_json::to_value(&leases).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&leases).map_err(KernelError::from)?,
+    ))
 }
 
 async fn get_effect(
@@ -288,7 +309,9 @@ async fn get_effect(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let effect = k.effect(&EffectId::parse(&id)?)?;
-    Ok(Json(serde_json::to_value(&effect).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&effect).map_err(KernelError::from)?,
+    ))
 }
 
 async fn prepare_effect(
@@ -321,7 +344,9 @@ async fn commit_effect(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let receipt = k.commit_effect(&EffectId::parse(&id)?).await?;
-    Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&receipt).map_err(KernelError::from)?,
+    ))
 }
 
 async fn compensate_effect(
@@ -329,7 +354,9 @@ async fn compensate_effect(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let receipt = k.compensate_effect(&EffectId::parse(&id)?).await?;
-    Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&receipt).map_err(KernelError::from)?,
+    ))
 }
 
 /// Run in-doubt recovery: resolve effects parked in phase `committing`
@@ -354,7 +381,9 @@ async fn resolve_effect(
     Json(req): Json<ak_effect_broker::OperatorResolution>,
 ) -> ApiResult<impl IntoResponse> {
     let receipt = k.resolve_in_doubt_effect(&EffectId::parse(&id)?, req)?;
-    Ok(Json(serde_json::json!({ "resolved": id, "receipt": receipt })))
+    Ok(Json(
+        serde_json::json!({ "resolved": id, "receipt": receipt }),
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -380,14 +409,25 @@ async fn trace_query(
     let q = TraceQuery {
         episode: p.episode.as_deref().map(EpisodeId::parse).transpose()?,
         branch: p.branch.as_deref().map(BranchId::parse).transpose()?,
-        step: p.step.as_deref().map(ak_core::ids::StepId::parse).transpose()?,
+        step: p
+            .step
+            .as_deref()
+            .map(ak_core::ids::StepId::parse)
+            .transpose()?,
         principal: p.principal.as_deref().map(PrincipalId::parse).transpose()?,
-        kinds: p.kind.as_deref().and_then(EventKind::parse).into_iter().collect(),
+        kinds: p
+            .kind
+            .as_deref()
+            .and_then(EventKind::parse)
+            .into_iter()
+            .collect(),
         limit: p.limit,
         ..TraceQuery::default()
     };
     let events = k.trace_query(&q)?;
-    Ok(Json(serde_json::to_value(&events).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&events).map_err(KernelError::from)?,
+    ))
 }
 
 async fn explain_step(
@@ -395,13 +435,12 @@ async fn explain_step(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let explanation = k.step_explain(&ak_core::ids::StepId::parse(&id)?)?;
-    Ok(Json(serde_json::to_value(&explanation).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&explanation).map_err(KernelError::from)?,
+    ))
 }
 
-async fn retry_step(
-    State(k): State<Arc<Kernel>>,
-    Path(id): Path<String>,
-) -> ApiResult<Response> {
+async fn retry_step(State(k): State<Arc<Kernel>>, Path(id): Path<String>) -> ApiResult<Response> {
     let result = k.step_retry(&ak_core::ids::StepId::parse(&id)?).await?;
     if let ak_core::Observation::Denied { denial } = &result.observation {
         let envelope = ErrorEnvelope {
@@ -434,7 +473,9 @@ async fn list_effects(
     Query(p): Query<ListEffectsParams>,
 ) -> ApiResult<impl IntoResponse> {
     let effects = k.list_effects(p.phase.as_deref())?;
-    Ok(Json(serde_json::to_value(&effects).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&effects).map_err(KernelError::from)?,
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -470,7 +511,9 @@ async fn replay(
             let step = req.step.as_deref().ok_or_else(|| {
                 ApiError(KernelError::Other("sandbox replay requires `step`".into()))
             })?;
-            let report = k.replay_sandbox(&ak_core::ids::StepId::parse(step)?).await?;
+            let report = k
+                .replay_sandbox(&ak_core::ids::StepId::parse(step)?)
+                .await?;
             Ok(Json(serde_json::to_value(&report).map_err(KernelError::from)?).into_response())
         }
         "live" => {
@@ -480,8 +523,9 @@ async fn replay(
             let approver = req.approver.as_deref().ok_or_else(|| {
                 ApiError(KernelError::Other("live replay requires `approver`".into()))
             })?;
-            let receipt =
-                k.replay_live(&EffectId::parse(effect)?, &PrincipalId::parse(approver)?).await?;
+            let receipt = k
+                .replay_live(&EffectId::parse(effect)?, &PrincipalId::parse(approver)?)
+                .await?;
             Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?).into_response())
         }
         other => Err(ApiError(KernelError::InvalidId {
@@ -496,5 +540,7 @@ async fn get_receipt(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let receipt = k.receipt(&ReceiptId::parse(&id)?)?;
-    Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+    Ok(Json(
+        serde_json::to_value(&receipt).map_err(KernelError::from)?,
+    ))
 }

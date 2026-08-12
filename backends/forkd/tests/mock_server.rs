@@ -35,15 +35,17 @@ async fn spawn_mock() -> String {
         )
         .route(
             "/v1/children/:id/exec",
-            post(|Path(id): Path<String>, Json(body): Json<serde_json::Value>| async move {
-                let cmd = body["command"].as_str().unwrap_or_default().to_string();
-                Json(serde_json::json!({
-                    "exit_code": 0,
-                    "stdout": format!("{id}|{cmd}"),
-                    "stderr": "",
-                    "duration_ms": 7
-                }))
-            }),
+            post(
+                |Path(id): Path<String>, Json(body): Json<serde_json::Value>| async move {
+                    let cmd = body["command"].as_str().unwrap_or_default().to_string();
+                    Json(serde_json::json!({
+                        "exit_code": 0,
+                        "stdout": format!("{id}|{cmd}"),
+                        "stderr": "",
+                        "duration_ms": 7
+                    }))
+                },
+            ),
         );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -57,7 +59,11 @@ fn shell_req(branch: &str, state: &str, cmd: &str) -> ExecutionRequest {
         branch: BranchId(branch.into()),
         base_state: StateId(state.into()),
         actor: PrincipalId("pr-t".into()),
-        action: ActionKind::Shell { command: cmd.into(), cwd: None, env: BTreeMap::new() },
+        action: ActionKind::Shell {
+            command: cmd.into(),
+            cwd: None,
+            env: BTreeMap::new(),
+        },
         budget: ResourceBudget::step_default(),
         writable_prefixes: vec![],
         readable_prefixes: vec![],
@@ -68,13 +74,22 @@ fn shell_req(branch: &str, state: &str, cmd: &str) -> ExecutionRequest {
 #[tokio::test]
 async fn exec_forks_a_child_from_the_warm_parent() {
     let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
-    let out = backend.execute(shell_req("br-1", "st-1", "uname")).await.unwrap();
+    let out = backend
+        .execute(shell_req("br-1", "st-1", "uname"))
+        .await
+        .unwrap();
     assert_eq!(out.exit_code, 0);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(stdout.contains("of-p-warm") && stdout.ends_with("|uname"), "{stdout}");
+    assert!(
+        stdout.contains("of-p-warm") && stdout.ends_with("|uname"),
+        "{stdout}"
+    );
     assert_eq!(out.usage.cpu_ms, 7);
     // Same branch reuses the same child.
-    let again = backend.execute(shell_req("br-1", "st-2", "id")).await.unwrap();
+    let again = backend
+        .execute(shell_req("br-1", "st-2", "id"))
+        .await
+        .unwrap();
     let stdout2 = String::from_utf8_lossy(&again.stdout).into_owned();
     assert_eq!(stdout.split('|').next(), stdout2.split('|').next());
 }
@@ -82,10 +97,22 @@ async fn exec_forks_a_child_from_the_warm_parent() {
 #[tokio::test]
 async fn fork_fans_out_a_live_child() {
     let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
-    assert!(!backend.fork(&StateId("st-nope".into()), &BranchId("br-b".into())).await.unwrap());
-    backend.execute(shell_req("br-a", "st-9", "true")).await.unwrap();
-    assert!(backend.fork(&StateId("st-9".into()), &BranchId("br-b".into())).await.unwrap());
-    let out = backend.execute(shell_req("br-b", "st-10", "hostname")).await.unwrap();
+    assert!(!backend
+        .fork(&StateId("st-nope".into()), &BranchId("br-b".into()))
+        .await
+        .unwrap());
+    backend
+        .execute(shell_req("br-a", "st-9", "true"))
+        .await
+        .unwrap();
+    assert!(backend
+        .fork(&StateId("st-9".into()), &BranchId("br-b".into()))
+        .await
+        .unwrap());
+    let out = backend
+        .execute(shell_req("br-b", "st-10", "hostname"))
+        .await
+        .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("cow-of-c-"));
 }
 
@@ -93,7 +120,10 @@ async fn fork_fans_out_a_live_child() {
 async fn write_file_is_translated_to_a_shell_exec() {
     let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
     let mut r = shell_req("br-1", "st-1", "");
-    r.action = ActionKind::WriteFile { path: "a/b.txt".into(), contents_b64: "aGk=".into() };
+    r.action = ActionKind::WriteFile {
+        path: "a/b.txt".into(),
+        contents_b64: "aGk=".into(),
+    };
     let out = backend.execute(r).await.unwrap();
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.paths_written, vec!["a/b.txt".to_string()]);
@@ -103,7 +133,10 @@ async fn write_file_is_translated_to_a_shell_exec() {
 #[tokio::test]
 async fn unreachable_endpoint_maps_to_backend_unavailable() {
     let backend = ForkdBackend::new(ForkdConfig::new("http://127.0.0.1:1")).unwrap();
-    let err = backend.execute(shell_req("br-1", "st-1", "true")).await.unwrap_err();
+    let err = backend
+        .execute(shell_req("br-1", "st-1", "true"))
+        .await
+        .unwrap_err();
     match err {
         KernelError::BackendUnavailable { backend, .. } => assert_eq!(backend, "forkd"),
         other => panic!("expected BackendUnavailable, got {other:?}"),

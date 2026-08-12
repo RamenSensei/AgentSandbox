@@ -75,7 +75,10 @@ pub struct SchedulerConfig {
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
-        Self { max_concurrent_branches: 8, episode_budget: ResourceBudget::step_default() }
+        Self {
+            max_concurrent_branches: 8,
+            episode_budget: ResourceBudget::step_default(),
+        }
     }
 }
 
@@ -103,14 +106,20 @@ impl WarmPool {
     pub fn new(root: impl Into<PathBuf>) -> KernelResult<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root, pool: Mutex::new(Vec::new()), seq: AtomicU64::new(0) })
+        Ok(Self {
+            root,
+            pool: Mutex::new(Vec::new()),
+            seq: AtomicU64::new(0),
+        })
     }
 
     /// Ensure at least `n` idle workspaces exist in the pool.
     pub async fn fill(&self, n: usize) -> KernelResult<()> {
         let mut pool = self.pool.lock().await;
         while pool.len() < n {
-            let dir = self.root.join(format!("warm-{}", self.seq.fetch_add(1, Ordering::Relaxed)));
+            let dir = self
+                .root
+                .join(format!("warm-{}", self.seq.fetch_add(1, Ordering::Relaxed)));
             std::fs::create_dir_all(&dir)?;
             pool.push(dir);
         }
@@ -197,7 +206,8 @@ impl StepScheduler {
         remaining: ResourceBudget,
         spent: ResourceBudget,
     ) {
-        self.accounts().insert(episode.clone(), BudgetAccount { remaining, spent });
+        self.accounts()
+            .insert(episode.clone(), BudgetAccount { remaining, spent });
     }
 
     /// Open an episode account with the configured default envelope.
@@ -229,9 +239,15 @@ impl StepScheduler {
     /// debit happen under one lock: concurrent reservations can never jointly
     /// exceed the remaining envelope. Returns the insufficient dimensions on
     /// refusal.
-    fn reserve(&self, episode: &EpisodeId, amount: &ResourceBudget) -> Result<(), Vec<&'static str>> {
+    fn reserve(
+        &self,
+        episode: &EpisodeId,
+        amount: &ResourceBudget,
+    ) -> Result<(), Vec<&'static str>> {
         let mut accounts = self.accounts();
-        let account = accounts.get_mut(episode).ok_or_else(|| vec!["unknown_episode"])?;
+        let account = accounts
+            .get_mut(episode)
+            .ok_or_else(|| vec!["unknown_episode"])?;
         if !amount.fits_within(&account.remaining) {
             return Err(amount.exceeding_dimensions(&account.remaining));
         }
@@ -249,10 +265,15 @@ impl StepScheduler {
         usage: &ResourceBudget,
     ) -> Vec<&'static str> {
         let mut accounts = self.accounts();
-        let Some(account) = accounts.get_mut(episode) else { return Vec::new() };
+        let Some(account) = accounts.get_mut(episode) else {
+            return Vec::new();
+        };
         let refund = reserved.saturating_sub(usage);
         let overrun_amount = usage.saturating_sub(reserved);
-        account.remaining = account.remaining.saturating_add(&refund).saturating_sub(&overrun_amount);
+        account.remaining = account
+            .remaining
+            .saturating_add(&refund)
+            .saturating_sub(&overrun_amount);
         account.spent = account.spent.saturating_add(usage);
         usage.exceeding_dimensions(reserved)
     }
@@ -305,8 +326,9 @@ impl StepScheduler {
                 note: "intent suggests branch fan-out; warm a fork-capable backend".into(),
             };
         }
-        let build_like =
-            ["build", "test", "compile", "lint", "install"].iter().any(|k| lower.contains(k));
+        let build_like = ["build", "test", "compile", "lint", "install"]
+            .iter()
+            .any(|k| lower.contains(k));
         if build_like {
             return PrewarmPlan {
                 warm_backend: None,
@@ -314,7 +336,11 @@ impl StepScheduler {
                 note: "intent suggests local build/test steps; keep workspaces warm".into(),
             };
         }
-        PrewarmPlan { warm_backend: None, warm_workspaces: 0, note: "no prewarm".into() }
+        PrewarmPlan {
+            warm_backend: None,
+            warm_workspaces: 0,
+            note: "no prewarm".into(),
+        }
     }
 
     /// Apply a prewarm plan's local-workspace part against the warm pool.

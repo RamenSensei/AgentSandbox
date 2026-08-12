@@ -104,8 +104,11 @@ impl SignedManifest {
             .map_err(|e| conn_err(format!("bad manifest signature hex: {e}")))?
             .try_into()
             .map_err(|_| conn_err("manifest signature must be 64 bytes"))?;
-        key.verify(self.manifest_yaml.as_bytes(), &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| conn_err("manifest signature verification failed"))?;
+        key.verify(
+            self.manifest_yaml.as_bytes(),
+            &Signature::from_bytes(&sig_bytes),
+        )
+        .map_err(|_| conn_err("manifest signature verification failed"))?;
         serde_yaml::from_str(&self.manifest_yaml)
             .map_err(|e| conn_err(format!("manifest yaml invalid: {e}")))
     }
@@ -229,7 +232,9 @@ pub struct McpGateway {
 
 impl std::fmt::Debug for McpGateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpGateway").field("server", &self.server_name).finish_non_exhaustive()
+        f.debug_struct("McpGateway")
+            .field("server", &self.server_name)
+            .finish_non_exhaustive()
     }
 }
 
@@ -251,8 +256,14 @@ impl McpGateway {
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| conn_err("child stdin unavailable"))?;
-        let stdout = child.stdout.take().ok_or_else(|| conn_err("child stdout unavailable"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| conn_err("child stdin unavailable"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| conn_err("child stdout unavailable"))?;
         info!(server = server_name, command, "spawned mcp server");
         Ok(Self {
             server_name: server_name.to_string(),
@@ -286,9 +297,7 @@ impl McpGateway {
         })
     }
 
-    fn check_manifest(
-        manifest: Option<(&SignedManifest, &str)>,
-    ) -> KernelResult<Option<Manifest>> {
+    fn check_manifest(manifest: Option<(&SignedManifest, &str)>) -> KernelResult<Option<Manifest>> {
         manifest.map(|(m, key)| m.verify_and_parse(key)).transpose()
     }
 
@@ -328,7 +337,11 @@ impl McpGateway {
     /// `tools/call` against the live server.
     async fn call_tool(&self, tool: &str, arguments: &Value) -> KernelResult<Value> {
         let mut t = self.transport.lock().await;
-        t.call("tools/call", json!({ "name": tool, "arguments": arguments })).await
+        t.call(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+        )
+        .await
     }
 }
 
@@ -380,7 +393,9 @@ impl Connector for McpGateway {
             .iter()
             .any(|t| t.get("name").and_then(Value::as_str) == Some(tool.as_str()));
         if !listed {
-            return Err(conn_err(format!("mcp server does not expose tool `{tool}`")));
+            return Err(conn_err(format!(
+                "mcp server does not expose tool `{tool}`"
+            )));
         }
         let class = self.effect_class(&tool);
         Ok(PreparedEffect {

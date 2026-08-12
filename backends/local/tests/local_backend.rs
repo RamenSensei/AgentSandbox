@@ -26,7 +26,11 @@ fn req(action: ActionKind) -> ExecutionRequest {
 }
 
 fn shell(cmd: &str) -> ActionKind {
-    ActionKind::Shell { command: cmd.into(), cwd: None, env: BTreeMap::new() }
+    ActionKind::Shell {
+        command: cmd.into(),
+        cwd: None,
+        env: BTreeMap::new(),
+    }
 }
 
 #[tokio::test]
@@ -50,7 +54,10 @@ async fn timeout_kills_the_process() {
     let out = b.execute(r).await.unwrap();
     assert_eq!(out.exit_code, -1);
     assert!(String::from_utf8_lossy(&out.stderr).contains("timeout"));
-    assert!(started.elapsed().as_secs() < 10, "process was not killed promptly");
+    assert!(
+        started.elapsed().as_secs() < 10,
+        "process was not killed promptly"
+    );
 }
 
 #[tokio::test]
@@ -69,11 +76,20 @@ async fn env_is_scrubbed() {
     let b = backend(tmp.path());
     let out = b.execute(req(shell("env"))).await.unwrap();
     let env_dump = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(!env_dump.contains("AK_SECRET_CANARY"), "secret leaked: {env_dump}");
+    assert!(
+        !env_dump.contains("AK_SECRET_CANARY"),
+        "secret leaked: {env_dump}"
+    );
     assert!(env_dump.contains("PATH="));
     // HOME points into the workspace, not at the real home directory.
-    let home_line = env_dump.lines().find(|l| l.starts_with("HOME=")).expect("HOME set");
-    assert!(home_line.contains("br-test"), "unexpected HOME: {home_line}");
+    let home_line = env_dump
+        .lines()
+        .find(|l| l.starts_with("HOME="))
+        .expect("HOME set");
+    assert!(
+        home_line.contains("br-test"),
+        "unexpected HOME: {home_line}"
+    );
 }
 
 #[tokio::test]
@@ -81,9 +97,16 @@ async fn path_escape_rejected_for_reads_writes_and_deletes() {
     let tmp = tempfile::tempdir().unwrap();
     let b = backend(tmp.path());
     for action in [
-        ActionKind::ReadFile { path: "../outside.txt".into() },
-        ActionKind::ReadFile { path: "/etc/passwd".into() },
-        ActionKind::WriteFile { path: "a/../../evil".into(), contents_b64: b64::encode(b"x") },
+        ActionKind::ReadFile {
+            path: "../outside.txt".into(),
+        },
+        ActionKind::ReadFile {
+            path: "/etc/passwd".into(),
+        },
+        ActionKind::WriteFile {
+            path: "a/../../evil".into(),
+            contents_b64: b64::encode(b"x"),
+        },
         ActionKind::DeletePath { path: "..".into() },
     ] {
         let err = b.execute(req(action)).await.expect_err("should be denied");
@@ -126,14 +149,27 @@ async fn write_read_delete_round_trip_and_paths_written() {
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.paths_written, vec!["sub/dir/hello.txt".to_string()]);
 
-    let out = b.execute(req(ActionKind::ReadFile { path: "sub/dir/hello.txt".into() })).await.unwrap();
+    let out = b
+        .execute(req(ActionKind::ReadFile {
+            path: "sub/dir/hello.txt".into(),
+        }))
+        .await
+        .unwrap();
     assert_eq!(out.stdout, b"payload");
     assert!(out.paths_written.is_empty());
 
-    let out = b.execute(req(ActionKind::DeletePath { path: "sub".into() })).await.unwrap();
+    let out = b
+        .execute(req(ActionKind::DeletePath { path: "sub".into() }))
+        .await
+        .unwrap();
     assert_eq!(out.exit_code, 0);
 
-    let out = b.execute(req(ActionKind::ReadFile { path: "sub/dir/hello.txt".into() })).await.unwrap();
+    let out = b
+        .execute(req(ActionKind::ReadFile {
+            path: "sub/dir/hello.txt".into(),
+        }))
+        .await
+        .unwrap();
     assert_eq!(out.exit_code, 1);
 }
 
@@ -160,9 +196,16 @@ async fn writable_prefixes_are_enforced() {
 async fn shell_detects_paths_written() {
     let tmp = tempfile::tempdir().unwrap();
     let b = backend(tmp.path());
-    let out = b.execute(req(shell("echo data > created.txt"))).await.unwrap();
+    let out = b
+        .execute(req(shell("echo data > created.txt")))
+        .await
+        .unwrap();
     assert_eq!(out.exit_code, 0);
-    assert!(out.paths_written.contains(&"created.txt".to_string()), "{:?}", out.paths_written);
+    assert!(
+        out.paths_written.contains(&"created.txt".to_string()),
+        "{:?}",
+        out.paths_written
+    );
 }
 
 #[tokio::test]
@@ -213,7 +256,10 @@ async fn shell_cannot_read_host_files_outside_workspace() {
     let host = tempfile::tempdir().unwrap();
     let secret = host.path().join("host-secret.txt");
     std::fs::write(&secret, "credentials").unwrap();
-    let out = b.execute(req(shell(&format!("cat {}", secret.display())))).await.unwrap();
+    let out = b
+        .execute(req(shell(&format!("cat {}", secret.display()))))
+        .await
+        .unwrap();
     assert_ne!(out.exit_code, 0, "host read must be denied");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("credentials"));
 }
@@ -228,7 +274,10 @@ async fn shell_cannot_write_host_files_outside_workspace() {
     }
     let host = tempfile::tempdir().unwrap();
     let target = host.path().join("pwned.txt");
-    let out = b.execute(req(shell(&format!("echo x > {}", target.display())))).await.unwrap();
+    let out = b
+        .execute(req(shell(&format!("echo x > {}", target.display()))))
+        .await
+        .unwrap();
     assert_ne!(out.exit_code, 0, "host write must be denied");
     assert!(!target.exists(), "file must not exist on the host");
 }
@@ -248,7 +297,12 @@ async fn shell_has_no_network_egress() {
         "timeout 2 sh -c 'exec 3<>/dev/tcp/1.1.1.1/53'"
     };
     let out = b.execute(req(shell(probe))).await.unwrap();
-    assert_ne!(out.exit_code, 0, "network egress must be denied: {:?}", String::from_utf8_lossy(&out.stderr));
+    assert_ne!(
+        out.exit_code,
+        0,
+        "network egress must be denied: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[tokio::test]
@@ -265,13 +319,21 @@ async fn shell_respects_writable_prefixes() {
     let mut r = req(shell("echo ok > src/allowed.txt"));
     r.writable_prefixes = vec!["src/".into()];
     let out = b.execute(r).await.unwrap();
-    assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(ws.join("src/allowed.txt").exists());
     // …writing outside it is denied by the OS sandbox, not just convention.
     let mut r = req(shell("echo no > outside.txt"));
     r.writable_prefixes = vec!["src/".into()];
     let out = b.execute(r).await.unwrap();
-    assert_ne!(out.exit_code, 0, "write outside the writable prefix must be denied");
+    assert_ne!(
+        out.exit_code, 0,
+        "write outside the writable prefix must be denied"
+    );
     assert!(!ws.join("outside.txt").exists());
 }
 
@@ -295,7 +357,10 @@ async fn shell_respects_readable_prefixes() {
     let mut r = req(shell("cat hidden.txt"));
     r.readable_prefixes = vec!["src/".into()];
     let out = b.execute(r).await.unwrap();
-    assert_ne!(out.exit_code, 0, "read outside the readable prefix must be denied");
+    assert_ne!(
+        out.exit_code, 0,
+        "read outside the readable prefix must be denied"
+    );
     assert!(!String::from_utf8_lossy(&out.stdout).contains("confined"));
 }
 
@@ -312,7 +377,10 @@ async fn shell_cannot_follow_symlink_out_of_the_workspace() {
     let ws = b.workspace_for(&BranchId("br-test".into())).unwrap();
     std::os::unix::fs::symlink(host.path(), ws.join("esc")).unwrap();
     let out = b.execute(req(shell("cat esc/loot.txt"))).await.unwrap();
-    assert_ne!(out.exit_code, 0, "symlink escape must be denied by the sandbox");
+    assert_ne!(
+        out.exit_code, 0,
+        "symlink escape must be denied by the sandbox"
+    );
     assert!(!String::from_utf8_lossy(&out.stdout).contains("outside"));
 }
 
@@ -326,19 +394,27 @@ async fn fail_closed_without_sandbox() {
         // Simulate a sandboxless host by demanding more than the probe found:
         // covered structurally — the config flag is what gates the fallback.
         // Here we verify the dangerous opt-out is required and explicit.
-        let opt_out = LocalBackend::new(
-            LocalBackendConfig::new(tmp.path()).dangerously_allow_unsandboxed(),
-        )
-        .unwrap();
+        let opt_out =
+            LocalBackend::new(LocalBackendConfig::new(tmp.path()).dangerously_allow_unsandboxed())
+                .unwrap();
         // Opt-out flag alone must NOT weaken a host that HAS a sandbox.
-        let out = opt_out.execute(req(shell("echo still-sandboxed"))).await.unwrap();
+        let out = opt_out
+            .execute(req(shell("echo still-sandboxed")))
+            .await
+            .unwrap();
         assert_eq!(out.exit_code, 0);
         return;
     }
-    let err = b.execute(req(shell("echo should-not-run"))).await.expect_err("must fail closed");
+    let err = b
+        .execute(req(shell("echo should-not-run")))
+        .await
+        .expect_err("must fail closed");
     match err {
         KernelError::BackendUnavailable { reason, .. } => {
-            assert!(reason.contains("fails closed"), "actionable reason: {reason}")
+            assert!(
+                reason.contains("fails closed"),
+                "actionable reason: {reason}"
+            )
         }
         other => panic!("expected BackendUnavailable, got {other:?}"),
     }

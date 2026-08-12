@@ -62,7 +62,11 @@ fn poisoned() -> KernelError {
 impl SecretVault {
     /// A purely in-memory vault.
     pub fn in_memory() -> Self {
-        Self { secrets: Mutex::new(HashMap::new()), tokens: Mutex::new(HashMap::new()), path: None }
+        Self {
+            secrets: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            path: None,
+        }
     }
 
     /// Open (or create) a file-backed vault. The file is created with `0600`
@@ -85,7 +89,9 @@ impl SecretVault {
     }
 
     fn persist(&self) -> KernelResult<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let map = self.secrets.lock().map_err(|_| poisoned())?;
         let json = serde_json::to_string(&*map)?;
         drop(map);
@@ -117,9 +123,10 @@ impl SecretVault {
     /// secret; connector code paths call this and must not persist the value.
     pub fn with_secret<R>(&self, name: &str, f: impl FnOnce(&str) -> R) -> KernelResult<R> {
         let map = self.secrets.lock().map_err(|_| poisoned())?;
-        let value = map
-            .get(name)
-            .ok_or_else(|| KernelError::NotFound { kind: "secret", id: name.to_string() })?;
+        let value = map.get(name).ok_or_else(|| KernelError::NotFound {
+            kind: "secret",
+            id: name.to_string(),
+        })?;
         Ok(f(value))
     }
 
@@ -136,7 +143,10 @@ impl SecretVault {
         let expires_at = Utc::now() + ttl;
         self.tokens.lock().map_err(|_| poisoned())?.insert(
             token.clone(),
-            TokenState { secret_name: secret_name.to_string(), expires_at },
+            TokenState {
+                secret_name: secret_name.to_string(),
+                expires_at,
+            },
         );
         info!(secret = secret_name, "minted scoped token");
         Ok(ScopedToken { token, expires_at })
@@ -144,13 +154,20 @@ impl SecretVault {
 
     /// Redeem a scoped token exactly once, lending the underlying secret to
     /// `f`. Expired, unknown, or already-redeemed tokens are refused.
-    pub fn redeem_scoped_token<R>(&self, token: &str, f: impl FnOnce(&str) -> R) -> KernelResult<R> {
+    pub fn redeem_scoped_token<R>(
+        &self,
+        token: &str,
+        f: impl FnOnce(&str) -> R,
+    ) -> KernelResult<R> {
         let state = self
             .tokens
             .lock()
             .map_err(|_| poisoned())?
             .remove(token)
-            .ok_or_else(|| KernelError::NotFound { kind: "scoped_token", id: "<redacted>".into() })?;
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "scoped_token",
+                id: "<redacted>".into(),
+            })?;
         if Utc::now() > state.expires_at {
             return Err(KernelError::StaleAuthorization {
                 reason: "scoped token expired before redemption".into(),
@@ -177,15 +194,21 @@ mod tests {
     fn scoped_token_is_single_use_and_expires() {
         let v = SecretVault::in_memory();
         v.insert("gh", "tok-123").expect("insert");
-        let t = v.mint_scoped_token("gh", Duration::seconds(60)).expect("mint");
+        let t = v
+            .mint_scoped_token("gh", Duration::seconds(60))
+            .expect("mint");
         assert!(t.token.starts_with("akst-"));
         assert!(!t.token.contains("tok-123"));
-        let got = v.redeem_scoped_token(&t.token, |s| s.to_string()).expect("redeem");
+        let got = v
+            .redeem_scoped_token(&t.token, |s| s.to_string())
+            .expect("redeem");
         assert_eq!(got, "tok-123");
         // Second redemption fails.
         assert!(v.redeem_scoped_token(&t.token, |s| s.to_string()).is_err());
         // Expired token fails.
-        let t2 = v.mint_scoped_token("gh", Duration::seconds(-1)).expect("mint");
+        let t2 = v
+            .mint_scoped_token("gh", Duration::seconds(-1))
+            .expect("mint");
         assert!(matches!(
             v.redeem_scoped_token(&t2.token, |s| s.to_string()),
             Err(KernelError::StaleAuthorization { .. })
@@ -207,7 +230,10 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         let v = SecretVault::open(path).expect("reopen");
-        assert_eq!(v.with_secret("gh", |s| s.to_string()).expect("read"), "tok-123");
+        assert_eq!(
+            v.with_secret("gh", |s| s.to_string()).expect("read"),
+            "tok-123"
+        );
     }
 
     #[test]

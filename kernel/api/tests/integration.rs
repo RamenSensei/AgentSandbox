@@ -79,7 +79,12 @@ async fn shell(
     command: &str,
 ) -> ak_api::StepResult {
     let lease = kernel
-        .request_capability(&who.id, &Operation::new("proc.shell"), &json!({}), Some(branch))
+        .request_capability(
+            &who.id,
+            &Operation::new("proc.shell"),
+            &json!({}),
+            Some(branch),
+        )
         .expect("shell lease");
     kernel
         .execute_step(
@@ -106,7 +111,9 @@ async fn full_lifecycle_fork_compare_merge_discard() {
     let kernel = kernel_in(&tmp);
     let who = agent(&kernel);
 
-    let ep = kernel.create_episode(&who.id, None, "fix the widget").unwrap();
+    let ep = kernel
+        .create_episode(&who.id, None, "fix the widget")
+        .unwrap();
     let r = shell(&kernel, &who, &ep.branch, "printf base > base.txt").await;
     assert!(matches!(r.observation, Observation::Success { .. }));
 
@@ -129,13 +136,22 @@ async fn full_lifecycle_fork_compare_merge_discard() {
     let merged = kernel.merge_branch(&ep.branch, &a.id, &who.id).unwrap();
     assert!(merged.merge_parent.is_some());
     kernel.discard_branch(&b.id).await.unwrap();
-    assert!(kernel.discard_branch(&b.id).await.is_err(), "double discard fails");
+    assert!(
+        kernel.discard_branch(&b.id).await.is_err(),
+        "double discard fails"
+    );
 
     // The merged workspace contains both base and the winning fix.
     let read = shell(&kernel, &who, &ep.branch, "cat base.txt fix_a.txt").await;
     match &read.observation {
-        Observation::Success { stdout_head: Some(head), .. } => {
-            assert!(head.contains("base") && head.contains("fix-a"), "got {head}")
+        Observation::Success {
+            stdout_head: Some(head),
+            ..
+        } => {
+            assert!(
+                head.contains("base") && head.contains("fix-a"),
+                "got {head}"
+            )
         }
         other => panic!("expected success, got {other:?}"),
     }
@@ -159,7 +175,11 @@ async fn denied_step_returns_structured_denial() {
             &who.id,
             &ep.branch,
             Action {
-                kind: ActionKind::Shell { command: "id".into(), cwd: None, env: BTreeMap::new() },
+                kind: ActionKind::Shell {
+                    command: "id".into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
                 lease: LeaseId::generate(),
                 intent_hint: None,
                 budget: ResourceBudget::step_default(),
@@ -188,14 +208,23 @@ async fn denied_step_returns_structured_denial() {
     // Lease bound to a different branch → BranchMismatch.
     let other = kernel.fork_branch(&ep.branch).unwrap();
     let lease = kernel
-        .request_capability(&who.id, &Operation::new("proc.shell"), &json!({}), Some(&other.id))
+        .request_capability(
+            &who.id,
+            &Operation::new("proc.shell"),
+            &json!({}),
+            Some(&other.id),
+        )
         .unwrap();
     let result = kernel
         .execute_step(
             &who.id,
             &ep.branch,
             Action {
-                kind: ActionKind::Shell { command: "id".into(), cwd: None, env: BTreeMap::new() },
+                kind: ActionKind::Shell {
+                    command: "id".into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
                 lease: lease.id,
                 intent_hint: None,
                 budget: ResourceBudget::step_default(),
@@ -221,7 +250,11 @@ impl Connector for MockConnector {
     fn operations(&self) -> Vec<(String, EffectClass)> {
         vec![("mock.create_widget".into(), EffectClass::Compensatable)]
     }
-    fn canonicalize(&self, operation: &str, args: &serde_json::Value) -> KernelResult<serde_json::Value> {
+    fn canonicalize(
+        &self,
+        operation: &str,
+        args: &serde_json::Value,
+    ) -> KernelResult<serde_json::Value> {
         assert_eq!(operation, "mock.create_widget");
         Ok(args.clone())
     }
@@ -232,10 +265,14 @@ impl Connector for MockConnector {
         })
     }
     async fn commit(&self, contract: &EffectContract) -> KernelResult<CommitResult> {
-        Ok(CommitResult { response: json!({ "created": contract.arguments["name"] }) })
+        Ok(CommitResult {
+            response: json!({ "created": contract.arguments["name"] }),
+        })
     }
     async fn compensate(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
-        Ok(CommitResult { response: json!({ "deleted": true }) })
+        Ok(CommitResult {
+            response: json!({ "deleted": true }),
+        })
     }
 }
 
@@ -304,7 +341,12 @@ async fn effect_lifecycle_with_signed_receipt() {
         .map(|e| e.kind)
         .collect();
     use ak_causal_ledger::EventKind as K;
-    for k in [K::EffectProposed, K::EffectPrepared, K::EffectApproved, K::EffectCommitted] {
+    for k in [
+        K::EffectProposed,
+        K::EffectPrepared,
+        K::EffectApproved,
+        K::EffectCommitted,
+    ] {
         assert!(kinds.contains(&k), "missing {k:?} in {kinds:?}");
     }
 
@@ -324,7 +366,10 @@ async fn sandbox_replay_reproduces_a_recorded_step() {
     let report = kernel.replay_sandbox(&r.step).await.unwrap();
     assert_eq!(report.rerun_exit_code, 0);
     assert_eq!(report.original_exit_code, Some(0));
-    assert!(report.workspace_match, "deterministic step must replay byte-identically");
+    assert!(
+        report.workspace_match,
+        "deterministic step must replay byte-identically"
+    );
 }
 
 // ---------------------------------------------------------------- HTTP layer
@@ -343,9 +388,15 @@ async fn req_json(
         }
         None => Body::empty(),
     };
-    let resp = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -432,11 +483,17 @@ async fn http_smoke_lifecycle_and_denial() {
     assert_eq!(err["code"], "NOT_FOUND");
 
     // Fork over HTTP, then compare.
-    let (status, forked) = req_json(&app, "POST", &format!("/v1/branches/{branch}/fork"), None).await;
+    let (status, forked) =
+        req_json(&app, "POST", &format!("/v1/branches/{branch}/fork"), None).await;
     assert_eq!(status, StatusCode::OK);
     let other = forked["id"].as_str().unwrap();
-    let (status, cmp) =
-        req_json(&app, "GET", &format!("/v1/branches/{branch}/compare/{other}"), None).await;
+    let (status, cmp) = req_json(
+        &app,
+        "GET",
+        &format!("/v1/branches/{branch}/compare/{other}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(cmp["changed_in_a"].as_array().unwrap().is_empty());
 }

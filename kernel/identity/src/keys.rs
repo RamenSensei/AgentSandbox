@@ -24,7 +24,9 @@ impl KernelKeypair {
     /// Generate a fresh random keypair.
     pub fn generate() -> Self {
         let mut rng = rand::rngs::OsRng;
-        Self { signing: SigningKey::generate(&mut rng) }
+        Self {
+            signing: SigningKey::generate(&mut rng),
+        }
     }
 
     /// Load a keypair from a file containing the 32-byte secret seed encoded
@@ -37,7 +39,9 @@ impl KernelKeypair {
             .as_slice()
             .try_into()
             .map_err(|_| IdentityError::Key("key file must contain exactly 32 bytes".into()))?;
-        Ok(Self { signing: SigningKey::from_bytes(&seed) })
+        Ok(Self {
+            signing: SigningKey::from_bytes(&seed),
+        })
     }
 
     /// Persist the secret seed as hex. On Unix the file is created with
@@ -114,7 +118,9 @@ mod tests {
         let b = json!({"y": {"a": 3, "b": 2}, "x": 1});
         let sig = kp.sign_canonical(&a);
         assert!(KernelKeypair::verify_canonical(&kp.public_key(), &b, &sig).unwrap());
-        assert!(!KernelKeypair::verify_canonical(&kp.public_key(), &json!({"x": 2}), &sig).unwrap());
+        assert!(
+            !KernelKeypair::verify_canonical(&kp.public_key(), &json!({"x": 2}), &sig).unwrap()
+        );
     }
 
     #[test]
@@ -149,8 +155,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.key");
         std::fs::write(&path, "not-hex!").unwrap();
-        assert!(matches!(KernelKeypair::load(&path), Err(IdentityError::Key(_))));
+        assert!(matches!(
+            KernelKeypair::load(&path),
+            Err(IdentityError::Key(_))
+        ));
         std::fs::write(&path, hex::encode([0u8; 16])).unwrap();
-        assert!(matches!(KernelKeypair::load(&path), Err(IdentityError::Key(_))));
+        assert!(matches!(
+            KernelKeypair::load(&path),
+            Err(IdentityError::Key(_))
+        ));
     }
 }

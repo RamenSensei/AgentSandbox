@@ -129,10 +129,16 @@ fn canonicalize_rejects_unknown_and_missing_fields() {
         .unwrap_err();
     assert!(err.to_string().contains("unknown field"));
     // missing field
-    assert!(gh.canonicalize(OP_CREATE_BRANCH, &json!({"owner": "a"})).is_err());
+    assert!(gh
+        .canonicalize(OP_CREATE_BRANCH, &json!({"owner": "a"}))
+        .is_err());
     // unsupported (and forbidden) operations do not exist
-    assert!(gh.canonicalize("github.merge_pull_request", &json!({})).is_err());
-    assert!(gh.canonicalize("github.delete_repository", &json!({})).is_err());
+    assert!(gh
+        .canonicalize("github.merge_pull_request", &json!({}))
+        .is_err());
+    assert!(gh
+        .canonicalize("github.delete_repository", &json!({}))
+        .is_err());
     // valid
     let ok = gh
         .canonicalize(OP_READ_REPO, &json!({"repo": "r", "owner": "a"}))
@@ -146,7 +152,12 @@ fn only_declared_operations_exist() {
     let ops: Vec<String> = gh.operations().into_iter().map(|(n, _)| n).collect();
     assert_eq!(
         ops,
-        vec![OP_READ_REPO, OP_CREATE_BRANCH, OP_CREATE_DRAFT_PR, OP_COMMENT_ISSUE]
+        vec![
+            OP_READ_REPO,
+            OP_CREATE_BRANCH,
+            OP_CREATE_DRAFT_PR,
+            OP_COMMENT_ISSUE
+        ]
     );
     for (_, class) in gh.operations() {
         assert!(class <= EffectClass::Irreversible);
@@ -163,8 +174,14 @@ async fn create_branch_prepare_captures_precondition_and_commit_creates_ref() {
         EffectClass::Compensatable,
     );
     let prepared = gh.prepare(&c).await.unwrap();
-    assert_eq!(prepared.observed_preconditions, json!({"base_head_sha": "sha-live-1"}));
-    assert!(prepared.preview["action"].as_str().unwrap().contains("feature-x"));
+    assert_eq!(
+        prepared.observed_preconditions,
+        json!({"base_head_sha": "sha-live-1"})
+    );
+    assert!(prepared.preview["action"]
+        .as_str()
+        .unwrap()
+        .contains("feature-x"));
     // No side effect from prepare.
     assert!(state.created_refs.lock().unwrap().is_empty());
 
@@ -172,7 +189,12 @@ async fn create_branch_prepare_captures_precondition_and_commit_creates_ref() {
     assert_eq!(result.response["ref"], "refs/heads/feature-x");
     assert_eq!(state.created_refs.lock().unwrap().len(), 1);
     // Auth header used the token source.
-    assert!(state.auth_headers.lock().unwrap().iter().any(|h| h == "Bearer test-token"));
+    assert!(state
+        .auth_headers
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|h| h == "Bearer test-token"));
 
     // Compensation deletes the ref.
     let comp = gh.compensate(&c).await.unwrap();
@@ -205,7 +227,10 @@ async fn draft_pr_commit_and_compensate_closes_pr() {
         EffectClass::Compensatable,
     );
     let prepared = gh.prepare(&c).await.unwrap();
-    assert_eq!(prepared.observed_preconditions["base_head_sha"], "sha-live-1");
+    assert_eq!(
+        prepared.observed_preconditions["base_head_sha"],
+        "sha-live-1"
+    );
     assert_eq!(prepared.preview["draft"], true);
 
     let result = gh.commit(&c).await.unwrap();
@@ -227,7 +252,10 @@ async fn comment_on_issue_is_irreversible_and_uncompensatable() {
         EffectClass::Irreversible,
     );
     let prepared = gh.prepare(&c).await.unwrap();
-    assert_eq!(prepared.observed_preconditions, json!({"issue_state": "open"}));
+    assert_eq!(
+        prepared.observed_preconditions,
+        json!({"issue_state": "open"})
+    );
     let result = gh.commit(&c).await.unwrap();
     assert_eq!(result.response["id"], 9001);
     assert_eq!(state.comments.lock().unwrap().len(), 1);

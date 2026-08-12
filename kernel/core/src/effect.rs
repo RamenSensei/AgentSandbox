@@ -33,15 +33,29 @@ pub enum EffectClass {
 #[serde(rename_all = "snake_case", tag = "phase")]
 pub enum EffectPhase {
     Proposed,
-    Prepared { preview: serde_json::Value },
-    Approved { approver: PrincipalId, approved_at: DateTime<Utc>, policy_epoch: u64 },
+    Prepared {
+        preview: serde_json::Value,
+    },
+    Approved {
+        approver: PrincipalId,
+        approved_at: DateTime<Utc>,
+        policy_epoch: u64,
+    },
     /// Claimed by exactly one committer; the external call is (or may be)
     /// in flight. An effect stuck here after a crash is **in doubt** until
     /// the connector's idempotency protocol resolves what really happened.
-    Committing { claimed_at: DateTime<Utc> },
-    Committed { receipt: ReceiptId },
-    Aborted { reason: String },
-    Compensated { compensating_receipt: ReceiptId },
+    Committing {
+        claimed_at: DateTime<Utc>,
+    },
+    Committed {
+        receipt: ReceiptId,
+    },
+    Aborted {
+        reason: String,
+    },
+    Compensated {
+        compensating_receipt: ReceiptId,
+    },
 }
 
 /// The canonical, immutable description of what will be done to the world.

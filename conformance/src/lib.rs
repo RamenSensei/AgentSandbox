@@ -46,7 +46,11 @@ pub fn load_cases(dir: &Path) -> Result<Vec<Case>, String> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("read {}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map(|x| x == "yaml" || x == "yml").unwrap_or(false))
+        .filter(|p| {
+            p.extension()
+                .map(|x| x == "yaml" || x == "yml")
+                .unwrap_or(false)
+        })
         .collect();
     paths.sort();
     paths
@@ -72,7 +76,10 @@ pub struct DriftableConnector {
 
 impl DriftableConnector {
     pub fn new(class: EffectClass) -> Self {
-        Self { class, world: Arc::new(Mutex::new("state-1".into())) }
+        Self {
+            class,
+            world: Arc::new(Mutex::new("state-1".into())),
+        }
     }
 }
 
@@ -95,10 +102,14 @@ impl Connector for DriftableConnector {
         })
     }
     async fn commit(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
-        Ok(CommitResult { response: json!({ "poked": true }) })
+        Ok(CommitResult {
+            response: json!({ "poked": true }),
+        })
     }
     async fn compensate(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
-        Ok(CommitResult { response: json!({ "unpoked": true }) })
+        Ok(CommitResult {
+            response: json!({ "unpoked": true }),
+        })
     }
 }
 
@@ -158,8 +169,12 @@ impl Fixture {
         let mock_world = Arc::clone(&mock.world);
         kernel.register_connector(mock).map_err(|e| e.to_string())?;
         let agent = Principal::new_agent("conformance-agent");
-        kernel.register_principal(&agent).map_err(|e| e.to_string())?;
-        let ep = kernel.create_episode(&agent.id, None, "conformance").map_err(|e| e.to_string())?;
+        kernel
+            .register_principal(&agent)
+            .map_err(|e| e.to_string())?;
+        let ep = kernel
+            .create_episode(&agent.id, None, "conformance")
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             kernel: Arc::new(kernel),
             agent,
@@ -173,7 +188,12 @@ impl Fixture {
     /// Request a branch-bound lease for `operation`.
     pub fn lease(&self, operation: &str, branch: &BranchId) -> Result<LeaseId, String> {
         self.kernel
-            .request_capability(&self.agent.id, &Operation::new(operation), &json!({}), Some(branch))
+            .request_capability(
+                &self.agent.id,
+                &Operation::new(operation),
+                &json!({}),
+                Some(branch),
+            )
             .map(|l| l.id)
             .map_err(|e| e.to_string())
     }
@@ -191,7 +211,11 @@ impl Fixture {
                 &self.agent.id,
                 branch,
                 Action {
-                    kind: ActionKind::Shell { command: command.into(), cwd: None, env: BTreeMap::new() },
+                    kind: ActionKind::Shell {
+                        command: command.into(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                    },
                     lease,
                     intent_hint: None,
                     budget,
@@ -202,15 +226,24 @@ impl Fixture {
     }
 
     /// Convenience: fresh lease + default step budget.
-    pub async fn shell(&self, branch: &BranchId, command: &str) -> Result<ak_api::StepResult, String> {
+    pub async fn shell(
+        &self,
+        branch: &BranchId,
+        command: &str,
+    ) -> Result<ak_api::StepResult, String> {
         let lease = self.lease("proc.shell", branch)?;
-        self.shell_with(branch, lease, command, ResourceBudget::step_default()).await
+        self.shell_with(branch, lease, command, ResourceBudget::step_default())
+            .await
     }
 
     /// Propose a mock effect through a full kernel step.
     pub async fn propose_mock(&self) -> Result<ak_core::ids::EffectId, String> {
         let lease = self.lease("mock.poke", &self.branch)?;
-        let world = self.mock_world.lock().map(|w| w.clone()).unwrap_or_default();
+        let world = self
+            .mock_world
+            .lock()
+            .map(|w| w.clone())
+            .unwrap_or_default();
         let result = self
             .kernel
             .execute_step(
@@ -239,9 +272,10 @@ impl Fixture {
 fn expect_denial(obs: &Observation, code: DenialCode) -> Result<(), String> {
     match obs {
         Observation::Denied { denial } if denial.code == code => Ok(()),
-        Observation::Denied { denial } => {
-            Err(format!("expected denial code {code:?}, got {:?}", denial.code))
-        }
+        Observation::Denied { denial } => Err(format!(
+            "expected denial code {code:?}, got {:?}",
+            denial.code
+        )),
         other => Err(format!("expected a denial, got {other:?}")),
     }
 }
@@ -285,7 +319,11 @@ async fn episode_lifecycle(params: &Value) -> Result<(), String> {
     if !matches!(r.observation, Observation::Success { .. }) {
         return Err(format!("step failed: {:?}", r.observation));
     }
-    let desc = f.kernel.describe_episode(&f.episode).await.map_err(|e| e.to_string())?;
+    let desc = f
+        .kernel
+        .describe_episode(&f.episode)
+        .await
+        .map_err(|e| e.to_string())?;
     if desc.branches.len() != 1 {
         return Err(format!("expected 1 branch, got {}", desc.branches.len()));
     }
@@ -294,7 +332,10 @@ async fn episode_lifecycle(params: &Value) -> Result<(), String> {
         return Err("branch head must advance to the step's state".into());
     }
     if !head.delta.files.iter().any(|c| c.path() == file) {
-        return Err(format!("delta must record `{file}`: {:?}", head.delta.files));
+        return Err(format!(
+            "delta must record `{file}`: {:?}",
+            head.delta.files
+        ));
     }
     Ok(())
 }
@@ -303,8 +344,14 @@ async fn step_observation_shape(params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
     let text = p_str(params, "text", "observable-output");
     let r = f.shell(&f.branch, &format!("printf {text}")).await?;
-    let Observation::Success { summary, stdout_head, exit_code, full_output, truncated, .. } =
-        &r.observation
+    let Observation::Success {
+        summary,
+        stdout_head,
+        exit_code,
+        full_output,
+        truncated,
+        ..
+    } = &r.observation
     else {
         return Err(format!("expected success, got {:?}", r.observation));
     };
@@ -315,7 +362,9 @@ async fn step_observation_shape(params: &Value) -> Result<(), String> {
         return Err("small output must not truncate".into());
     }
     if stdout_head.as_deref() != Some(text) {
-        return Err(format!("stdout_head must carry the head bytes, got {stdout_head:?}"));
+        return Err(format!(
+            "stdout_head must carry the head bytes, got {stdout_head:?}"
+        ));
     }
     if !full_output.as_str().starts_with("sha256:") {
         return Err("full_output must be a sha256 content hash".into());
@@ -331,13 +380,23 @@ async fn denial_machine_readable(_params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
     // Unknown lease → denial observation with every required field.
     let r = f
-        .shell_with(&f.branch, LeaseId::generate(), "id", ResourceBudget::step_default())
+        .shell_with(
+            &f.branch,
+            LeaseId::generate(),
+            "id",
+            ResourceBudget::step_default(),
+        )
         .await?;
     let Observation::Denied { denial } = &r.observation else {
         return Err(format!("expected denial, got {:?}", r.observation));
     };
     let v = serde_json::to_value(denial).map_err(|e| e.to_string())?;
-    for key in ["code", "attempted_operation", "reason", "escalation_allowed"] {
+    for key in [
+        "code",
+        "attempted_operation",
+        "reason",
+        "escalation_allowed",
+    ] {
         if v.get(key).is_none() {
             return Err(format!("denial must carry `{key}`: {v}"));
         }
@@ -354,7 +413,10 @@ async fn denial_machine_readable(_params: &Value) -> Result<(), String> {
     ) {
         Err(KernelError::Denied(d)) => {
             if d.code != DenialCode::CapabilityDenied {
-                return Err(format!("default deny must be CAPABILITY_DENIED, got {:?}", d.code));
+                return Err(format!(
+                    "default deny must be CAPABILITY_DENIED, got {:?}",
+                    d.code
+                ));
             }
             Ok(())
         }
@@ -365,12 +427,21 @@ async fn denial_machine_readable(_params: &Value) -> Result<(), String> {
 async fn lease_expiry(params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
     let lease_id = f.lease("proc.shell", &f.branch)?;
-    let lease = f.kernel.leases().get(&lease_id).map_err(|e| e.to_string())?;
+    let lease = f
+        .kernel
+        .leases()
+        .get(&lease_id)
+        .map_err(|e| e.to_string())?;
     let skew = Duration::seconds(p_u64(params, "skew_seconds", 7200) as i64);
     // Deterministic clock: the same lease refuses once past its expiry.
     let future = Utc::now() + skew;
-    match lease.check(&f.agent.id, &Operation::new("proc.shell"), &json!({}), Some(&f.branch), future)
-    {
+    match lease.check(
+        &f.agent.id,
+        &Operation::new("proc.shell"),
+        &json!({}),
+        Some(&f.branch),
+        future,
+    ) {
         Err(ak_core::capability::LeaseCheckFailure::Expired { .. }) => Ok(()),
         other => Err(format!("expected Expired at now+{skew}, got {other:?}")),
     }
@@ -382,13 +453,20 @@ async fn lease_exhaustion(params: &Value) -> Result<(), String> {
     let lease = f.lease("proc.shell", &f.branch)?;
     for _ in 0..uses {
         let r = f
-            .shell_with(&f.branch, lease.clone(), "true", ResourceBudget::step_default())
+            .shell_with(
+                &f.branch,
+                lease.clone(),
+                "true",
+                ResourceBudget::step_default(),
+            )
             .await?;
         if !matches!(r.observation, Observation::Success { .. }) {
             return Err(format!("in-budget use must succeed: {:?}", r.observation));
         }
     }
-    let r = f.shell_with(&f.branch, lease, "true", ResourceBudget::step_default()).await?;
+    let r = f
+        .shell_with(&f.branch, lease, "true", ResourceBudget::step_default())
+        .await?;
     expect_denial(&r.observation, DenialCode::CapabilityExhausted)
 }
 
@@ -397,14 +475,20 @@ async fn lease_branch_binding(_params: &Value) -> Result<(), String> {
     let other = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
     let lease = f.lease("proc.shell", &other.id)?;
     // Presenting a lease bound to `other` on the main branch must fail.
-    let r = f.shell_with(&f.branch, lease, "true", ResourceBudget::step_default()).await?;
+    let r = f
+        .shell_with(&f.branch, lease, "true", ResourceBudget::step_default())
+        .await?;
     expect_denial(&r.observation, DenialCode::BranchMismatch)
 }
 
 async fn attenuation_no_widening(params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
-    let child = f.agent.spawn_child(ak_core::PrincipalKind::SubAgent, "worker");
-    f.kernel.register_principal(&child).map_err(|e| e.to_string())?;
+    let child = f
+        .agent
+        .spawn_child(ak_core::PrincipalKind::SubAgent, "worker");
+    f.kernel
+        .register_principal(&child)
+        .map_err(|e| e.to_string())?;
     let parent = f.lease("proc.shell", &f.branch)?;
     let parent_lease = f.kernel.leases().get(&parent).map_err(|e| e.to_string())?;
     // Widen the use count beyond the parent's — must be rejected.
@@ -419,11 +503,21 @@ async fn attenuation_no_widening(params: &Value) -> Result<(), String> {
         ResourceBudget::zero(),
     ) {
         Err(_) => {}
-        Ok(l) => return Err(format!("widened delegation must be rejected, got lease {}", l.id)),
+        Ok(l) => {
+            return Err(format!(
+                "widened delegation must be rejected, got lease {}",
+                l.id
+            ))
+        }
     }
     // Also: widening a constraint must be rejected at the capability layer.
     let mut constraints = IndexMap::new();
-    constraints.insert("command".into(), Constraint::Prefix { prefix: "cargo ".into() });
+    constraints.insert(
+        "command".into(),
+        Constraint::Prefix {
+            prefix: "cargo ".into(),
+        },
+    );
     let mut narrow = parent_lease.clone();
     narrow.constraints = constraints;
     let mut widened = IndexMap::new();
@@ -465,13 +559,22 @@ async fn effect_phase_machine(_params: &Value) -> Result<(), String> {
     if f.kernel.approve_effect(&effect, &f.agent.id).is_ok() {
         return Err("approve before prepare must be refused".into());
     }
-    f.kernel.prepare_effect(&effect).await.map_err(|e| e.to_string())?;
+    f.kernel
+        .prepare_effect(&effect)
+        .await
+        .map_err(|e| e.to_string())?;
     // prepare twice → refused.
     if f.kernel.prepare_effect(&effect).await.is_ok() {
         return Err("double prepare must be refused".into());
     }
-    f.kernel.approve_effect(&effect, &f.agent.id).map_err(|e| e.to_string())?;
-    let receipt = f.kernel.commit_effect(&effect).await.map_err(|e| e.to_string())?;
+    f.kernel
+        .approve_effect(&effect, &f.agent.id)
+        .map_err(|e| e.to_string())?;
+    let receipt = f
+        .kernel
+        .commit_effect(&effect)
+        .await
+        .map_err(|e| e.to_string())?;
     let e = f.kernel.effect(&effect).map_err(|e| e.to_string())?;
     match e.phase {
         EffectPhase::Committed { receipt: r } if r == receipt.id => {}
@@ -495,14 +598,27 @@ async fn effect_phase_machine(_params: &Value) -> Result<(), String> {
 async fn irreversible_requires_approval(_params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Irreversible).await?;
     let effect = f.propose_mock().await?;
-    f.kernel.prepare_effect(&effect).await.map_err(|e| e.to_string())?;
+    f.kernel
+        .prepare_effect(&effect)
+        .await
+        .map_err(|e| e.to_string())?;
     // Irreversible effects can never commit straight from Prepared.
+    #[allow(clippy::redundant_guards)]
     match f.kernel.commit_effect(&effect).await {
-        Err(KernelError::WrongEffectPhase { expected, .. }) if expected == "approved" => {}
-        other => return Err(format!("expected WrongEffectPhase(approved), got {other:?}")),
+        Err(KernelError::WrongEffectPhase { expected: e, .. }) if e == "approved" => {}
+        other => {
+            return Err(format!(
+                "expected WrongEffectPhase(approved), got {other:?}"
+            ))
+        }
     }
-    f.kernel.approve_effect(&effect, &f.agent.id).map_err(|e| e.to_string())?;
-    f.kernel.commit_effect(&effect).await.map_err(|e| e.to_string())?;
+    f.kernel
+        .approve_effect(&effect, &f.agent.id)
+        .map_err(|e| e.to_string())?;
+    f.kernel
+        .commit_effect(&effect)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -522,14 +638,34 @@ async fn duplicate_idempotency(params: &Value) -> Result<(), String> {
     let lease = f.lease("mock.poke", &f.branch)?;
     let broker = f.kernel.broker();
     let e1 = broker
-        .propose(contract(&world), f.agent.id.clone(), f.branch.clone(), step.clone(), lease.clone())
+        .propose(
+            contract(&world),
+            f.agent.id.clone(),
+            f.branch.clone(),
+            step.clone(),
+            lease.clone(),
+        )
         .map_err(|e| e.to_string())?;
-    f.kernel.prepare_effect(&e1.id).await.map_err(|e| e.to_string())?;
-    f.kernel.approve_effect(&e1.id, &f.agent.id).map_err(|e| e.to_string())?;
-    f.kernel.commit_effect(&e1.id).await.map_err(|e| e.to_string())?;
+    f.kernel
+        .prepare_effect(&e1.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    f.kernel
+        .approve_effect(&e1.id, &f.agent.id)
+        .map_err(|e| e.to_string())?;
+    f.kernel
+        .commit_effect(&e1.id)
+        .await
+        .map_err(|e| e.to_string())?;
     // A retried proposal under the same key must be refused with the
     // original receipt named.
-    match broker.propose(contract(&world), f.agent.id.clone(), f.branch.clone(), step, lease) {
+    match broker.propose(
+        contract(&world),
+        f.agent.id.clone(),
+        f.branch.clone(),
+        step,
+        lease,
+    ) {
         Err(KernelError::DuplicateCommit { key: k, receipt }) => {
             if k != key || receipt.is_empty() {
                 return Err("duplicate must name the key and the original receipt".into());
@@ -543,8 +679,13 @@ async fn duplicate_idempotency(params: &Value) -> Result<(), String> {
 async fn stale_precondition_abort(params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
     let effect = f.propose_mock().await?;
-    f.kernel.prepare_effect(&effect).await.map_err(|e| e.to_string())?;
-    f.kernel.approve_effect(&effect, &f.agent.id).map_err(|e| e.to_string())?;
+    f.kernel
+        .prepare_effect(&effect)
+        .await
+        .map_err(|e| e.to_string())?;
+    f.kernel
+        .approve_effect(&effect, &f.agent.id)
+        .map_err(|e| e.to_string())?;
     // The world drifts between approval and commit.
     let drifted = p_str(params, "drifted_value", "state-2");
     *f.mock_world.lock().map_err(|e| e.to_string())? = drifted.to_string();
@@ -571,7 +712,9 @@ async fn merge_conflict_reporting(params: &Value) -> Result<(), String> {
     let b = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
     f.shell(&a.id, &format!("printf edit-a > {file}")).await?;
     f.shell(&b.id, &format!("printf edit-b > {file}")).await?;
-    f.kernel.merge_branch(&f.branch, &a.id, &f.agent.id).map_err(|e| e.to_string())?;
+    f.kernel
+        .merge_branch(&f.branch, &a.id, &f.agent.id)
+        .map_err(|e| e.to_string())?;
     match f.kernel.merge_branch(&f.branch, &b.id, &f.agent.id) {
         Err(KernelError::MergeConflict { paths }) => {
             if paths != vec![file.to_string()] {
@@ -589,7 +732,10 @@ async fn replay_class_honesty(_params: &Value) -> Result<(), String> {
     let head = f.kernel.dag().head(&f.branch).map_err(|e| e.to_string())?;
     // The local backend must record FilesystemOnly — no over-claiming.
     if head.replay_class != ReplayClass::FilesystemOnly {
-        return Err(format!("local steps must record FilesystemOnly, got {:?}", head.replay_class));
+        return Err(format!(
+            "local steps must record FilesystemOnly, got {:?}",
+            head.replay_class
+        ));
     }
     if !head.replay_class.supports(ReplayMode::Audit) {
         return Err("every class must support audit replay".into());
@@ -598,7 +744,11 @@ async fn replay_class_honesty(_params: &Value) -> Result<(), String> {
         return Err("AuditOnly must not claim sandbox replay".into());
     }
     // Sandbox replay of a deterministic step reproduces the workspace.
-    let report = f.kernel.replay_sandbox(&r.step).await.map_err(|e| e.to_string())?;
+    let report = f
+        .kernel
+        .replay_sandbox(&r.step)
+        .await
+        .map_err(|e| e.to_string())?;
     if !report.workspace_match {
         return Err("deterministic step must replay byte-identically".into());
     }
@@ -614,7 +764,10 @@ async fn budget_refusal(params: &Value) -> Result<(), String> {
     let lease = f.lease("proc.shell", &f.branch)?;
     // A step requesting more than the episode has left is refused *before*
     // spending anything, with a machine-readable budget denial.
-    let big = ResourceBudget { cpu_ms: 10_000, ..ResourceBudget::zero() };
+    let big = ResourceBudget {
+        cpu_ms: 10_000,
+        ..ResourceBudget::zero()
+    };
     let r = f.shell_with(&f.branch, lease, "true", big).await?;
     expect_denial(&r.observation, DenialCode::BudgetExhausted)?;
     // The refusal did not advance the branch head.
@@ -636,7 +789,12 @@ async fn trace_causality(_params: &Value) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     use ak_causal_ledger::EventKind as K;
-    let find = |k: K| events.iter().find(|e| e.kind == k).ok_or(format!("missing {k:?}"));
+    let find = |k: K| {
+        events
+            .iter()
+            .find(|e| e.kind == k)
+            .ok_or(format!("missing {k:?}"))
+    };
     let tool = find(K::ToolInvocation)?;
     let delta = find(K::StateDeltaRecorded)?;
     let obs = find(K::ObservationEmitted)?;
@@ -647,6 +805,9 @@ async fn trace_causality(_params: &Value) -> Result<(), String> {
         return Err("ObservationEmitted must cite StateDeltaRecorded as its cause".into());
     }
     // The hash chain must verify end to end.
-    f.kernel.ledger().verify_chain().map_err(|e| e.to_string())?;
+    f.kernel
+        .ledger()
+        .verify_chain()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

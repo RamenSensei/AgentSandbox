@@ -14,9 +14,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op")]
 pub enum FileChange {
-    Added { path: String, blob: ContentHash, mode: u32 },
-    Modified { path: String, old_blob: ContentHash, new_blob: ContentHash },
-    Deleted { path: String, old_blob: ContentHash },
+    Added {
+        path: String,
+        blob: ContentHash,
+        mode: u32,
+    },
+    Modified {
+        path: String,
+        old_blob: ContentHash,
+        new_blob: ContentHash,
+    },
+    Deleted {
+        path: String,
+        old_blob: ContentHash,
+    },
 }
 
 impl FileChange {

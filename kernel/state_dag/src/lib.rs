@@ -44,7 +44,12 @@ mod tests {
         let dag = StateDag::open(&tmp.path().join("dag.db"), &tmp.path().join("cas")).unwrap();
         let ws = tmp.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
-        Fixture { dag, ws, actor: PrincipalId::generate(), _tmp: tmp }
+        Fixture {
+            dag,
+            ws,
+            actor: PrincipalId::generate(),
+            _tmp: tmp,
+        }
     }
 
     fn write(f: &Fixture, path: &str, content: &str) {
@@ -67,7 +72,13 @@ mod tests {
         write(&f, "b.txt", "new");
         let n1 = f
             .dag
-            .snapshot_and_append(&ep.branch, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .snapshot_and_append(
+                &ep.branch,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
             .unwrap();
         assert_eq!(n1.parent.as_ref(), Some(&ep.root.id));
         assert_eq!(n1.delta.files.len(), 2);
@@ -86,7 +97,10 @@ mod tests {
     #[test]
     fn discarded_branch_rejects_appends_and_double_discard() {
         let f = fixture();
-        let ep = f.dag.create_episode(&f.actor, None, ReplayClass::FilesystemOnly).unwrap();
+        let ep = f
+            .dag
+            .create_episode(&f.actor, None, ReplayClass::FilesystemOnly)
+            .unwrap();
         let br = f.dag.fork(&ep.root.id).unwrap();
         f.dag.discard_branch(&br.id).unwrap();
         assert!(matches!(
@@ -95,7 +109,13 @@ mod tests {
         ));
         write(&f, "x.txt", "x");
         assert!(matches!(
-            f.dag.snapshot_and_append(&br.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly),
+            f.dag.snapshot_and_append(
+                &br.id,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly
+            ),
             Err(KernelError::BranchDiscarded { .. })
         ));
     }
@@ -116,14 +136,26 @@ mod tests {
         write(&f, "a-only.txt", "A");
         let ha = f
             .dag
-            .snapshot_and_append(&br_a.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .snapshot_and_append(
+                &br_a.id,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
             .unwrap();
 
         fs::remove_file(f.ws.join("a-only.txt")).unwrap();
         write(&f, "b-only.txt", "B");
         let hb = f
             .dag
-            .snapshot_and_append(&br_b.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .snapshot_and_append(
+                &br_b.id,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
             .unwrap();
 
         assert_eq!(f.dag.lca(&ha.id, &hb.id).unwrap(), ep.root.id);
@@ -132,12 +164,17 @@ mod tests {
         assert_eq!(cmp.base, ep.root.id);
         assert_eq!(cmp.changed_in_a.len(), 1);
         assert_eq!(cmp.changed_in_b.len(), 1);
-        assert!(matches!(&cmp.changed_in_a[0], FileChange::Added { path, .. } if path == "a-only.txt"));
+        assert!(
+            matches!(&cmp.changed_in_a[0], FileChange::Added { path, .. } if path == "a-only.txt")
+        );
 
         let merged = f.dag.merge(&br_a.id, &br_b.id, &f.actor).unwrap();
         assert_eq!(merged.parent.as_ref(), Some(&ha.id));
         assert_eq!(merged.merge_parent.as_ref(), Some(&hb.id));
-        assert_eq!(f.dag.get_branch(&br_b.id).unwrap().status, BranchStatus::Merged);
+        assert_eq!(
+            f.dag.get_branch(&br_b.id).unwrap().status,
+            BranchStatus::Merged
+        );
 
         let out = f._tmp.path().join("merged");
         f.dag.materialize(&merged.id, &out).unwrap();
@@ -163,11 +200,23 @@ mod tests {
         write(&f, "shared.txt", "edit-A");
         let ha = f
             .dag
-            .snapshot_and_append(&br_a.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .snapshot_and_append(
+                &br_a.id,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
             .unwrap();
         write(&f, "shared.txt", "edit-B");
         f.dag
-            .snapshot_and_append(&br_b.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .snapshot_and_append(
+                &br_b.id,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
             .unwrap();
 
         match f.dag.merge(&br_a.id, &br_b.id, &f.actor) {
@@ -178,7 +227,10 @@ mod tests {
         }
         // Nothing written: heads unchanged, both branches still active.
         assert_eq!(f.dag.get_branch(&br_a.id).unwrap().head, ha.id);
-        assert_eq!(f.dag.get_branch(&br_b.id).unwrap().status, BranchStatus::Active);
+        assert_eq!(
+            f.dag.get_branch(&br_b.id).unwrap().status,
+            BranchStatus::Active
+        );
     }
 
     #[test]
@@ -193,7 +245,13 @@ mod tests {
         write(&f, "doomed.txt", "unique-doomed-content");
         let doomed = f
             .dag
-            .snapshot_and_append(&br.id, &StepId::generate(), &f.actor, &f.ws, ReplayClass::FilesystemOnly)
+            .snapshot_and_append(
+                &br.id,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
             .unwrap();
 
         // Nothing to sweep while the branch is alive.

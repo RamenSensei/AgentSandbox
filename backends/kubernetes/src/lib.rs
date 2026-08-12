@@ -143,7 +143,10 @@ struct ExecResponse {
 }
 
 fn unavailable(reason: impl std::fmt::Display) -> KernelError {
-    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+    KernelError::BackendUnavailable {
+        backend: BACKEND_NAME.into(),
+        reason: reason.to_string(),
+    }
 }
 
 fn shq(s: &str) -> String {
@@ -196,11 +199,17 @@ impl KubernetesClient {
     /// Create a Sandbox object for a branch; returns its generated name.
     pub async fn create_sandbox(&self, branch: &BranchId) -> KernelResult<String> {
         let mut labels = BTreeMap::new();
-        labels.insert("agent-kernel/branch".to_string(), branch.as_str().to_string());
+        labels.insert(
+            "agent-kernel/branch".to_string(),
+            branch.as_str().to_string(),
+        );
         let manifest = SandboxManifest {
             api_version: "agents.x-k8s.io/v1alpha1",
             kind: "Sandbox",
-            metadata: SandboxMetadata { generate_name: Some("ak-sandbox-"), labels },
+            metadata: SandboxMetadata {
+                generate_name: Some("ak-sandbox-"),
+                labels,
+            },
             spec: SandboxSpec {
                 image: &self.config.image,
                 runtime_class_name: self.config.runtime_class.as_deref(),
@@ -219,8 +228,17 @@ impl KubernetesClient {
         timeout_ms: u64,
     ) -> KernelResult<(i32, String, String, u64)> {
         let url = format!("{}/{sandbox}/exec", self.sandboxes_url());
-        let resp: ExecResponse =
-            self.post_json(&url, &ExecRequest { command, cwd, env, timeout_ms }).await?;
+        let resp: ExecResponse = self
+            .post_json(
+                &url,
+                &ExecRequest {
+                    command,
+                    cwd,
+                    env,
+                    timeout_ms,
+                },
+            )
+            .await?;
         Ok((resp.exit_code, resp.stdout, resp.stderr, resp.duration_ms))
     }
 
@@ -262,7 +280,10 @@ impl KubernetesBackend {
             return Ok(name.clone());
         }
         let name = self.client.create_sandbox(branch).await?;
-        self.sandboxes.lock().await.insert(branch.clone(), name.clone());
+        self.sandboxes
+            .lock()
+            .await
+            .insert(branch.clone(), name.clone());
         Ok(name)
     }
 }
@@ -288,11 +309,19 @@ impl Backend for KubernetesBackend {
         let empty = BTreeMap::new();
         let (exit_code, stdout, stderr, duration_ms) = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
-                self.client.exec(&sandbox, command, cwd.as_deref(), env, timeout_ms).await?
+                self.client
+                    .exec(&sandbox, command, cwd.as_deref(), env, timeout_ms)
+                    .await?
             }
             ActionKind::ReadFile { path } => {
                 self.client
-                    .exec(&sandbox, &format!("cat {}", shq(path)), None, &empty, timeout_ms)
+                    .exec(
+                        &sandbox,
+                        &format!("cat {}", shq(path)),
+                        None,
+                        &empty,
+                        timeout_ms,
+                    )
                     .await?
             }
             ActionKind::WriteFile { path, contents_b64 } => {
@@ -301,11 +330,19 @@ impl Backend for KubernetesBackend {
                     p = shq(path),
                     b = shq(contents_b64)
                 );
-                self.client.exec(&sandbox, &cmd, None, &empty, timeout_ms).await?
+                self.client
+                    .exec(&sandbox, &cmd, None, &empty, timeout_ms)
+                    .await?
             }
             ActionKind::DeletePath { path } => {
                 self.client
-                    .exec(&sandbox, &format!("rm -rf -- {}", shq(path)), None, &empty, timeout_ms)
+                    .exec(
+                        &sandbox,
+                        &format!("rm -rf -- {}", shq(path)),
+                        None,
+                        &empty,
+                        timeout_ms,
+                    )
                     .await?
             }
             other => {
@@ -350,8 +387,9 @@ mod tests {
     #[test]
     fn isolation_is_parameterized_by_config() {
         for strength in [40u8, 70, 90] {
-            let b = KubernetesBackend::new(KubernetesConfig::new("http://localhost:6443", strength))
-                .unwrap();
+            let b =
+                KubernetesBackend::new(KubernetesConfig::new("http://localhost:6443", strength))
+                    .unwrap();
             assert_eq!(b.profile().isolation_strength, strength);
         }
     }

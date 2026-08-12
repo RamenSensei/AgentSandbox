@@ -118,7 +118,11 @@ impl HttpConnector {
         let parsed = Url::parse(url).map_err(|e| conn_err(format!("invalid url `{url}`: {e}")))?;
         match parsed.scheme() {
             "http" | "https" => {}
-            other => return Err(conn_err(format!("scheme `{other}` refused: only http(s) allowed"))),
+            other => {
+                return Err(conn_err(format!(
+                    "scheme `{other}` refused: only http(s) allowed"
+                )))
+            }
         }
         let host = parsed
             .host_str()
@@ -126,7 +130,11 @@ impl HttpConnector {
         let d = host.to_ascii_lowercase();
         // Literal IPs (v4, or bracketed v6) are refused. `Url` normalizes
         // hosts, so parsing the host string catches every literal form.
-        if let Ok(ip) = d.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        if let Ok(ip) = d
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+        {
             self.refuse_ip(ip)?;
         }
         if !self.config.danger_allow_loopback
@@ -142,15 +150,21 @@ impl HttpConnector {
             return Ok(());
         }
         if is_forbidden_ip(&ip) {
-            return Err(conn_err(format!("ip `{ip}` refused: private/loopback/link-local range")));
+            return Err(conn_err(format!(
+                "ip `{ip}` refused: private/loopback/link-local range"
+            )));
         }
         // Even public literal IPs are refused: guests must name their target.
-        Err(conn_err(format!("literal ip `{ip}` refused: use a domain name")))
+        Err(conn_err(format!(
+            "literal ip `{ip}` refused: use a domain name"
+        )))
     }
 
     /// Does the host of `url` match the read-safe allowlist?
     pub fn is_allowlisted(&self, url: &Url) -> bool {
-        let Some(host) = url.host_str() else { return false };
+        let Some(host) = url.host_str() else {
+            return false;
+        };
         self.config
             .allowlist
             .iter()
@@ -176,14 +190,21 @@ impl HttpConnector {
         let mut url = start;
         for _hop in 0..=self.config.max_redirects {
             debug!(%url, "http.get fetch");
-            let resp = self.client.get(url.clone()).send().await.map_err(conn_err)?;
+            let resp = self
+                .client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(conn_err)?;
             let status = resp.status();
             if status.is_redirection() {
                 let location = resp
                     .headers()
                     .get(reqwest::header::LOCATION)
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| conn_err(format!("redirect {status} without Location header")))?;
+                    .ok_or_else(|| {
+                        conn_err(format!("redirect {status} without Location header"))
+                    })?;
                 let next = url
                     .join(location)
                     .map_err(|e| conn_err(format!("bad redirect target `{location}`: {e}")))?;
@@ -221,7 +242,10 @@ impl HttpConnector {
                 "bytes": body.len(),
             }));
         }
-        Err(conn_err(format!("too many redirects (max {})", self.config.max_redirects)))
+        Err(conn_err(format!(
+            "too many redirects (max {})",
+            self.config.max_redirects
+        )))
     }
 }
 
@@ -242,7 +266,9 @@ impl Connector for HttpConnector {
         if operation != OP_HTTP_GET {
             return Err(conn_err(format!("unsupported operation `{operation}`")));
         }
-        let obj = args.as_object().ok_or_else(|| conn_err("arguments must be an object"))?;
+        let obj = args
+            .as_object()
+            .ok_or_else(|| conn_err("arguments must be an object"))?;
         for key in obj.keys() {
             if key != "url" {
                 return Err(conn_err(format!("unknown field `{key}`")));

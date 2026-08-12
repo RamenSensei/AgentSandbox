@@ -52,7 +52,11 @@ pub struct ForkdConfig {
 
 impl ForkdConfig {
     pub fn new(endpoint: impl Into<String>) -> Self {
-        Self { endpoint: endpoint.into(), auth_token: None, request_timeout: Duration::from_secs(30) }
+        Self {
+            endpoint: endpoint.into(),
+            auth_token: None,
+            request_timeout: Duration::from_secs(30),
+        }
     }
 
     /// Read the auth token from `FORKD_API_TOKEN` in the environment.
@@ -101,7 +105,10 @@ struct ExecResponse {
 }
 
 fn unavailable(reason: impl std::fmt::Display) -> KernelError {
-    KernelError::BackendUnavailable { backend: BACKEND_NAME.into(), reason: reason.to_string() }
+    KernelError::BackendUnavailable {
+        backend: BACKEND_NAME.into(),
+        reason: reason.to_string(),
+    }
 }
 
 /// POSIX single-quote a string for safe embedding in `sh -c`.
@@ -153,14 +160,24 @@ impl ForkdClient {
 
     pub async fn fork_parent(&self, parent: &str, branch: &BranchId) -> KernelResult<String> {
         let resp: ForkResponse = self
-            .post(&format!("/v1/parents/{parent}/fork"), &ForkRequest { branch: branch.as_str() })
+            .post(
+                &format!("/v1/parents/{parent}/fork"),
+                &ForkRequest {
+                    branch: branch.as_str(),
+                },
+            )
             .await?;
         Ok(resp.child_id)
     }
 
     pub async fn fork_child(&self, child: &str, branch: &BranchId) -> KernelResult<String> {
         let resp: ForkResponse = self
-            .post(&format!("/v1/children/{child}/fork"), &ForkRequest { branch: branch.as_str() })
+            .post(
+                &format!("/v1/children/{child}/fork"),
+                &ForkRequest {
+                    branch: branch.as_str(),
+                },
+            )
             .await?;
         Ok(resp.child_id)
     }
@@ -176,7 +193,12 @@ impl ForkdClient {
         let resp: ExecResponse = self
             .post(
                 &format!("/v1/children/{child}/exec"),
-                &ExecRequest { command, cwd, env, timeout_ms },
+                &ExecRequest {
+                    command,
+                    cwd,
+                    env,
+                    timeout_ms,
+                },
             )
             .await?;
         Ok(ExecOutcome {
@@ -188,8 +210,10 @@ impl ForkdClient {
     }
 
     pub async fn delete_child(&self, child: &str) -> KernelResult<()> {
-        let url =
-            format!("{}/v1/children/{child}", self.config.endpoint.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/children/{child}",
+            self.config.endpoint.trim_end_matches('/')
+        );
         let mut req = self.http.delete(&url);
         if let Some(token) = &self.config.auth_token {
             req = req.bearer_auth(token);
@@ -247,7 +271,10 @@ impl ForkdBackend {
             }
         };
         let child = self.client.fork_parent(&parent, branch).await?;
-        self.children.lock().await.insert(branch.clone(), child.clone());
+        self.children
+            .lock()
+            .await
+            .insert(branch.clone(), child.clone());
         Ok(child)
     }
 }
@@ -272,11 +299,19 @@ impl Backend for ForkdBackend {
         let empty = BTreeMap::new();
         let out = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
-                self.client.exec(&child, command, cwd.as_deref(), env, timeout_ms).await?
+                self.client
+                    .exec(&child, command, cwd.as_deref(), env, timeout_ms)
+                    .await?
             }
             ActionKind::ReadFile { path } => {
                 self.client
-                    .exec(&child, &format!("cat {}", shq(path)), None, &empty, timeout_ms)
+                    .exec(
+                        &child,
+                        &format!("cat {}", shq(path)),
+                        None,
+                        &empty,
+                        timeout_ms,
+                    )
                     .await?
             }
             ActionKind::WriteFile { path, contents_b64 } => {
@@ -285,11 +320,19 @@ impl Backend for ForkdBackend {
                     p = shq(path),
                     b = shq(contents_b64)
                 );
-                self.client.exec(&child, &cmd, None, &empty, timeout_ms).await?
+                self.client
+                    .exec(&child, &cmd, None, &empty, timeout_ms)
+                    .await?
             }
             ActionKind::DeletePath { path } => {
                 self.client
-                    .exec(&child, &format!("rm -rf -- {}", shq(path)), None, &empty, timeout_ms)
+                    .exec(
+                        &child,
+                        &format!("rm -rf -- {}", shq(path)),
+                        None,
+                        &empty,
+                        timeout_ms,
+                    )
                     .await?
             }
             other => {
@@ -299,7 +342,10 @@ impl Backend for ForkdBackend {
                 )))
             }
         };
-        self.state_children.lock().await.insert(req.base_state.clone(), child);
+        self.state_children
+            .lock()
+            .await
+            .insert(req.base_state.clone(), child);
         let paths_written = match &req.action {
             ActionKind::WriteFile { path, .. } => vec![path.clone()],
             _ => Vec::new(),
@@ -323,7 +369,9 @@ impl Backend for ForkdBackend {
     /// `Ok(false)` when that state is unknown to this backend.
     async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
         let source = { self.state_children.lock().await.get(from).cloned() };
-        let Some(source) = source else { return Ok(false) };
+        let Some(source) = source else {
+            return Ok(false);
+        };
         let child = self.client.fork_child(&source, to_branch).await?;
         self.children.lock().await.insert(to_branch.clone(), child);
         Ok(true)

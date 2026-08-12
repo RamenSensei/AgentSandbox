@@ -168,7 +168,7 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
     }
     // Reading the root directory entry itself is required by dyld.
     reads.push("(literal \"/\")".into());
-    if readable.is_empty() {
+    if grants_whole_workspace(readable) {
         reads.push(format!("(subpath \"{}\")", ws_canon.display()));
     } else {
         for prefix in normalized_prefixes(readable) {
@@ -182,7 +182,7 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
     }
 
     let mut writes: Vec<String> = vec!["(literal \"/dev/null\")".into()];
-    if writable.is_empty() {
+    if grants_whole_workspace(writable) {
         writes.push(format!("(subpath \"{}\")", ws_canon.display()));
     } else {
         for prefix in normalized_prefixes(writable) {
@@ -209,6 +209,17 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
         reads = reads.join(" "),
         writes = writes.join(" "),
     )
+}
+
+/// True when a prefix list grants the whole workspace: either no prefixes
+/// at all, or an entry that normalizes to the workspace root (`""`, `"."`,
+/// `"./"`). This mirrors the in-process path-check semantics, where an
+/// empty prefix matches every workspace path.
+fn grants_whole_workspace(prefixes: &[String]) -> bool {
+    prefixes.is_empty()
+        || prefixes
+            .iter()
+            .any(|p| p.trim_start_matches("./").trim_end_matches('/').is_empty() || p == ".")
 }
 
 /// Normalize workspace-relative prefixes for embedding in mount/profile
@@ -251,8 +262,10 @@ pub fn bwrap_args(ws: &Path, readable: &[String], writable: &[String]) -> Vec<St
         "/tmp".into(),
     ];
     let scratch = ws.join(SCRATCH_DIR);
-    if readable.is_empty() {
-        if writable.is_empty() {
+    let read_all = grants_whole_workspace(readable);
+    let write_all = grants_whole_workspace(writable);
+    if read_all {
+        if write_all {
             args.extend(["--bind".into(), s(ws), s(ws)]);
         } else {
             args.extend(["--ro-bind".into(), s(ws), s(ws)]);
@@ -266,7 +279,7 @@ pub fn bwrap_args(ws: &Path, readable: &[String], writable: &[String]) -> Vec<St
             args.extend(["--ro-bind".into(), s(&p), s(&p)]);
         }
     }
-    if !writable.is_empty() {
+    if !write_all {
         for prefix in normalized_prefixes(writable) {
             let p = ws.join(prefix);
             let _ = std::fs::create_dir_all(&p);
@@ -308,6 +321,22 @@ mod tests {
         ];
         let cleaned = normalized_prefixes(&prefixes);
         assert_eq!(cleaned, vec!["ok/dir"]);
+    }
+
+    #[test]
+    fn empty_prefix_entry_means_whole_workspace() {
+        // The in-process checks treat `""` as "matches every path"; the
+        // sandbox must agree instead of silently dropping the grant.
+        assert!(grants_whole_workspace(&[]));
+        assert!(grants_whole_workspace(&["".into()]));
+        assert!(grants_whole_workspace(&["./".into()]));
+        assert!(grants_whole_workspace(&[".".into()]));
+        assert!(grants_whole_workspace(&["src".into(), "".into()]));
+        assert!(!grants_whole_workspace(&["src".into()]));
+
+        let ws = Path::new("/private/tmp/ws-2");
+        let profile = seatbelt_profile(ws, &["".into()], &["".into()]);
+        assert!(profile.contains("(subpath \"/private/tmp/ws-2\")"));
     }
 
     #[test]

@@ -270,7 +270,34 @@ impl Kernel {
                 episode_budget: config.episode_budget,
             },
         );
-        info!("kernel opened");
+        // Restore persisted episodes so the control plane survives restarts:
+        // rebuild the in-memory index and reopen each episode's budget
+        // account (AK-006).
+        let mut episodes = HashMap::new();
+        for rec in dag.list_episodes()? {
+            // Rows written before the 0002 migration lack metadata; they
+            // cannot be authorized correctly, so they stay unlisted.
+            if rec.root_branch.as_str().is_empty() || rec.created_by.as_str().is_empty() {
+                warn!(episode = %rec.id, "skipping pre-migration episode without metadata");
+                continue;
+            }
+            let branches: Vec<BranchId> = dag
+                .branches_of(&rec.id)?
+                .into_iter()
+                .map(|b| b.id)
+                .collect();
+            scheduler.register_episode_default(&rec.id);
+            episodes.insert(
+                rec.id.clone(),
+                EpisodeInfo {
+                    root_branch: rec.root_branch,
+                    root_state: rec.root_state,
+                    branches,
+                    created_by: rec.created_by,
+                },
+            );
+        }
+        info!(restored = episodes.len(), "kernel opened");
         Ok(Self {
             config,
             dag,
@@ -282,7 +309,7 @@ impl Kernel {
             vault,
             scheduler,
             backend,
-            episodes: Mutex::new(HashMap::new()),
+            episodes: Mutex::new(episodes),
             op_classes: Mutex::new(HashMap::new()),
             connector_names: Mutex::new(Vec::new()),
         })
@@ -391,7 +418,7 @@ impl Kernel {
         let ws = workspace.or(self.config.workspace_root.as_deref());
         let handle = self
             .dag
-            .create_episode(actor, ws, ReplayClass::FilesystemOnly)?;
+            .create_episode(actor, ws, ReplayClass::FilesystemOnly, objective)?;
         // Materialize the root workspace for the initial branch.
         let dir = self.backend.workspace_for(&handle.branch)?;
         self.dag.materialize(&handle.root.id, &dir)?;

@@ -19,7 +19,9 @@ pub mod dag;
 pub mod snapshot;
 
 pub use cas::Cas;
-pub use dag::{Branch, BranchComparison, BranchStatus, EpisodeHandle, GcReport, StateDag};
+pub use dag::{
+    Branch, BranchComparison, BranchStatus, EpisodeHandle, EpisodeRecord, GcReport, StateDag,
+};
 pub use snapshot::{diff_manifests, materialize, snapshot_dir, Manifest, ManifestEntry};
 
 #[cfg(test)]
@@ -64,7 +66,7 @@ mod tests {
         write(&f, "a.txt", "v1");
         let ep = f
             .dag
-            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly, "test")
             .unwrap();
         assert!(ep.root.parent.is_none());
 
@@ -99,7 +101,7 @@ mod tests {
         let f = fixture();
         let ep = f
             .dag
-            .create_episode(&f.actor, None, ReplayClass::FilesystemOnly)
+            .create_episode(&f.actor, None, ReplayClass::FilesystemOnly, "test")
             .unwrap();
         let br = f.dag.fork(&ep.root.id).unwrap();
         f.dag.discard_branch(&br.id).unwrap();
@@ -127,7 +129,7 @@ mod tests {
         write(&f, "base.txt", "base");
         let ep = f
             .dag
-            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly, "test")
             .unwrap();
 
         let br_a = f.dag.fork(&ep.root.id).unwrap();
@@ -192,7 +194,7 @@ mod tests {
         write(&f, "shared.txt", "base");
         let ep = f
             .dag
-            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly, "test")
             .unwrap();
         let br_a = f.dag.fork(&ep.root.id).unwrap();
         let br_b = f.dag.fork(&ep.root.id).unwrap();
@@ -239,7 +241,7 @@ mod tests {
         write(&f, "a.txt", "v1");
         let ep = f
             .dag
-            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly, "test")
             .unwrap();
         let head_before = f.dag.get_branch(&ep.branch).unwrap().head;
 
@@ -271,7 +273,7 @@ mod tests {
         write(&f, "keep.txt", "keep");
         let ep = f
             .dag
-            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly, "test")
             .unwrap();
         let br = f.dag.fork(&ep.root.id).unwrap();
         write(&f, "doomed.txt", "unique-doomed-content");

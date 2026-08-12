@@ -668,3 +668,35 @@ async fn authenticated_router_enforces_tokens_principals_and_ownership() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["code"], "MISSING_ROLE");
 }
+
+// ------------------------------------------------------- restart recovery
+
+#[tokio::test]
+async fn episodes_survive_kernel_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let vault_key = tmp.path().join("vault.key");
+
+    let (episode, branch, who_id) = {
+        let mut config = KernelConfig::new(&data_dir);
+        config.vault_key_file = Some(vault_key.clone());
+        let kernel = Arc::new(Kernel::open(config).unwrap());
+        let who = agent(&kernel);
+        let ep = kernel
+            .create_episode(&who.id, None, "outlive the process")
+            .unwrap();
+        (ep.episode, ep.branch, who.id.clone())
+    };
+
+    // A brand-new kernel over the same data dir must still describe the
+    // episode and know its owner (AK-006).
+    let mut config = KernelConfig::new(&data_dir);
+    config.vault_key_file = Some(vault_key);
+    let kernel = Arc::new(Kernel::open(config).unwrap());
+    let desc = kernel.describe_episode(&episode).await.unwrap();
+    assert_eq!(desc.created_by, who_id);
+    assert_eq!(desc.root_branch, branch);
+    assert_eq!(desc.branches.len(), 1);
+    assert_eq!(kernel.episode_owner(&episode).unwrap(), who_id);
+    assert_eq!(kernel.branch_owner(&branch).unwrap(), who_id);
+}

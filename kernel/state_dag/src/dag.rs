@@ -77,6 +77,17 @@ pub struct Branch {
     pub status: BranchStatus,
 }
 
+/// Durable episode metadata restored at kernel startup.
+#[derive(Debug, Clone)]
+pub struct EpisodeRecord {
+    pub id: EpisodeId,
+    pub root_state: StateId,
+    pub root_branch: BranchId,
+    pub created_by: PrincipalId,
+    pub objective: String,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
 /// Result of [`StateDag::branch_compare`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchComparison {
@@ -107,9 +118,10 @@ pub struct GcReport {
     pub states_removed: usize,
 }
 
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_initial",
-    "CREATE TABLE episodes (
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_initial",
+        "CREATE TABLE episodes (
          id TEXT PRIMARY KEY,
          root_state TEXT NOT NULL,
          created_at TEXT NOT NULL
@@ -134,7 +146,14 @@ const MIGRATIONS: &[(&str, &str)] = &[(
          status TEXT NOT NULL,
          created_at TEXT NOT NULL
      );",
-)];
+    ),
+    (
+        "0002_episode_metadata",
+        "ALTER TABLE episodes ADD COLUMN created_by TEXT NOT NULL DEFAULT '';
+     ALTER TABLE episodes ADD COLUMN objective TEXT NOT NULL DEFAULT '';
+     ALTER TABLE episodes ADD COLUMN root_branch TEXT NOT NULL DEFAULT '';",
+    ),
+];
 
 /// The branchable world-state DAG service: CAS + SQLite DAG store.
 ///
@@ -216,6 +235,7 @@ impl StateDag {
         actor: &PrincipalId,
         workspace: Option<&Path>,
         replay_class: ReplayClass,
+        objective: &str,
     ) -> KernelResult<EpisodeHandle> {
         let (workspace_root, _) = match workspace {
             Some(dir) => snapshot::snapshot_dir(&self.cas, dir)?,
@@ -242,11 +262,15 @@ impl StateDag {
         let conn = self.conn()?;
         let tx = conn.unchecked_transaction().map_err(sql_err)?;
         tx.execute(
-            "INSERT INTO episodes (id, root_state, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO episodes (id, root_state, created_at, created_by, objective, root_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 episode.as_str(),
                 root.id.as_str(),
-                root.created_at.to_rfc3339()
+                root.created_at.to_rfc3339(),
+                actor.as_str(),
+                objective,
+                branch.as_str()
             ],
         )
         .map_err(sql_err)?;
@@ -284,6 +308,82 @@ impl StateDag {
     pub fn get_branch(&self, id: &BranchId) -> KernelResult<Branch> {
         let conn = self.conn()?;
         load_branch(&conn, id)
+    }
+
+    /// Every persisted episode with its durable metadata, oldest first.
+    pub fn list_episodes(&self) -> KernelResult<Vec<EpisodeRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, root_state, root_branch, created_by, objective, created_at
+                 FROM episodes ORDER BY created_at, id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        rows.into_iter()
+            .map(
+                |(id, root_state, root_branch, created_by, objective, created_at)| {
+                    Ok(EpisodeRecord {
+                        id: EpisodeId(id),
+                        root_state: StateId(root_state),
+                        root_branch: BranchId(root_branch),
+                        created_by: PrincipalId(created_by),
+                        objective,
+                        created_at: created_at
+                            .parse()
+                            .map_err(|e| KernelError::Storage(format!("created_at: {e}")))?,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Every branch of `episode`, oldest first.
+    pub fn branches_of(&self, episode: &EpisodeId) -> KernelResult<Vec<Branch>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, episode, base_state, head, status FROM branches
+                 WHERE episode = ?1 ORDER BY created_at, id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([episode.as_str()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        rows.into_iter()
+            .map(|(id, episode, base_state, head, status)| {
+                Ok(Branch {
+                    id: BranchId(id),
+                    episode: EpisodeId(episode),
+                    base_state: StateId(base_state),
+                    head: StateId(head),
+                    status: BranchStatus::parse(&status)?,
+                })
+            })
+            .collect()
     }
 
     /// The current head state of a branch.

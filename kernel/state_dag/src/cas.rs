@@ -14,6 +14,11 @@ use ak_core::hash::{hash_bytes, ContentHash};
 use ak_core::{KernelError, KernelResult};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic counter making temp-file names unique across threads within a
+/// process (the PID alone distinguishes processes).
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A content-addressed store rooted at a directory.
 #[derive(Debug, Clone)]
@@ -58,18 +63,23 @@ impl Cas {
             }
             // Write via a unique temp file then rename, so concurrent writers
             // and crashes never leave a truncated blob at the final path.
-            let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+            let tmp = path.with_extension(format!(
+                "tmp-{}-{}",
+                std::process::id(),
+                TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::write(&tmp, bytes)?;
             fs::rename(&tmp, &path)?;
         }
         Ok(hash)
     }
 
-    /// Load the blob for `hash`.
+    /// Load the blob for `hash`, verifying its content hash on the way out.
+    /// A mismatch (on-disk tampering or corruption) is a storage error.
     #[tracing::instrument(level = "debug", skip(self), fields(hash = %hash))]
     pub fn get(&self, hash: &ContentHash) -> KernelResult<Vec<u8>> {
         let path = self.blob_path(hash)?;
-        fs::read(&path).map_err(|e| {
+        let bytes = fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 KernelError::NotFound {
                     kind: "blob",
@@ -78,7 +88,14 @@ impl Cas {
             } else {
                 KernelError::Io(e)
             }
-        })
+        })?;
+        let actual = hash_bytes(&bytes);
+        if &actual != hash {
+            return Err(KernelError::Storage(format!(
+                "corrupt CAS blob: expected {hash}, content hashes to {actual}"
+            )));
+        }
+        Ok(bytes)
     }
 
     /// Whether a blob exists in the store.
@@ -141,5 +158,38 @@ mod tests {
         let cas = Cas::open(dir.path()).unwrap();
         assert!(cas.get(&ContentHash("md5:abcd".into())).is_err());
         assert!(cas.get(&ContentHash("sha256:zz".into())).is_err());
+    }
+
+    #[test]
+    fn tampered_blob_fails_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        let h = cas.put(b"pristine").unwrap();
+        let path = cas.blob_path(&h).unwrap();
+        fs::write(&path, b"tampered").unwrap();
+        match cas.get(&h) {
+            Err(KernelError::Storage(msg)) => assert!(msg.contains("corrupt CAS blob")),
+            other => panic!("expected corruption error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_of_different_blobs_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                let cas = cas.clone();
+                std::thread::spawn(move || {
+                    let bytes = vec![i; 1024];
+                    (cas.put(&bytes).unwrap(), bytes)
+                })
+            })
+            .collect();
+        for h in handles {
+            let (hash, bytes) = h.join().unwrap();
+            assert_eq!(cas.get(&hash).unwrap(), bytes);
+        }
+        assert_eq!(cas.list().unwrap().len(), 8);
     }
 }

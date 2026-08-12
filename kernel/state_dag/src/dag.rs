@@ -240,7 +240,8 @@ impl StateDag {
             created_at: Utc::now(),
         };
         let conn = self.conn()?;
-        conn.execute(
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        tx.execute(
             "INSERT INTO episodes (id, root_state, created_at) VALUES (?1, ?2, ?3)",
             params![
                 episode.as_str(),
@@ -249,8 +250,8 @@ impl StateDag {
             ],
         )
         .map_err(sql_err)?;
-        insert_state(&conn, &root)?;
-        conn.execute(
+        insert_state(&tx, &root)?;
+        tx.execute(
             "INSERT INTO branches (id, episode, base_state, head, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -263,6 +264,7 @@ impl StateDag {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(EpisodeHandle {
             episode,
             branch,
@@ -323,8 +325,10 @@ impl StateDag {
             replay_class,
             created_at: Utc::now(),
         };
-        insert_state(&conn, &node)?;
-        set_head(&conn, branch, &node.id)?;
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        insert_state(&tx, &node)?;
+        set_head(&tx, branch, &node.id)?;
+        tx.commit().map_err(sql_err)?;
         Ok(node)
     }
 
@@ -472,6 +476,11 @@ impl StateDag {
         source: &BranchId,
         actor: &PrincipalId,
     ) -> KernelResult<StateNode> {
+        if target == source {
+            return Err(KernelError::Storage(format!(
+                "cannot merge branch `{target}` into itself"
+            )));
+        }
         let tb = self.get_branch(target)?;
         let sb = self.get_branch(source)?;
         ensure_active(&tb)?;
@@ -539,13 +548,15 @@ impl StateDag {
             created_at: Utc::now(),
         };
         let conn = self.conn()?;
-        insert_state(&conn, &node)?;
-        set_head(&conn, target, &node.id)?;
-        conn.execute(
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        insert_state(&tx, &node)?;
+        set_head(&tx, target, &node.id)?;
+        tx.execute(
             "UPDATE branches SET status = ?1 WHERE id = ?2",
             params![BranchStatus::Merged.as_str(), source.as_str()],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(node)
     }
 

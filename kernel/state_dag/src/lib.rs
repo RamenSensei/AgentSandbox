@@ -234,6 +234,38 @@ mod tests {
     }
 
     #[test]
+    fn self_merge_is_rejected_and_branch_stays_usable() {
+        let f = fixture();
+        write(&f, "a.txt", "v1");
+        let ep = f
+            .dag
+            .create_episode(&f.actor, Some(&f.ws), ReplayClass::FilesystemOnly)
+            .unwrap();
+        let head_before = f.dag.get_branch(&ep.branch).unwrap().head;
+
+        assert!(f.dag.merge(&ep.branch, &ep.branch, &f.actor).is_err());
+
+        // Nothing written: head unchanged, branch still active.
+        let b = f.dag.get_branch(&ep.branch).unwrap();
+        assert_eq!(b.head, head_before);
+        assert_eq!(b.status, BranchStatus::Active);
+
+        // Appends still work after the rejected self-merge.
+        write(&f, "a.txt", "v2");
+        let n = f
+            .dag
+            .snapshot_and_append(
+                &ep.branch,
+                &StepId::generate(),
+                &f.actor,
+                &f.ws,
+                ReplayClass::FilesystemOnly,
+            )
+            .unwrap();
+        assert_eq!(n.parent.as_ref(), Some(&head_before));
+    }
+
+    #[test]
     fn gc_sweeps_discarded_branch_blobs_but_keeps_live_ones() {
         let f = fixture();
         write(&f, "keep.txt", "keep");

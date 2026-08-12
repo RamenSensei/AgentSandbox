@@ -9,6 +9,67 @@ and on-disk formats.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-12
+
+Security-focused release addressing the external review (AK-001 … AK-012).
+
+### Security
+- **Local backend (AK-001):** shell steps now run inside a probe-verified OS
+  sandbox — bubblewrap on Linux, Seatbelt (`sandbox-exec`) on macOS — with a
+  deny-default profile: reads/writes limited to the compiled workspace
+  prefixes, all direct network egress denied. Hosts without a verified
+  sandbox fail closed unless the operator opts out explicitly;
+  `BackendProfile::isolation_strength` now reflects verified capability.
+- **HTTP control plane (AK-002):** bearer-token authentication with SHA-256
+  digest comparison in constant time; body principals must match the
+  authenticated principal (admin excepted); effect approval requires the
+  `approver` role and records the authenticated approver; episode, branch
+  and effect operations enforce resource ownership; the server refuses
+  non-loopback listen addresses without an auth config, and unauthenticated
+  loopback mode must be opted into with `--insecure-no-auth`.
+- **Effect broker (AK-003/AK-007):** commit performs an atomic
+  `approved → committing` claim before any external call, idempotency keys
+  are unique, duplicate commits return the original receipt, and in-doubt
+  effects (crash between external success and receipt persistence) are
+  resolved through a connector idempotency probe (`/v1/effects/recover`)
+  or an explicit operator verdict (`/v1/effects/{id}/resolve`).
+- **Leases and budgets (AK-004/AK-005):** lease uses are consumed by an
+  atomic conditional update; budgets are reserved atomically before
+  execution and settled after; budget accounts are per-episode; action
+  budgets must fit inside the lease budget envelope.
+- **HTTP connector (AK-008):** SSRF defense now resolves DNS and refuses
+  loopback/RFC1918/link-local/ULA/metadata answers, pins the vetted IP for
+  the actual connection (no rebinding window), and re-vets every redirect
+  hop.
+- **Secrets (AK-012):** the secret vault and receipt-signing seed are sealed
+  at rest with ChaCha20-Poly1305; the sealing key lives outside the data
+  dir (`AK_VAULT_KEY` env or a 0600 key file) and legacy plaintext files
+  migrate transparently.
+- **Replay (AK-011):** sandbox replay re-evaluates current policy for the
+  recorded actor and re-executes under the compiled confinement in the same
+  fail-closed sandboxed backend as live execution.
+
+### Fixed
+- **State DAG (AK-010):** self-merge is rejected instead of permanently
+  locking the branch; multi-statement mutations are transactional; CAS
+  reads verify the content hash and fail on corruption; CAS temp files are
+  collision-free under concurrency.
+- **Restart recovery (AK-006):** episode metadata (creator, objective, root
+  branch) is persisted in the DAG database and restored by `Kernel::open`,
+  so the API keeps serving episodes across restarts.
+- TypeScript SDK: per-request `AbortController` (a timeout no longer
+  cancels unrelated requests) with timer cleanup and a 30 s default.
+- Python SDK: `HTTPError` bodies are closed (no `ResourceWarning`) and the
+  default timeout is 30 s.
+
+### Changed
+- `protocol/openapi.yaml` regenerated to match the implemented router
+  exactly (paths, request/response shapes, status codes, bearer auth);
+  SDKs and spec now version-align with the workspace (0.6.x → 0.7.x line).
+- CI gates hardened: `cargo fmt --check`, clippy `-D warnings`, rustdoc
+  `-D warnings`, `cargo audit`, OpenAPI validation, pytest with
+  `ResourceWarning` as error, UI asset smoke.
+
 ## [0.6.0] - 2026-08-10
 
 ### Added

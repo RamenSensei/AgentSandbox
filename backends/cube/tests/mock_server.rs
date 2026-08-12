@@ -152,3 +152,71 @@ async fn http_error_status_maps_to_backend_unavailable() {
         other => panic!("expected BackendUnavailable, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn exec_wire_request_carries_confinement_and_budget() {
+    // Mock that echoes the received exec body back as stdout.
+    let app = Router::new()
+        .route(
+            "/v1/sandboxes",
+            post(|| async { Json(serde_json::json!({"sandbox_id": "sb-echo"})) }),
+        )
+        .route(
+            "/v1/sandboxes/:id/exec",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                Json(serde_json::json!({
+                    "exit_code": 0,
+                    "stdout": body.to_string(),
+                    "stderr": "",
+                    "duration_ms": 1
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let backend = CubeBackend::new(CubeConfig::new(format!("http://{addr}"))).unwrap();
+    let mut req = shell_req("br-1", "st-1", "true");
+    req.writable_prefixes = vec!["src/".into()];
+    req.readable_prefixes = vec!["docs/".into()];
+    req.egress_domains = vec!["example.com".into()];
+    let out = backend.execute(req).await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is echoed wire body");
+    assert_eq!(body["writable_prefixes"], serde_json::json!(["src/"]));
+    assert_eq!(body["readable_prefixes"], serde_json::json!(["docs/"]));
+    assert_eq!(body["egress_domains"], serde_json::json!(["example.com"]));
+    assert!(body["budget"]["cpu_ms"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn invalid_remote_id_is_rejected() {
+    // Service returns an id containing a path traversal.
+    let app = Router::new().route(
+        "/v1/sandboxes",
+        post(|| async { Json(serde_json::json!({"sandbox_id": "../evil"})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let backend = CubeBackend::new(CubeConfig::new(format!("http://{addr}"))).unwrap();
+    let err = backend
+        .execute(shell_req("br-1", "st-1", "true"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid id"), "{err}");
+}
+
+#[test]
+fn non_loopback_http_endpoint_is_rejected() {
+    let err = CubeBackend::new(CubeConfig::new("http://cube.example.com"))
+        .err()
+        .expect("expected config error");
+    assert!(err.to_string().contains("https"), "{err}");
+    // Loopback http and any https are fine.
+    CubeBackend::new(CubeConfig::new("http://127.0.0.1:9")).unwrap();
+    CubeBackend::new(CubeConfig::new("http://localhost:9")).unwrap();
+    CubeBackend::new(CubeConfig::new("https://cube.example.com")).unwrap();
+}

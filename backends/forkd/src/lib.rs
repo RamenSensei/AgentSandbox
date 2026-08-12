@@ -39,6 +39,79 @@ use tokio::sync::Mutex;
 
 const BACKEND_NAME: &str = "forkd";
 
+/// Maximum bytes accepted in any control-plane response body.
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+fn config_error(reason: impl std::fmt::Display) -> KernelError {
+    KernelError::Other(format!("{BACKEND_NAME} config error: {reason}"))
+}
+
+/// Enforce HTTPS for non-loopback control planes. Plain `http://` is allowed
+/// only for loopback (localhost / 127.0.0.0/8 / ::1) dev endpoints.
+fn validate_endpoint(endpoint: &str) -> KernelResult<()> {
+    let url = reqwest::Url::parse(endpoint)
+        .map_err(|e| config_error(format!("invalid endpoint `{endpoint}`: {e}")))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = url.host_str().unwrap_or_default();
+            let bare = host.trim_start_matches('[').trim_end_matches(']');
+            let loopback = bare.eq_ignore_ascii_case("localhost")
+                || bare
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false);
+            if loopback {
+                Ok(())
+            } else {
+                Err(config_error(format!(
+                    "plain http endpoint `{endpoint}` is only allowed for loopback; use https"
+                )))
+            }
+        }
+        other => Err(config_error(format!(
+            "unsupported endpoint scheme `{other}`; use https"
+        ))),
+    }
+}
+
+/// Validate a remote-supplied identifier before it is spliced into a URL
+/// path. Only `[A-Za-z0-9._-]` is accepted, so no percent-encoding is needed.
+fn validate_remote_id(id: &str) -> KernelResult<()> {
+    let ok = !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(unavailable(format!(
+            "service returned invalid id `{id}` (allowed characters: [A-Za-z0-9._-])"
+        )))
+    }
+}
+
+/// Read a response body, rejecting bodies larger than [`MAX_RESPONSE_BYTES`].
+async fn read_body_limited(mut resp: reqwest::Response) -> KernelResult<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES as u64 {
+            return Err(unavailable(format!(
+                "response body of {len} bytes exceeds the {MAX_RESPONSE_BYTES}-byte limit"
+            )));
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(unavailable)? {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(unavailable(format!(
+                "response body exceeds the {MAX_RESPONSE_BYTES}-byte limit"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Configuration for [`ForkdBackend`].
 #[derive(Debug, Clone)]
 pub struct ForkdConfig {
@@ -91,6 +164,26 @@ struct ExecRequest<'a> {
     cwd: Option<&'a str>,
     env: &'a BTreeMap<String, String>,
     timeout_ms: u64,
+    /// Full step budget, forwarded so the service can enforce it.
+    budget: &'a ResourceBudget,
+    /// Compiled confinement, forwarded so the service can enforce it.
+    writable_prefixes: &'a [String],
+    readable_prefixes: &'a [String],
+    egress_domains: &'a [String],
+}
+
+/// Parameters for a remote exec, including the confinement and budget that
+/// the remote side must enforce.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecParams<'a> {
+    pub command: &'a str,
+    pub cwd: Option<&'a str>,
+    pub env: &'a BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    pub budget: &'a ResourceBudget,
+    pub writable_prefixes: &'a [String],
+    pub readable_prefixes: &'a [String],
+    pub egress_domains: &'a [String],
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +195,9 @@ struct ExecResponse {
     stderr: String,
     #[serde(default)]
     duration_ms: u64,
+    /// Network egress bytes as measured by the service, when it reports them.
+    #[serde(default)]
+    network_bytes: Option<u64>,
 }
 
 fn unavailable(reason: impl std::fmt::Display) -> KernelError {
@@ -126,6 +222,7 @@ pub struct ForkdClient {
 
 impl ForkdClient {
     pub fn new(config: ForkdConfig) -> KernelResult<Self> {
+        validate_endpoint(&config.endpoint)?;
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
             .build()
@@ -145,20 +242,23 @@ impl ForkdClient {
         }
         let resp = req.send().await.map_err(unavailable)?;
         let status = resp.status();
+        let bytes = read_body_limited(resp).await?;
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
             return Err(unavailable(format!("{url} returned {status}: {text}")));
         }
-        resp.json().await.map_err(unavailable)
+        serde_json::from_slice(&bytes).map_err(unavailable)
     }
 
     /// Ensure a warm parent exists; idempotent on the service side.
     pub async fn ensure_parent(&self) -> KernelResult<String> {
         let resp: ParentResponse = self.post("/v1/parents", &serde_json::json!({})).await?;
+        validate_remote_id(&resp.parent_id)?;
         Ok(resp.parent_id)
     }
 
     pub async fn fork_parent(&self, parent: &str, branch: &BranchId) -> KernelResult<String> {
+        validate_remote_id(parent)?;
         let resp: ForkResponse = self
             .post(
                 &format!("/v1/parents/{parent}/fork"),
@@ -167,10 +267,12 @@ impl ForkdClient {
                 },
             )
             .await?;
+        validate_remote_id(&resp.child_id)?;
         Ok(resp.child_id)
     }
 
     pub async fn fork_child(&self, child: &str, branch: &BranchId) -> KernelResult<String> {
+        validate_remote_id(child)?;
         let resp: ForkResponse = self
             .post(
                 &format!("/v1/children/{child}/fork"),
@@ -179,25 +281,24 @@ impl ForkdClient {
                 },
             )
             .await?;
+        validate_remote_id(&resp.child_id)?;
         Ok(resp.child_id)
     }
 
-    pub async fn exec(
-        &self,
-        child: &str,
-        command: &str,
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-        timeout_ms: u64,
-    ) -> KernelResult<ExecOutcome> {
+    pub async fn exec(&self, child: &str, params: ExecParams<'_>) -> KernelResult<ExecOutcome> {
+        validate_remote_id(child)?;
         let resp: ExecResponse = self
             .post(
                 &format!("/v1/children/{child}/exec"),
                 &ExecRequest {
-                    command,
-                    cwd,
-                    env,
-                    timeout_ms,
+                    command: params.command,
+                    cwd: params.cwd,
+                    env: params.env,
+                    timeout_ms: params.timeout_ms,
+                    budget: params.budget,
+                    writable_prefixes: params.writable_prefixes,
+                    readable_prefixes: params.readable_prefixes,
+                    egress_domains: params.egress_domains,
                 },
             )
             .await?;
@@ -206,10 +307,12 @@ impl ForkdClient {
             stdout: resp.stdout,
             stderr: resp.stderr,
             duration_ms: resp.duration_ms,
+            network_bytes: resp.network_bytes,
         })
     }
 
     pub async fn delete_child(&self, child: &str) -> KernelResult<()> {
+        validate_remote_id(child)?;
         let url = format!(
             "{}/v1/children/{child}",
             self.config.endpoint.trim_end_matches('/')
@@ -233,6 +336,8 @@ pub struct ExecOutcome {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
+    /// Network egress bytes if the service reports them; `None` otherwise.
+    pub network_bytes: Option<u64>,
 }
 
 // ---- Backend ---------------------------------------------------------------
@@ -255,8 +360,12 @@ impl ForkdBackend {
         })
     }
 
+    /// Get-or-create is atomic: the children map lock is held across the
+    /// remote fork so concurrent first uses of a branch cannot race two
+    /// children (and the parent lock is held across parent creation).
     async fn child_for(&self, branch: &BranchId) -> KernelResult<String> {
-        if let Some(id) = self.children.lock().await.get(branch) {
+        let mut children = self.children.lock().await;
+        if let Some(id) = children.get(branch) {
             return Ok(id.clone());
         }
         let parent = {
@@ -271,10 +380,7 @@ impl ForkdBackend {
             }
         };
         let child = self.client.fork_parent(&parent, branch).await?;
-        self.children
-            .lock()
-            .await
-            .insert(branch.clone(), child.clone());
+        children.insert(branch.clone(), child.clone());
         Ok(child)
     }
 }
@@ -297,21 +403,31 @@ impl Backend for ForkdBackend {
         let child = self.child_for(&req.branch).await?;
         let timeout_ms = req.budget.cpu_ms.max(1);
         let empty = BTreeMap::new();
+        // Forward budget + confinement on every exec so the remote enforces them.
+        macro_rules! params {
+            ($command:expr, $cwd:expr, $env:expr) => {
+                ExecParams {
+                    command: $command,
+                    cwd: $cwd,
+                    env: $env,
+                    timeout_ms,
+                    budget: &req.budget,
+                    writable_prefixes: &req.writable_prefixes,
+                    readable_prefixes: &req.readable_prefixes,
+                    egress_domains: &req.egress_domains,
+                }
+            };
+        }
         let out = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.client
-                    .exec(&child, command, cwd.as_deref(), env, timeout_ms)
+                    .exec(&child, params!(command, cwd.as_deref(), env))
                     .await?
             }
             ActionKind::ReadFile { path } => {
+                let cmd = format!("cat {}", shq(path));
                 self.client
-                    .exec(
-                        &child,
-                        &format!("cat {}", shq(path)),
-                        None,
-                        &empty,
-                        timeout_ms,
-                    )
+                    .exec(&child, params!(&cmd, None, &empty))
                     .await?
             }
             ActionKind::WriteFile { path, contents_b64 } => {
@@ -321,18 +437,13 @@ impl Backend for ForkdBackend {
                     b = shq(contents_b64)
                 );
                 self.client
-                    .exec(&child, &cmd, None, &empty, timeout_ms)
+                    .exec(&child, params!(&cmd, None, &empty))
                     .await?
             }
             ActionKind::DeletePath { path } => {
+                let cmd = format!("rm -rf -- {}", shq(path));
                 self.client
-                    .exec(
-                        &child,
-                        &format!("rm -rf -- {}", shq(path)),
-                        None,
-                        &empty,
-                        timeout_ms,
-                    )
+                    .exec(&child, params!(&cmd, None, &empty))
                     .await?
             }
             other => {
@@ -350,7 +461,9 @@ impl Backend for ForkdBackend {
             ActionKind::WriteFile { path, .. } => vec![path.clone()],
             _ => Vec::new(),
         };
-        let bytes = (out.stdout.len() + out.stderr.len()) as u64;
+        // Real value when the service reports one; otherwise 0 — network
+        // accounting is not available and is never fabricated.
+        let bytes = out.network_bytes.unwrap_or(0);
         Ok(ExecutionOutcome {
             exit_code: out.exit_code,
             stdout: out.stdout.into_bytes(),

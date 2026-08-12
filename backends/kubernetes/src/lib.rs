@@ -41,6 +41,85 @@ use tokio::sync::Mutex;
 const BACKEND_NAME: &str = "kubernetes";
 const API_BASE: &str = "/apis/agents.x-k8s.io/v1alpha1";
 
+/// Default sandbox image. Pinned to a specific release tag (never `:latest`)
+/// so sandbox behavior is reproducible and upgrades are explicit; override
+/// via [`KubernetesConfig::image`] to change it.
+pub const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/agent-kernel/sandbox:v0.6.0";
+
+/// Maximum bytes accepted in any API-server response body.
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+fn config_error(reason: impl std::fmt::Display) -> KernelError {
+    KernelError::Other(format!("{BACKEND_NAME} config error: {reason}"))
+}
+
+/// Enforce HTTPS for non-loopback API servers. Plain `http://` is allowed
+/// only for loopback (localhost / 127.0.0.0/8 / ::1) dev endpoints.
+fn validate_endpoint(endpoint: &str) -> KernelResult<()> {
+    let url = reqwest::Url::parse(endpoint)
+        .map_err(|e| config_error(format!("invalid endpoint `{endpoint}`: {e}")))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = url.host_str().unwrap_or_default();
+            let bare = host.trim_start_matches('[').trim_end_matches(']');
+            let loopback = bare.eq_ignore_ascii_case("localhost")
+                || bare
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false);
+            if loopback {
+                Ok(())
+            } else {
+                Err(config_error(format!(
+                    "plain http endpoint `{endpoint}` is only allowed for loopback; use https"
+                )))
+            }
+        }
+        other => Err(config_error(format!(
+            "unsupported endpoint scheme `{other}`; use https"
+        ))),
+    }
+}
+
+/// Validate an identifier (sandbox name, namespace) before it is spliced into
+/// a URL path. Only `[A-Za-z0-9._-]` is accepted, so no percent-encoding is
+/// needed.
+fn validate_remote_id(id: &str) -> KernelResult<()> {
+    let ok = !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(unavailable(format!(
+            "invalid id `{id}` (allowed characters: [A-Za-z0-9._-])"
+        )))
+    }
+}
+
+/// Read a response body, rejecting bodies larger than [`MAX_RESPONSE_BYTES`].
+async fn read_body_limited(mut resp: reqwest::Response) -> KernelResult<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES as u64 {
+            return Err(unavailable(format!(
+                "response body of {len} bytes exceeds the {MAX_RESPONSE_BYTES}-byte limit"
+            )));
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(unavailable)? {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(unavailable(format!(
+                "response body exceeds the {MAX_RESPONSE_BYTES}-byte limit"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Configuration for [`KubernetesBackend`].
 #[derive(Debug, Clone)]
 pub struct KubernetesConfig {
@@ -52,7 +131,8 @@ pub struct KubernetesConfig {
     pub namespace: String,
     /// `runtimeClassName` for sandbox pods (e.g. `gvisor`, `kata`).
     pub runtime_class: Option<String>,
-    /// Pod image for the sandbox.
+    /// Pod image for the sandbox. Defaults to [`DEFAULT_SANDBOX_IMAGE`],
+    /// which is pinned to a release tag (never `:latest`).
     pub image: String,
     /// Isolation strength advertised to the router. MUST match the configured
     /// runtime class; there is no safe default guess, so callers set it
@@ -69,7 +149,7 @@ impl KubernetesConfig {
             auth_token: None,
             namespace: "default".into(),
             runtime_class: None,
-            image: "ghcr.io/agent-kernel/sandbox:latest".into(),
+            image: DEFAULT_SANDBOX_IMAGE.into(),
             isolation_strength,
             request_timeout: Duration::from_secs(60),
         }
@@ -128,6 +208,26 @@ struct ExecRequest<'a> {
     cwd: Option<&'a str>,
     env: &'a BTreeMap<String, String>,
     timeout_ms: u64,
+    /// Full step budget, forwarded so the sandbox controller can enforce it.
+    budget: &'a ResourceBudget,
+    /// Compiled confinement, forwarded so the controller can enforce it.
+    writable_prefixes: &'a [String],
+    readable_prefixes: &'a [String],
+    egress_domains: &'a [String],
+}
+
+/// Parameters for a remote exec, including the confinement and budget that
+/// the remote side must enforce.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecParams<'a> {
+    pub command: &'a str,
+    pub cwd: Option<&'a str>,
+    pub env: &'a BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    pub budget: &'a ResourceBudget,
+    pub writable_prefixes: &'a [String],
+    pub readable_prefixes: &'a [String],
+    pub egress_domains: &'a [String],
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +240,9 @@ struct ExecResponse {
     stderr: String,
     #[serde(default)]
     duration_ms: u64,
+    /// Network egress bytes as measured by the controller, when reported.
+    #[serde(default)]
+    network_bytes: Option<u64>,
 }
 
 fn unavailable(reason: impl std::fmt::Display) -> KernelError {
@@ -163,6 +266,9 @@ pub struct KubernetesClient {
 
 impl KubernetesClient {
     pub fn new(config: KubernetesConfig) -> KernelResult<Self> {
+        validate_endpoint(&config.endpoint)?;
+        validate_remote_id(&config.namespace)
+            .map_err(|_| config_error(format!("invalid namespace `{}`", config.namespace)))?;
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
             .build()
@@ -189,11 +295,12 @@ impl KubernetesClient {
         }
         let resp = req.send().await.map_err(unavailable)?;
         let status = resp.status();
+        let bytes = read_body_limited(resp).await?;
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
             return Err(unavailable(format!("{url} returned {status}: {text}")));
         }
-        resp.json().await.map_err(unavailable)
+        serde_json::from_slice(&bytes).map_err(unavailable)
     }
 
     /// Create a Sandbox object for a branch; returns its generated name.
@@ -216,33 +323,43 @@ impl KubernetesClient {
             },
         };
         let obj: SandboxObject = self.post_json(&self.sandboxes_url(), &manifest).await?;
+        validate_remote_id(&obj.metadata.name)?;
         Ok(obj.metadata.name)
     }
 
     pub async fn exec(
         &self,
         sandbox: &str,
-        command: &str,
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-        timeout_ms: u64,
-    ) -> KernelResult<(i32, String, String, u64)> {
+        params: ExecParams<'_>,
+    ) -> KernelResult<(i32, String, String, u64, Option<u64>)> {
+        validate_remote_id(sandbox)?;
         let url = format!("{}/{sandbox}/exec", self.sandboxes_url());
         let resp: ExecResponse = self
             .post_json(
                 &url,
                 &ExecRequest {
-                    command,
-                    cwd,
-                    env,
-                    timeout_ms,
+                    command: params.command,
+                    cwd: params.cwd,
+                    env: params.env,
+                    timeout_ms: params.timeout_ms,
+                    budget: params.budget,
+                    writable_prefixes: params.writable_prefixes,
+                    readable_prefixes: params.readable_prefixes,
+                    egress_domains: params.egress_domains,
                 },
             )
             .await?;
-        Ok((resp.exit_code, resp.stdout, resp.stderr, resp.duration_ms))
+        Ok((
+            resp.exit_code,
+            resp.stdout,
+            resp.stderr,
+            resp.duration_ms,
+            resp.network_bytes,
+        ))
     }
 
     pub async fn delete_sandbox(&self, sandbox: &str) -> KernelResult<()> {
+        validate_remote_id(sandbox)?;
         let url = format!("{}/{sandbox}", self.sandboxes_url());
         let mut req = self.http.delete(&url);
         if let Some(token) = &self.config.auth_token {
@@ -275,15 +392,15 @@ impl KubernetesBackend {
         })
     }
 
+    /// Get-or-create is atomic: the map lock is held across the remote create
+    /// so concurrent first uses of a branch cannot race two sandboxes.
     async fn sandbox_for(&self, branch: &BranchId) -> KernelResult<String> {
-        if let Some(name) = self.sandboxes.lock().await.get(branch) {
+        let mut sandboxes = self.sandboxes.lock().await;
+        if let Some(name) = sandboxes.get(branch) {
             return Ok(name.clone());
         }
         let name = self.client.create_sandbox(branch).await?;
-        self.sandboxes
-            .lock()
-            .await
-            .insert(branch.clone(), name.clone());
+        sandboxes.insert(branch.clone(), name.clone());
         Ok(name)
     }
 }
@@ -307,21 +424,31 @@ impl Backend for KubernetesBackend {
         let sandbox = self.sandbox_for(&req.branch).await?;
         let timeout_ms = req.budget.cpu_ms.max(1);
         let empty = BTreeMap::new();
-        let (exit_code, stdout, stderr, duration_ms) = match &req.action {
+        // Forward budget + confinement on every exec so the remote enforces them.
+        macro_rules! params {
+            ($command:expr, $cwd:expr, $env:expr) => {
+                ExecParams {
+                    command: $command,
+                    cwd: $cwd,
+                    env: $env,
+                    timeout_ms,
+                    budget: &req.budget,
+                    writable_prefixes: &req.writable_prefixes,
+                    readable_prefixes: &req.readable_prefixes,
+                    egress_domains: &req.egress_domains,
+                }
+            };
+        }
+        let (exit_code, stdout, stderr, duration_ms, network_bytes) = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.client
-                    .exec(&sandbox, command, cwd.as_deref(), env, timeout_ms)
+                    .exec(&sandbox, params!(command, cwd.as_deref(), env))
                     .await?
             }
             ActionKind::ReadFile { path } => {
+                let cmd = format!("cat {}", shq(path));
                 self.client
-                    .exec(
-                        &sandbox,
-                        &format!("cat {}", shq(path)),
-                        None,
-                        &empty,
-                        timeout_ms,
-                    )
+                    .exec(&sandbox, params!(&cmd, None, &empty))
                     .await?
             }
             ActionKind::WriteFile { path, contents_b64 } => {
@@ -331,18 +458,13 @@ impl Backend for KubernetesBackend {
                     b = shq(contents_b64)
                 );
                 self.client
-                    .exec(&sandbox, &cmd, None, &empty, timeout_ms)
+                    .exec(&sandbox, params!(&cmd, None, &empty))
                     .await?
             }
             ActionKind::DeletePath { path } => {
+                let cmd = format!("rm -rf -- {}", shq(path));
                 self.client
-                    .exec(
-                        &sandbox,
-                        &format!("rm -rf -- {}", shq(path)),
-                        None,
-                        &empty,
-                        timeout_ms,
-                    )
+                    .exec(&sandbox, params!(&cmd, None, &empty))
                     .await?
             }
             other => {
@@ -356,7 +478,9 @@ impl Backend for KubernetesBackend {
             ActionKind::WriteFile { path, .. } => vec![path.clone()],
             _ => Vec::new(),
         };
-        let bytes = (stdout.len() + stderr.len()) as u64;
+        // Real value when the controller reports one; otherwise 0 — network
+        // accounting is not available and is never fabricated.
+        let bytes = network_bytes.unwrap_or(0);
         Ok(ExecutionOutcome {
             exit_code,
             stdout: stdout.into_bytes(),
@@ -418,5 +542,55 @@ mod tests {
             KernelError::BackendUnavailable { backend, .. } => assert_eq!(backend, "kubernetes"),
             other => panic!("expected BackendUnavailable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_image_is_pinned_not_latest() {
+        let c = KubernetesConfig::new("https://kube.example:6443", 70);
+        assert_eq!(c.image, DEFAULT_SANDBOX_IMAGE);
+        assert!(!c.image.ends_with(":latest"), "{}", c.image);
+        assert!(c.image.contains(':'), "image must carry an explicit tag");
+    }
+
+    #[test]
+    fn exec_wire_request_serializes_confinement_and_budget() {
+        let env = BTreeMap::new();
+        let budget = ResourceBudget::step_default();
+        let writable = vec!["src/".to_string()];
+        let readable = vec!["docs/".to_string()];
+        let egress = vec!["example.com".to_string()];
+        let wire = serde_json::to_value(ExecRequest {
+            command: "true",
+            cwd: None,
+            env: &env,
+            timeout_ms: 5,
+            budget: &budget,
+            writable_prefixes: &writable,
+            readable_prefixes: &readable,
+            egress_domains: &egress,
+        })
+        .unwrap();
+        assert_eq!(wire["writablePrefixes"], serde_json::json!(["src/"]));
+        assert_eq!(wire["readablePrefixes"], serde_json::json!(["docs/"]));
+        assert_eq!(wire["egressDomains"], serde_json::json!(["example.com"]));
+        assert_eq!(wire["budget"]["cpu_ms"], budget.cpu_ms);
+    }
+
+    #[test]
+    fn invalid_remote_ids_are_rejected() {
+        for bad in ["", "../evil", "a b", "x/y", "name?x=1"] {
+            assert!(validate_remote_id(bad).is_err(), "{bad}");
+        }
+        assert!(validate_remote_id("ak-sandbox-x7f2").is_ok());
+    }
+
+    #[test]
+    fn non_loopback_http_endpoint_is_rejected() {
+        let err = KubernetesBackend::new(KubernetesConfig::new("http://kube.example:6443", 70))
+            .err()
+            .expect("expected config error");
+        assert!(err.to_string().contains("https"), "{err}");
+        KubernetesBackend::new(KubernetesConfig::new("http://127.0.0.1:6443", 70)).unwrap();
+        KubernetesBackend::new(KubernetesConfig::new("https://kube.example:6443", 70)).unwrap();
     }
 }

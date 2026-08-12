@@ -13,6 +13,16 @@ and on-disk formats.
 
 Security-focused release addressing the external review (AK-001 … AK-012).
 
+### Added
+- `ak-adversarial-bench` is now a runnable binary: 7 in-process abuse
+  scenarios with a JSON report and nonzero exit on failure.
+- `ak-example-coding-agent` (`coding-agent` binary): end-to-end episode
+  with leased steps, fork/compare/merge/diff and a trace summary.
+- Remote backends (AK-009): cube/forkd/gvisor/kubernetes transmit the
+  compiled confinement and budget on every exec, enforce https off
+  loopback, cap response bodies, validate remote ids, pin the k8s image,
+  and never fabricate network accounting.
+
 ### Security
 - **Local backend (AK-001):** shell steps now run inside a probe-verified OS
   sandbox — bubblewrap on Linux, Seatbelt (`sandbox-exec`) on macOS — with a

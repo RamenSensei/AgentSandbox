@@ -149,7 +149,7 @@ agent-kernel/
 
 ## Status
 
-Version 0.6 (protocol version "0.6"). Pre-1.0: APIs, the protocol, and on-disk formats are unstable and may change between minor releases.
+Version 0.7 (protocol version "0.7"). Pre-1.0: APIs, the protocol, and on-disk formats are unstable and may change between minor releases.
 
 ## License
 

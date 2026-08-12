@@ -46,4 +46,4 @@ pub use state::{StateDelta, StateNode};
 pub use traits::{Backend, CommitProbe, Connector, ExecutionOutcome, ExecutionRequest};
 
 /// Semantic version of the Agent Execution Protocol implemented by this tree.
-pub const PROTOCOL_VERSION: &str = "0.6";
+pub const PROTOCOL_VERSION: &str = "0.7";

@@ -44,7 +44,7 @@ const API_BASE: &str = "/apis/agents.x-k8s.io/v1alpha1";
 /// Default sandbox image. Pinned to a specific release tag (never `:latest`)
 /// so sandbox behavior is reproducible and upgrades are explicit; override
 /// via [`KubernetesConfig::image`] to change it.
-pub const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/agent-kernel/sandbox:v0.6.0";
+pub const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/agent-kernel/sandbox:v0.7.0";
 
 /// Maximum bytes accepted in any API-server response body.
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;

@@ -49,13 +49,13 @@ async fn main() -> anyhow::Result<()> {
     if !auth.enabled {
         if !addr.ip().is_loopback() {
             anyhow::bail!(
-                "refusing to listen on non-loopback {} without --auth-config;                  unauthenticated mode is loopback-only",
+                "refusing to listen on non-loopback {} without --auth-config; unauthenticated mode is loopback-only",
                 args.listen
             );
         }
         if !args.insecure_no_auth {
             anyhow::bail!(
-                "no --auth-config given; pass --insecure-no-auth to explicitly                  accept an unauthenticated loopback control plane"
+                "no --auth-config given; pass --insecure-no-auth to explicitly accept an unauthenticated loopback control plane"
             );
         }
         tracing::warn!("serving WITHOUT authentication (loopback only)");

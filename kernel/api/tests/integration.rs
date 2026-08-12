@@ -497,3 +497,174 @@ async fn http_smoke_lifecycle_and_denial() {
     assert_eq!(status, StatusCode::OK);
     assert!(cmp["changed_in_a"].as_array().unwrap().is_empty());
 }
+
+// ------------------------------------------------------------- auth layer
+
+/// Helper: authenticated request with a bearer token.
+async fn req_auth(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let body = match body {
+        Some(v) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&v).unwrap())
+        }
+        None => Body::empty(),
+    };
+    let resp = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, value)
+}
+
+#[tokio::test]
+async fn authenticated_router_enforces_tokens_principals_and_ownership() {
+    use ak_api::auth::{token_digest, AuthConfig, Role, TokenEntry};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let alice = agent(&kernel);
+    let mallory = {
+        let p = Principal::new_agent("mallory");
+        kernel.register_principal(&p).expect("register");
+        p
+    };
+    let auth = AuthConfig::with_tokens(vec![
+        TokenEntry {
+            token_sha256: token_digest("alice-token"),
+            principal: alice.id.clone(),
+            roles: vec![Role::Agent],
+        },
+        TokenEntry {
+            token_sha256: token_digest("mallory-token"),
+            principal: mallory.id.clone(),
+            roles: vec![Role::Agent],
+        },
+        TokenEntry {
+            token_sha256: token_digest("admin-token"),
+            principal: mallory.id.clone(),
+            roles: vec![Role::Admin],
+        },
+    ]);
+    let app = ak_api::http::router_with_auth(kernel.clone(), auth);
+
+    // No token → 401; healthz stays open.
+    let (status, _) = req_auth(&app, "GET", "/healthz", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = req_auth(
+        &app,
+        "POST",
+        "/v1/episodes",
+        None,
+        Some(json!({ "principal": alice.id, "objective": "x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Bogus token → 401.
+    let (status, _) = req_auth(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("wrong"),
+        Some(json!({ "principal": alice.id, "objective": "x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Principal spoofing → 403.
+    let (status, body) = req_auth(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("mallory-token"),
+        Some(json!({ "principal": alice.id, "objective": "spoof" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "PRINCIPAL_MISMATCH");
+
+    // Legitimate creation as alice.
+    let (status, ep) = req_auth(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some("alice-token"),
+        Some(json!({ "principal": alice.id, "objective": "mine" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let episode = ep["episode"].as_str().unwrap().to_string();
+    let branch = ep["branch"].as_str().unwrap().to_string();
+
+    // Mallory cannot read, fork, or discard alice's resources.
+    let (status, body) = req_auth(
+        &app,
+        "GET",
+        &format!("/v1/episodes/{episode}"),
+        Some("mallory-token"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "NOT_OWNER");
+    let (status, _) = req_auth(
+        &app,
+        "POST",
+        &format!("/v1/branches/{branch}/fork"),
+        Some("mallory-token"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Alice can read her own episode; an admin can read anything.
+    for token in ["alice-token", "admin-token"] {
+        let (status, _) = req_auth(
+            &app,
+            "GET",
+            &format!("/v1/episodes/{episode}"),
+            Some(token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "token {token}");
+    }
+
+    // Trace without an episode filter is admin-only.
+    let (status, _) = req_auth(&app, "GET", "/v1/trace/query", Some("alice-token"), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = req_auth(&app, "GET", "/v1/trace/query", Some("admin-token"), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Effect approval demands the Approver role.
+    let (status, body) = req_auth(
+        &app,
+        "POST",
+        "/v1/effects/fx-00000000-0000-0000-0000-000000000000/approve",
+        Some("alice-token"),
+        Some(json!({ "approver": alice.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "MISSING_ROLE");
+}

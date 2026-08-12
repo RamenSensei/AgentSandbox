@@ -20,6 +20,8 @@ serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true }
 tempfile = { workspace = true }

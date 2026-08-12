@@ -4,6 +4,7 @@
 //! Errors are returned as [`ak_core::error::ErrorEnvelope`]; policy denials
 //! are HTTP 403 carrying the full machine-readable [`ak_core::Denial`].
 
+use crate::auth::{require_auth, AuthConfig, AuthContext, AuthError, Role};
 use crate::kernel::Kernel;
 use ak_causal_ledger::{EventKind, TraceQuery};
 use ak_core::action::Action;
@@ -15,23 +16,37 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use indexmap::IndexMap;
 use serde::Deserialize;
 use std::sync::Arc;
 
-/// Kernel error → HTTP response with an [`ErrorEnvelope`].
-struct ApiError(KernelError);
+/// Kernel or authorization error → HTTP response with an
+/// [`ErrorEnvelope`].
+enum ApiError {
+    Kernel(KernelError),
+    Auth(AuthError),
+}
 
 impl From<KernelError> for ApiError {
     fn from(e: KernelError) -> Self {
-        Self(e)
+        Self::Kernel(e)
+    }
+}
+
+impl From<AuthError> for ApiError {
+    fn from(e: AuthError) -> Self {
+        Self::Auth(e)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match &self.0 {
+        let e = match self {
+            ApiError::Auth(a) => return a.into_response(),
+            ApiError::Kernel(e) => e,
+        };
+        let status = match &e {
             KernelError::Denied(_) => StatusCode::FORBIDDEN,
             KernelError::NotFound { .. } => StatusCode::NOT_FOUND,
             KernelError::InvalidId { .. } | KernelError::Serde(_) => StatusCode::BAD_REQUEST,
@@ -44,14 +59,20 @@ impl IntoResponse for ApiError {
             KernelError::BackendUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(ErrorEnvelope::from(&self.0))).into_response()
+        (status, Json(ErrorEnvelope::from(&e))).into_response()
     }
 }
 
 type ApiResult<T> = Result<T, ApiError>;
 
-/// Build the kernel HTTP router.
+/// Build the kernel HTTP router with auth disabled (loopback/dev/tests).
 pub fn router(kernel: Arc<Kernel>) -> Router {
+    router_with_auth(kernel, AuthConfig::disabled())
+}
+
+/// Build the kernel HTTP router enforcing `auth` on every route except
+/// `/healthz`.
+pub fn router_with_auth(kernel: Arc<Kernel>, auth: AuthConfig) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/episodes", post(create_episode))
@@ -79,6 +100,10 @@ pub fn router(kernel: Arc<Kernel>) -> Router {
         .route("/v1/replay/:mode", post(replay))
         .route("/v1/trace/query", get(trace_query))
         .route("/v1/receipts/:id", get(get_receipt))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(auth),
+            require_auth,
+        ))
         .with_state(kernel)
 }
 
@@ -97,9 +122,11 @@ struct CreateEpisodeRequest {
 
 async fn create_episode(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateEpisodeRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let handle = k.create_episode(&req.principal, req.workspace.as_deref(), &req.objective)?;
+    let principal = auth.act_as(&req.principal)?;
+    let handle = k.create_episode(&principal, req.workspace.as_deref(), &req.objective)?;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -112,9 +139,12 @@ async fn create_episode(
 
 async fn describe_episode(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let desc = k.describe_episode(&EpisodeId::parse(&id)?).await?;
+    let id = EpisodeId::parse(&id)?;
+    auth.require_owner(&k.episode_owner(&id)?)?;
+    let desc = k.describe_episode(&id).await?;
     Ok(Json(
         serde_json::to_value(&desc).map_err(KernelError::from)?,
     ))
@@ -129,11 +159,12 @@ struct ExecuteStepRequest {
 
 async fn execute_step(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<ExecuteStepRequest>,
 ) -> ApiResult<Response> {
-    let result = k
-        .execute_step(&req.principal, &req.branch, req.action)
-        .await?;
+    let principal = auth.act_as(&req.principal)?;
+    auth.require_owner(&k.branch_owner(&req.branch)?)?;
+    let result = k.execute_step(&principal, &req.branch, req.action).await?;
     // Denials are full observations *and* HTTP 403 with the structured
     // denial, per the protocol.
     if let ak_core::Observation::Denied { denial } = &result.observation {
@@ -158,9 +189,12 @@ async fn execute_step(
 
 async fn fork_branch(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let branch = k.fork_branch(&BranchId::parse(&id)?)?;
+    let id = BranchId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&id)?)?;
+    let branch = k.fork_branch(&id)?;
     Ok(Json(
         serde_json::to_value(&branch).map_err(KernelError::from)?,
     ))
@@ -174,10 +208,13 @@ struct DiffRequest {
 
 async fn diff_branch(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(req): Json<DiffRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let changes = k.branch_diff(&BranchId::parse(&id)?, req.since.as_ref())?;
+    let id = BranchId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&id)?)?;
+    let changes = k.branch_diff(&id, req.since.as_ref())?;
     Ok(Json(
         serde_json::to_value(&changes).map_err(KernelError::from)?,
     ))
@@ -191,10 +228,14 @@ struct MergeRequest {
 
 async fn merge_branch(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(req): Json<MergeRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let node = k.merge_branch(&BranchId::parse(&id)?, &req.source, &req.actor)?;
+    let id = BranchId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&id)?)?;
+    let actor = auth.act_as(&req.actor)?;
+    let node = k.merge_branch(&id, &req.source, &actor)?;
     Ok(Json(
         serde_json::to_value(&node).map_err(KernelError::from)?,
     ))
@@ -202,17 +243,24 @@ async fn merge_branch(
 
 async fn discard_branch(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    k.discard_branch(&BranchId::parse(&id)?).await?;
+    let branch = BranchId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&branch)?)?;
+    k.discard_branch(&branch).await?;
     Ok(Json(serde_json::json!({ "discarded": id })))
 }
 
 async fn compare_branches(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path((a, b)): Path<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
-    let cmp = k.branch_compare(&BranchId::parse(&a)?, &BranchId::parse(&b)?)?;
+    let (a, b) = (BranchId::parse(&a)?, BranchId::parse(&b)?);
+    auth.require_owner(&k.branch_owner(&a)?)?;
+    auth.require_owner(&k.branch_owner(&b)?)?;
+    let cmp = k.branch_compare(&a, &b)?;
     Ok(Json(serde_json::json!({
         "base": cmp.base,
         "changed_in_a": cmp.changed_in_a,
@@ -232,10 +280,12 @@ struct CapabilityRequest {
 
 async fn request_capability(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<CapabilityRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let principal = auth.act_as(&req.principal)?;
     let lease = k.request_capability(
-        &req.principal,
+        &principal,
         &Operation::new(req.operation),
         &req.params,
         req.branch.as_ref(),
@@ -261,10 +311,12 @@ struct DelegateRequest {
 
 async fn delegate_capability(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<DelegateRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let delegator = auth.act_as(&req.delegator)?;
     let lease = k.delegate(
-        &req.delegator,
+        &delegator,
         &req.parent_lease,
         &req.delegatee,
         req.constraints,
@@ -285,19 +337,24 @@ struct RevokeRequest {
 
 async fn revoke_capability(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<RevokeRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    auth.require_role(Role::Admin)?;
     let revoked = k.revoke(&req.lease)?;
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
 async fn list_capabilities(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(principal): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
+    let principal = PrincipalId::parse(&principal)?;
+    auth.require_owner(&principal)?;
     let leases = k
         .leases()
-        .active_for_principal(&PrincipalId::parse(&principal)?, chrono::Utc::now())
+        .active_for_principal(&principal, chrono::Utc::now())
         .map_err(KernelError::from)?;
     Ok(Json(
         serde_json::to_value(&leases).map_err(KernelError::from)?,
@@ -306,9 +363,11 @@ async fn list_capabilities(
 
 async fn get_effect(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let effect = k.effect(&EffectId::parse(&id)?)?;
+    auth.require_owner(&k.branch_owner(&effect.branch)?)?;
     Ok(Json(
         serde_json::to_value(&effect).map_err(KernelError::from)?,
     ))
@@ -316,9 +375,12 @@ async fn get_effect(
 
 async fn prepare_effect(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let prepared = k.prepare_effect(&EffectId::parse(&id)?).await?;
+    let id = EffectId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&k.effect(&id)?.branch)?)?;
+    let prepared = k.prepare_effect(&id).await?;
     Ok(Json(serde_json::json!({
         "preview": prepared.preview,
         "observed_preconditions": prepared.observed_preconditions,
@@ -332,18 +394,26 @@ struct ApproveRequest {
 
 async fn approve_effect(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(req): Json<ApproveRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    k.approve_effect(&EffectId::parse(&id)?, &req.approver)?;
+    auth.require_role(Role::Approver)?;
+    // The recorded approver is the authenticated principal, never a
+    // body-supplied one (in disabled mode the body is trusted).
+    let approver = auth.principal.clone().unwrap_or(req.approver);
+    k.approve_effect(&EffectId::parse(&id)?, &approver)?;
     Ok(Json(serde_json::json!({ "approved": id })))
 }
 
 async fn commit_effect(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let receipt = k.commit_effect(&EffectId::parse(&id)?).await?;
+    let id = EffectId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&k.effect(&id)?.branch)?)?;
+    let receipt = k.commit_effect(&id).await?;
     Ok(Json(
         serde_json::to_value(&receipt).map_err(KernelError::from)?,
     ))
@@ -351,9 +421,12 @@ async fn commit_effect(
 
 async fn compensate_effect(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let receipt = k.compensate_effect(&EffectId::parse(&id)?).await?;
+    let id = EffectId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&k.effect(&id)?.branch)?)?;
+    let receipt = k.compensate_effect(&id).await?;
     Ok(Json(
         serde_json::to_value(&receipt).map_err(KernelError::from)?,
     ))
@@ -361,7 +434,11 @@ async fn compensate_effect(
 
 /// Run in-doubt recovery: resolve effects parked in phase `committing`
 /// through each connector's idempotency probe.
-async fn recover_effects(State(k): State<Arc<Kernel>>) -> ApiResult<impl IntoResponse> {
+async fn recover_effects(
+    State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<impl IntoResponse> {
+    auth.require_role(Role::Admin)?;
     let resolutions = k.recover_in_doubt_effects().await?;
     Ok(Json(serde_json::json!({
         "resolutions": resolutions
@@ -377,9 +454,11 @@ async fn recover_effects(State(k): State<Arc<Kernel>>) -> ApiResult<impl IntoRes
 /// "response": {...}}` or `{"outcome": "aborted", "reason": "..."}`.
 async fn resolve_effect(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(req): Json<ak_effect_broker::OperatorResolution>,
 ) -> ApiResult<impl IntoResponse> {
+    auth.require_role(Role::Admin)?;
     let receipt = k.resolve_in_doubt_effect(&EffectId::parse(&id)?, req)?;
     Ok(Json(
         serde_json::json!({ "resolved": id, "receipt": receipt }),
@@ -404,8 +483,13 @@ struct TraceParams {
 
 async fn trace_query(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Query(p): Query<TraceParams>,
 ) -> ApiResult<impl IntoResponse> {
+    match &p.episode {
+        Some(e) => auth.require_owner(&k.episode_owner(&EpisodeId::parse(e)?)?)?,
+        None => auth.require_role(Role::Admin)?,
+    }
     let q = TraceQuery {
         episode: p.episode.as_deref().map(EpisodeId::parse).transpose()?,
         branch: p.branch.as_deref().map(BranchId::parse).transpose()?,
@@ -432,16 +516,24 @@ async fn trace_query(
 
 async fn explain_step(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let explanation = k.step_explain(&ak_core::ids::StepId::parse(&id)?)?;
+    auth.require_owner(&explanation.principal)?;
     Ok(Json(
         serde_json::to_value(&explanation).map_err(KernelError::from)?,
     ))
 }
 
-async fn retry_step(State(k): State<Arc<Kernel>>, Path(id): Path<String>) -> ApiResult<Response> {
-    let result = k.step_retry(&ak_core::ids::StepId::parse(&id)?).await?;
+async fn retry_step(
+    State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let id = ak_core::ids::StepId::parse(&id)?;
+    auth.require_owner(&k.step_explain(&id)?.principal)?;
+    let result = k.step_retry(&id).await?;
     if let ak_core::Observation::Denied { denial } = &result.observation {
         let envelope = ErrorEnvelope {
             code: "DENIED".into(),
@@ -470,8 +562,10 @@ struct ListEffectsParams {
 
 async fn list_effects(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Query(p): Query<ListEffectsParams>,
 ) -> ApiResult<impl IntoResponse> {
+    auth.require_role(Role::Admin)?;
     let effects = k.list_effects(p.phase.as_deref())?;
     Ok(Json(
         serde_json::to_value(&effects).map_err(KernelError::from)?,
@@ -498,37 +592,39 @@ struct ReplayRequestBody {
 
 async fn replay(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(mode): Path<String>,
     Json(req): Json<ReplayRequestBody>,
 ) -> ApiResult<Response> {
     match mode.as_str() {
         "audit" => {
+            auth.require_role(Role::Admin)?;
             let (from, to) = (req.seq_from.unwrap_or(1), req.seq_to.unwrap_or(i64::MAX));
             let events = k.replay_audit(from, to)?;
             Ok(Json(serde_json::json!({ "mode": "audit", "events": events })).into_response())
         }
         "sandbox" => {
             let step = req.step.as_deref().ok_or_else(|| {
-                ApiError(KernelError::Other("sandbox replay requires `step`".into()))
+                ApiError::Kernel(KernelError::Other("sandbox replay requires `step`".into()))
             })?;
-            let report = k
-                .replay_sandbox(&ak_core::ids::StepId::parse(step)?)
-                .await?;
+            let step = ak_core::ids::StepId::parse(step)?;
+            auth.require_owner(&k.step_explain(&step)?.principal)?;
+            let report = k.replay_sandbox(&step).await?;
             Ok(Json(serde_json::to_value(&report).map_err(KernelError::from)?).into_response())
         }
         "live" => {
+            auth.require_role(Role::Approver)?;
             let effect = req.effect.as_deref().ok_or_else(|| {
-                ApiError(KernelError::Other("live replay requires `effect`".into()))
+                ApiError::Kernel(KernelError::Other("live replay requires `effect`".into()))
             })?;
             let approver = req.approver.as_deref().ok_or_else(|| {
-                ApiError(KernelError::Other("live replay requires `approver`".into()))
+                ApiError::Kernel(KernelError::Other("live replay requires `approver`".into()))
             })?;
-            let receipt = k
-                .replay_live(&EffectId::parse(effect)?, &PrincipalId::parse(approver)?)
-                .await?;
+            let approver = auth.act_as(&PrincipalId::parse(approver)?)?;
+            let receipt = k.replay_live(&EffectId::parse(effect)?, &approver).await?;
             Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?).into_response())
         }
-        other => Err(ApiError(KernelError::InvalidId {
+        other => Err(ApiError::Kernel(KernelError::InvalidId {
             expected_prefix: "audit|sandbox|live",
             got: other.to_string(),
         })),
@@ -537,8 +633,10 @@ async fn replay(
 
 async fn get_receipt(
     State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
+    auth.require_role(Role::Admin)?;
     let receipt = k.receipt(&ReceiptId::parse(&id)?)?;
     Ok(Json(
         serde_json::to_value(&receipt).map_err(KernelError::from)?,

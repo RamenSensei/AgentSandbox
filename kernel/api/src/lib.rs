@@ -24,6 +24,7 @@
 //!   have drifted, in which case revalidation aborts with
 //!   `StaleAuthorization` instead of committing something unapproved.
 
+pub mod auth;
 pub mod http;
 pub mod kernel;
 

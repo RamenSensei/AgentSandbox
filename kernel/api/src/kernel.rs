@@ -17,7 +17,9 @@ use ak_core::state::{FileChange, StateDelta, StateNode};
 use ak_core::traits::{Backend, Connector, ExecutionRequest, PreparedEffect};
 use ak_core::{KernelError, KernelResult, Principal};
 use ak_effect_broker::{EffectBroker, SecretVault};
-use ak_identity::{DelegationService, IdentityDb, KernelKeypair, LeaseStore, PrincipalRegistry};
+use ak_identity::{
+    DelegationService, IdentityDb, KernelKeypair, LeaseStore, PrincipalRegistry, SealKey,
+};
 use ak_policy::{CompiledConfinement, Decision, PolicyDocument, PolicyEngine};
 use ak_scheduler::{BackendRouter, Needs, RiskTier, SchedulerConfig, StepScheduler};
 use ak_state_dag::{Branch, BranchComparison, EpisodeHandle, StateDag};
@@ -49,6 +51,12 @@ pub struct KernelConfig {
     /// Maximum concurrently executing steps across branches.
     #[serde(default = "default_fanout")]
     pub max_concurrent_branches: usize,
+    /// Path of the file holding the 32-byte key that seals secret files
+    /// (vault, receipt-signing seed) at rest. Kept **outside** `data_dir` so
+    /// copying the data dir does not copy the key. Overridden entirely by the
+    /// `AK_VAULT_KEY` env var; defaults to `~/.agent-kernel/vault.key`.
+    #[serde(default)]
+    pub vault_key_file: Option<PathBuf>,
 }
 
 fn default_episode_budget() -> ResourceBudget {
@@ -74,6 +82,20 @@ impl KernelConfig {
             workspace_root: None,
             episode_budget: default_episode_budget(),
             max_concurrent_branches: default_fanout(),
+            vault_key_file: None,
+        }
+    }
+
+    /// Effective sealing-key file: the configured path, or
+    /// `$HOME/.agent-kernel/vault.key` when unset.
+    pub fn effective_vault_key_file(&self) -> PathBuf {
+        match &self.vault_key_file {
+            Some(p) => p.clone(),
+            None => std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".agent-kernel")
+                .join("vault.key"),
         }
     }
 }
@@ -217,8 +239,10 @@ impl Kernel {
         let identity_db =
             IdentityDb::open(config.data_dir.join("identity.db")).map_err(KernelError::from)?;
         let delegation = DelegationService::new(identity_db);
+        let key_file = config.effective_vault_key_file();
+        let seal_key = SealKey::resolve(&key_file).map_err(KernelError::from)?;
         let keypair = Arc::new(
-            KernelKeypair::load_or_generate(config.data_dir.join("receipt.key"))
+            KernelKeypair::load_or_generate(config.data_dir.join("receipt.key"), &seal_key)
                 .map_err(KernelError::from)?,
         );
         let policy_doc = match &config.policy_file {
@@ -230,7 +254,10 @@ impl Kernel {
             &config.data_dir.join("effects.db"),
             Box::new(KeySigner(Arc::clone(&keypair))),
         )?);
-        let vault = Arc::new(SecretVault::open(config.data_dir.join("vault.json"))?);
+        let vault = Arc::new(SecretVault::open(
+            config.data_dir.join("vault.json"),
+            seal_key,
+        )?);
         let backend = Arc::new(LocalBackend::new(LocalBackendConfig::new(
             config.data_dir.join("workspaces"),
         ))?);
@@ -423,6 +450,24 @@ impl Kernel {
     }
 
     // ------------------------------------------------------------- branches
+
+    /// The principal that created `episode` (the resource owner for
+    /// authorization purposes).
+    pub fn episode_owner(&self, episode: &EpisodeId) -> KernelResult<PrincipalId> {
+        lock(&self.episodes)?
+            .get(episode)
+            .map(|i| i.created_by.clone())
+            .ok_or_else(|| KernelError::NotFound {
+                kind: "episode",
+                id: episode.to_string(),
+            })
+    }
+
+    /// The owner of the episode a branch belongs to.
+    pub fn branch_owner(&self, branch: &BranchId) -> KernelResult<PrincipalId> {
+        let episode = self.dag.get_branch(branch)?.episode;
+        self.episode_owner(&episode)
+    }
 
     /// Fork a new branch from the head of `branch` and materialize its
     /// backend workspace.

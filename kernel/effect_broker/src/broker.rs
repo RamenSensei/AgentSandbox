@@ -211,6 +211,33 @@ impl EffectBroker {
         self.load_effect(id)
     }
 
+    /// List stored effects, newest proposal first, optionally filtered by
+    /// phase name (`proposed`, `prepared`, `approved`, `committed`,
+    /// `aborted`, `compensated`).
+    pub fn list_effects(&self, phase: Option<&str>) -> KernelResult<Vec<PendingEffect>> {
+        let rows: Vec<String> = self.with_store(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT json FROM effects ORDER BY rowid DESC").map_err(storage_err)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(storage_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_err)?;
+            Ok(rows)
+        })?;
+        let mut out = Vec::with_capacity(rows.len());
+        for json in rows {
+            let effect: PendingEffect = serde_json::from_str(&json)?;
+            if let Some(want) = phase {
+                if !phase_name(&effect.phase).eq_ignore_ascii_case(want) {
+                    continue;
+                }
+            }
+            out.push(effect);
+        }
+        Ok(out)
+    }
+
     /// Propose an effect: canonicalize its arguments through the owning
     /// connector, deduplicate on the idempotency key, and persist it in
     /// phase `Proposed`.
@@ -512,16 +539,23 @@ impl EffectBroker {
     }
 }
 
+fn phase_name(phase: &EffectPhase) -> &'static str {
+    match phase {
+        EffectPhase::Proposed => "proposed",
+        EffectPhase::Prepared { .. } => "prepared",
+        EffectPhase::Approved { .. } => "approved",
+        EffectPhase::Committed { .. } => "committed",
+        EffectPhase::Aborted { .. } => "aborted",
+        EffectPhase::Compensated { .. } => "compensated",
+    }
+}
+
 fn wrong_phase(effect: &PendingEffect, expected: &'static str) -> KernelError {
-    let phase = match &effect.phase {
-        EffectPhase::Proposed => "proposed".to_string(),
-        EffectPhase::Prepared { .. } => "prepared".to_string(),
-        EffectPhase::Approved { .. } => "approved".to_string(),
-        EffectPhase::Committed { .. } => "committed".to_string(),
-        EffectPhase::Aborted { .. } => "aborted".to_string(),
-        EffectPhase::Compensated { .. } => "compensated".to_string(),
-    };
-    KernelError::WrongEffectPhase { effect: effect.id.to_string(), phase, expected }
+    KernelError::WrongEffectPhase {
+        effect: effect.id.to_string(),
+        phase: phase_name(&effect.phase).to_string(),
+        expected,
+    }
 }
 
 /// Check that every key/value in `expected` matches `observed`. Returns a

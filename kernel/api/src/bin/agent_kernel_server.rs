@@ -35,6 +35,11 @@ async fn main() -> anyhow::Result<()> {
     let app = http::router(kernel);
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %args.listen, "agent-kernel-server listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutdown signal received, draining connections");
+        })
+        .await?;
     Ok(())
 }

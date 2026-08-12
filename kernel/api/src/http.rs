@@ -52,9 +52,12 @@ type ApiResult<T> = Result<T, ApiError>;
 /// Build the kernel HTTP router.
 pub fn router(kernel: Arc<Kernel>) -> Router {
     Router::new()
+        .route("/healthz", get(healthz))
         .route("/v1/episodes", post(create_episode))
         .route("/v1/episodes/:id", get(describe_episode))
         .route("/v1/steps/execute", post(execute_step))
+        .route("/v1/steps/:id/explain", get(explain_step))
+        .route("/v1/steps/:id/retry", post(retry_step))
         .route("/v1/branches/:id/fork", post(fork_branch))
         .route("/v1/branches/:id/diff", post(diff_branch))
         .route("/v1/branches/:id/merge", post(merge_branch))
@@ -64,14 +67,20 @@ pub fn router(kernel: Arc<Kernel>) -> Router {
         .route("/v1/capabilities/delegate", post(delegate_capability))
         .route("/v1/capabilities/revoke", post(revoke_capability))
         .route("/v1/capabilities/:principal", get(list_capabilities))
+        .route("/v1/effects", get(list_effects))
         .route("/v1/effects/:id", get(get_effect))
         .route("/v1/effects/:id/prepare", post(prepare_effect))
         .route("/v1/effects/:id/approve", post(approve_effect))
         .route("/v1/effects/:id/commit", post(commit_effect))
         .route("/v1/effects/:id/compensate", post(compensate_effect))
+        .route("/v1/replay/:mode", post(replay))
         .route("/v1/trace/query", get(trace_query))
         .route("/v1/receipts/:id", get(get_receipt))
         .with_state(kernel)
+}
+
+async fn healthz() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
 }
 
 #[derive(Deserialize)]
@@ -351,6 +360,107 @@ async fn trace_query(
     };
     let events = k.trace_query(&q)?;
     Ok(Json(serde_json::to_value(&events).map_err(KernelError::from)?))
+}
+
+async fn explain_step(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let explanation = k.step_explain(&ak_core::ids::StepId::parse(&id)?)?;
+    Ok(Json(serde_json::to_value(&explanation).map_err(KernelError::from)?))
+}
+
+async fn retry_step(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let result = k.step_retry(&ak_core::ids::StepId::parse(&id)?).await?;
+    if let ak_core::Observation::Denied { denial } = &result.observation {
+        let envelope = ErrorEnvelope {
+            code: "DENIED".into(),
+            message: denial.reason.clone(),
+            denial: Some(denial.clone()),
+        };
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "step": result.step,
+                "state": result.state,
+                "observation": result.observation,
+                "error": envelope,
+            })),
+        )
+            .into_response());
+    }
+    Ok(Json(serde_json::to_value(&result).map_err(KernelError::from)?).into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct ListEffectsParams {
+    #[serde(default)]
+    phase: Option<String>,
+}
+
+async fn list_effects(
+    State(k): State<Arc<Kernel>>,
+    Query(p): Query<ListEffectsParams>,
+) -> ApiResult<impl IntoResponse> {
+    let effects = k.list_effects(p.phase.as_deref())?;
+    Ok(Json(serde_json::to_value(&effects).map_err(KernelError::from)?))
+}
+
+#[derive(Deserialize, Default)]
+struct ReplayRequestBody {
+    /// `audit`: inclusive ledger sequence range.
+    #[serde(default)]
+    seq_from: Option<i64>,
+    #[serde(default)]
+    seq_to: Option<i64>,
+    /// `sandbox`: the recorded step to re-execute.
+    #[serde(default)]
+    step: Option<String>,
+    /// `live`: the recorded effect whose contract is re-committed, and the
+    /// principal approving the new commit.
+    #[serde(default)]
+    effect: Option<String>,
+    #[serde(default)]
+    approver: Option<String>,
+}
+
+async fn replay(
+    State(k): State<Arc<Kernel>>,
+    Path(mode): Path<String>,
+    Json(req): Json<ReplayRequestBody>,
+) -> ApiResult<Response> {
+    match mode.as_str() {
+        "audit" => {
+            let (from, to) = (req.seq_from.unwrap_or(1), req.seq_to.unwrap_or(i64::MAX));
+            let events = k.replay_audit(from, to)?;
+            Ok(Json(serde_json::json!({ "mode": "audit", "events": events })).into_response())
+        }
+        "sandbox" => {
+            let step = req.step.as_deref().ok_or_else(|| {
+                ApiError(KernelError::Other("sandbox replay requires `step`".into()))
+            })?;
+            let report = k.replay_sandbox(&ak_core::ids::StepId::parse(step)?).await?;
+            Ok(Json(serde_json::to_value(&report).map_err(KernelError::from)?).into_response())
+        }
+        "live" => {
+            let effect = req.effect.as_deref().ok_or_else(|| {
+                ApiError(KernelError::Other("live replay requires `effect`".into()))
+            })?;
+            let approver = req.approver.as_deref().ok_or_else(|| {
+                ApiError(KernelError::Other("live replay requires `approver`".into()))
+            })?;
+            let receipt =
+                k.replay_live(&EffectId::parse(effect)?, &PrincipalId::parse(approver)?).await?;
+            Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?).into_response())
+        }
+        other => Err(ApiError(KernelError::InvalidId {
+            expected_prefix: "audit|sandbox|live",
+            got: other.to_string(),
+        })),
+    }
 }
 
 async fn get_receipt(

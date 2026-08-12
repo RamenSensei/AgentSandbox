@@ -105,6 +105,31 @@ pub struct StepResult {
     pub observation: Observation,
 }
 
+/// Structured answer to "why did this step do what it did" — the causal
+/// chain the ledger recorded for one step, decoded into protocol shapes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepExplanation {
+    pub step: StepId,
+    pub episode: EpisodeId,
+    pub branch: Option<BranchId>,
+    pub principal: PrincipalId,
+    /// The invoked action as recorded (kind, lease, budget, intent hint).
+    pub action: Option<serde_json::Value>,
+    /// Policy decisions and capability requests that led to the action.
+    pub policy_decisions: Vec<serde_json::Value>,
+    /// The machine-readable denial, when the step was denied.
+    pub denial: Option<Denial>,
+    /// State the step produced (absent for denied steps).
+    pub state: Option<StateId>,
+    pub state_delta: Option<serde_json::Value>,
+    /// The distilled observation the agent saw.
+    pub observation: Option<serde_json::Value>,
+    /// Effects proposed by this step.
+    pub effects_proposed: Vec<serde_json::Value>,
+    /// Every raw ledger event for the step, in causal order.
+    pub events: Vec<LedgerEvent>,
+}
+
 /// Report produced by [`Kernel::replay_sandbox`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplaySandboxReport {
@@ -669,7 +694,10 @@ impl Kernel {
             self.broker.propose(contract, principal.clone(), branch.clone(), step.clone(), action.lease.clone())?;
         let tool = writer.record(
             EventKind::ToolInvocation,
-            serde_json::json!({ "action": action.kind, "intent_hint": action.intent_hint }),
+            serde_json::json!({
+                "action": action.kind, "intent_hint": action.intent_hint,
+                "lease": action.lease, "budget": action.budget,
+            }),
         )?;
         let proposed = writer.record_caused_by(
             EventKind::EffectProposed,
@@ -723,7 +751,9 @@ impl Kernel {
         let head = self.dag.head(branch)?;
         let tool = writer.record(
             EventKind::ToolInvocation,
-            serde_json::json!({ "action": action.kind }),
+            serde_json::json!({
+                "action": action.kind, "lease": action.lease, "budget": action.budget,
+            }),
         )?;
         let node = self.dag.append_step(
             branch,
@@ -771,7 +801,10 @@ impl Kernel {
         };
         let tool = writer.record(
             EventKind::ToolInvocation,
-            serde_json::json!({ "action": action.kind, "intent_hint": action.intent_hint }),
+            serde_json::json!({
+                "action": action.kind, "intent_hint": action.intent_hint,
+                "lease": action.lease, "budget": action.budget,
+            }),
         )?;
         let outcome = match self
             .scheduler
@@ -949,6 +982,11 @@ impl Kernel {
         self.broker.effect(id)
     }
 
+    /// List effects, newest first, optionally filtered by phase name.
+    pub fn list_effects(&self, phase: Option<&str>) -> KernelResult<Vec<PendingEffect>> {
+        self.broker.list_effects(phase)
+    }
+
     /// Fetch a signed receipt.
     pub fn receipt(&self, id: &ReceiptId) -> KernelResult<Receipt> {
         self.broker.receipt(id)
@@ -965,6 +1003,97 @@ impl Kernel {
     /// Query the causal ledger.
     pub fn trace_query(&self, q: &TraceQuery) -> KernelResult<Vec<LedgerEvent>> {
         self.ledger.query(q)
+    }
+
+    /// Explain a recorded step: decode its ledger events into the action,
+    /// policy decisions, denial, state delta, observation and proposed
+    /// effects (`step.explain` in the protocol).
+    pub fn step_explain(&self, step: &StepId) -> KernelResult<StepExplanation> {
+        let events =
+            self.ledger.query(&TraceQuery { step: Some(step.clone()), ..TraceQuery::default() })?;
+        let first = events.first().ok_or_else(|| KernelError::NotFound {
+            kind: "step",
+            id: step.to_string(),
+        })?;
+        let mut explanation = StepExplanation {
+            step: step.clone(),
+            episode: first.episode.clone(),
+            branch: first.branch.clone(),
+            principal: first.principal.clone(),
+            action: None,
+            policy_decisions: Vec::new(),
+            denial: None,
+            state: None,
+            state_delta: None,
+            observation: None,
+            effects_proposed: Vec::new(),
+            events: events.clone(),
+        };
+        for ev in &events {
+            match ev.kind {
+                EventKind::ToolInvocation => explanation.action = Some(ev.payload.clone()),
+                EventKind::PolicyDecision | EventKind::CapabilityRequest => {
+                    explanation.policy_decisions.push(ev.payload.clone())
+                }
+                EventKind::DenialIssued => {
+                    explanation.denial = serde_json::from_value(ev.payload.clone()).ok()
+                }
+                EventKind::StateDeltaRecorded => {
+                    explanation.state = ev
+                        .payload
+                        .get("state_id")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok());
+                    explanation.state_delta = ev.payload.get("delta").cloned();
+                }
+                EventKind::ObservationEmitted => {
+                    explanation.observation = Some(ev.payload.clone())
+                }
+                EventKind::EffectProposed => explanation.effects_proposed.push(ev.payload.clone()),
+                _ => {}
+            }
+        }
+        Ok(explanation)
+    }
+
+    /// Retry a recorded step: re-present the *same* recorded action (kind,
+    /// lease, budget) as a fresh step on the same branch. Retrying never
+    /// mints authority — if the recorded lease has since expired or been
+    /// revoked, the retry is denied like any other step.
+    pub async fn step_retry(&self, step: &StepId) -> KernelResult<StepResult> {
+        let explanation = self.step_explain(step)?;
+        let branch = explanation.branch.clone().ok_or_else(|| KernelError::NotFound {
+            kind: "step_branch",
+            id: step.to_string(),
+        })?;
+        let payload = explanation.action.ok_or_else(|| KernelError::NotFound {
+            kind: "tool_invocation",
+            id: step.to_string(),
+        })?;
+        let kind: ActionKind = serde_json::from_value(
+            payload.get("action").cloned().ok_or_else(|| KernelError::NotFound {
+                kind: "recorded_action",
+                id: step.to_string(),
+            })?,
+        )?;
+        let lease: LeaseId = serde_json::from_value(
+            payload.get("lease").cloned().ok_or_else(|| KernelError::NotFound {
+                kind: "recorded_lease",
+                id: step.to_string(),
+            })?,
+        )?;
+        let budget: ResourceBudget = payload
+            .get("budget")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(ResourceBudget::step_default);
+        let intent_hint = payload
+            .get("intent_hint")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("retry of {step}: {s}"))
+            .or_else(|| Some(format!("retry of {step}")));
+        let action = Action { kind, lease, intent_hint, budget };
+        self.execute_step(&explanation.principal, &branch, action).await
     }
 
     // --------------------------------------------------------------- replay

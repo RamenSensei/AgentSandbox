@@ -18,11 +18,16 @@
 //! - only `http` / `https` schemes;
 //! - literal IP hosts are refused outright (v4 and v6);
 //! - `localhost` / `*.localhost` are refused;
-//! - defense in depth: loopback, RFC1918 private, link-local
-//!   (incl. the 169.254.169.254 metadata service), CGNAT and
-//!   unique-local/v6-link-local ranges are refused if an IP is ever seen;
+//! - hostnames are **resolved before connecting** and refused if *any*
+//!   resolved address is loopback, RFC1918 private, link-local
+//!   (incl. the 169.254.169.254 metadata service), CGNAT, unique-local,
+//!   v6-link-local, unspecified, broadcast, or a cloud metadata address
+//!   (169.254.169.254, fd00:ec2::254);
+//! - DNS rebinding is prevented by **pinning** the validated address: the
+//!   connection is made to the exact IP that passed the checks (via
+//!   reqwest's resolver override), never through a second lookup;
 //! - redirects are followed manually, and **each hop** re-runs the full
-//!   guard set and the allowlist check;
+//!   guard set, re-resolves + re-pins, and re-checks the allowlist;
 //! - response bodies are streamed and capped at
 //!   [`HttpConnectorConfig::max_response_bytes`].
 
@@ -33,7 +38,8 @@ use ak_core::{KernelError, KernelResult};
 use async_trait::async_trait;
 use reqwest::Url;
 use serde_json::{json, Value};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
 /// Operation name for the read-only proxy.
@@ -71,11 +77,32 @@ impl Default for HttpConnectorConfig {
 }
 
 /// The read-only HTTP proxy connector. See crate docs for the guard model.
-#[derive(Debug)]
 pub struct HttpConnector {
     config: HttpConnectorConfig,
-    client: reqwest::Client,
+    resolver: Arc<Resolver>,
 }
+
+impl std::fmt::Debug for HttpConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpConnector")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A DNS lookup function: `(host, port)` to every resolved address.
+/// Injectable so the resolution-based guards are testable without real DNS.
+pub type Resolver = dyn Fn(&str, u16) -> std::io::Result<Vec<IpAddr>> + Send + Sync;
+
+/// Default resolver backed by the system's `ToSocketAddrs`.
+fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
+    Ok((host, port).to_socket_addrs()?.map(|a| a.ip()).collect())
+}
+
+/// The cloud metadata endpoints, refused explicitly (defense in depth: both
+/// already fall in ranges [`is_forbidden_ip`] refuses).
+const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
+const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254);
 
 /// Is this address in a range that must never be reached from a guest?
 fn is_forbidden_ip(ip: &IpAddr) -> bool {
@@ -86,16 +113,18 @@ fn is_forbidden_ip(ip: &IpAddr) -> bool {
                 || v4.is_link_local() // includes 169.254.169.254 metadata
                 || v4.is_unspecified()
                 || v4.is_broadcast()
+                || *v4 == METADATA_V4
                 // CGNAT 100.64.0.0/10
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
-                // unique local fc00::/7
+                // unique local fc00::/7 (includes fd00:ec2::254 metadata)
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 // link-local fe80::/10
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || *v6 == METADATA_V6
                 // v4-mapped: recurse
                 || v6.to_ipv4_mapped().map(|m| is_forbidden_ip(&IpAddr::V4(m))).unwrap_or(false)
         }
@@ -104,11 +133,16 @@ fn is_forbidden_ip(ip: &IpAddr) -> bool {
 
 impl HttpConnector {
     pub fn new(config: HttpConnectorConfig) -> KernelResult<Self> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(conn_err)?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            resolver: Arc::new(system_resolve),
+        })
+    }
+
+    /// Like [`HttpConnector::new`], but with an injected DNS resolver.
+    /// Used by tests to exercise the resolution guards without real DNS.
+    pub fn with_resolver(config: HttpConnectorConfig, resolver: Arc<Resolver>) -> Self {
+        Self { config, resolver }
     }
 
     /// Run the full SSRF guard set on `url`, returning the parsed URL.
@@ -160,6 +194,37 @@ impl HttpConnector {
         )))
     }
 
+    /// Resolve `host` and refuse the target if **any** resolved address is
+    /// forbidden. Returns the vetted address to pin the connection to.
+    fn resolve_and_check(&self, host: &str, port: u16) -> KernelResult<IpAddr> {
+        let addrs = (self.resolver)(host, port)
+            .map_err(|e| conn_err(format!("dns resolution of `{host}` failed: {e}")))?;
+        if addrs.is_empty() {
+            return Err(conn_err(format!("host `{host}` resolved to no addresses")));
+        }
+        for ip in &addrs {
+            if self.config.danger_allow_loopback && ip.is_loopback() {
+                continue;
+            }
+            if is_forbidden_ip(ip) {
+                return Err(conn_err(format!(
+                    "host `{host}` refused: resolves to `{ip}` (private/loopback/link-local/metadata range)"
+                )));
+            }
+        }
+        Ok(addrs[0])
+    }
+
+    /// Build a one-shot client whose connection to `host` is pinned to the
+    /// already-vetted `ip`, defeating DNS rebinding between check and use.
+    fn pinned_client(&self, host: &str, ip: IpAddr, port: u16) -> KernelResult<reqwest::Client> {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(host, SocketAddr::new(ip, port))
+            .build()
+            .map_err(conn_err)
+    }
+
     /// Does the host of `url` match the read-safe allowlist?
     pub fn is_allowlisted(&self, url: &Url) -> bool {
         let Some(host) = url.host_str() else {
@@ -184,18 +249,33 @@ impl HttpConnector {
     }
 
     /// Perform the GET with manual redirect handling: every hop re-runs the
-    /// guard set, and when `require_allowlist` is set (the request was
-    /// classified `Pure`), every hop must also stay on the allowlist.
+    /// guard set, resolves + vets + pins the target address, and when
+    /// `require_allowlist` is set (the request was classified `Pure`), every
+    /// hop must also stay on the allowlist.
     async fn fetch(&self, start: Url, require_allowlist: bool) -> KernelResult<Value> {
         let mut url = start;
         for _hop in 0..=self.config.max_redirects {
             debug!(%url, "http.get fetch");
-            let resp = self
-                .client
-                .get(url.clone())
-                .send()
-                .await
-                .map_err(conn_err)?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| conn_err(format!("url `{url}` has no host")))?
+                .to_string();
+            let port = url.port_or_known_default().unwrap_or(80);
+            // Literal-IP hosts only survive guard_url in test loopback mode
+            // and need no resolution; everything else is resolved, vetted,
+            // and pinned so the connection goes to the checked address.
+            let bare = host.trim_start_matches('[').trim_end_matches(']');
+            let client = match bare.parse::<IpAddr>() {
+                Ok(_) => reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(conn_err)?,
+                Err(_) => {
+                    let ip = self.resolve_and_check(&host, port)?;
+                    self.pinned_client(&host, ip, port)?
+                }
+            };
+            let resp = client.get(url.clone()).send().await.map_err(conn_err)?;
             let status = resp.status();
             if status.is_redirection() {
                 let location = resp

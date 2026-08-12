@@ -6,6 +6,7 @@ use super::*;
 use axum::response::Redirect;
 use axum::routing::get;
 use axum::Router;
+use std::net::Ipv4Addr;
 
 fn connector(allowlist: &[&str]) -> HttpConnector {
     HttpConnector::new(HttpConnectorConfig {
@@ -13,6 +14,23 @@ fn connector(allowlist: &[&str]) -> HttpConnector {
         ..Default::default()
     })
     .expect("connector")
+}
+
+/// A connector whose DNS resolver is a fixed table: every hostname resolves
+/// to `ips`. Lets the resolution guards run without real DNS.
+fn connector_resolving_to(
+    allowlist: &[&str],
+    ips: Vec<IpAddr>,
+    allow_loopback: bool,
+) -> HttpConnector {
+    HttpConnector::with_resolver(
+        HttpConnectorConfig {
+            allowlist: allowlist.iter().map(|s| s.to_string()).collect(),
+            danger_allow_loopback: allow_loopback,
+            ..Default::default()
+        },
+        Arc::new(move |_host: &str, _port: u16| Ok(ips.clone())),
+    )
 }
 
 #[test]
@@ -226,4 +244,95 @@ async fn prepare_is_a_pure_dry_run() {
         .await
         .unwrap();
     assert_eq!(p.preview["classified_as"], "opaque_external");
+}
+
+#[test]
+fn literal_private_ip_is_refused() {
+    let c = connector(&["example.com"]);
+    let err = c.guard_url("http://10.0.0.1/secrets").unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+    let err = c.guard_url("http://192.168.1.10/").unwrap_err();
+    assert!(err.to_string().contains("refused"), "{err}");
+}
+
+#[tokio::test]
+async fn hostname_resolving_to_loopback_is_refused() {
+    // `rebind.example` passes the string guards but the injected resolver
+    // says it points at loopback: the connection must be refused before it
+    // is ever made (no server is listening here).
+    let c = connector_resolving_to(
+        &["rebind.example"],
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        false,
+    );
+    let err = c
+        .commit(&contract("http://rebind.example/", EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("resolves to"), "{err}");
+}
+
+#[tokio::test]
+async fn hostname_resolving_to_metadata_is_refused() {
+    // v4 metadata service, even with the test-only loopback exemption on.
+    let c = connector_resolving_to(
+        &["meta.example"],
+        vec![IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))],
+        true,
+    );
+    let err = c
+        .commit(&contract("http://meta.example/", EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("resolves to"), "{err}");
+
+    // v6 metadata (fd00:ec2::254).
+    let c = connector_resolving_to(
+        &["meta.example"],
+        vec!["fd00:ec2::254".parse().unwrap()],
+        true,
+    );
+    let err = c
+        .commit(&contract("http://meta.example/", EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("resolves to"), "{err}");
+
+    // Any single bad address among several poisons the whole set.
+    let c = connector_resolving_to(
+        &["meta.example"],
+        vec![
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        true,
+    );
+    let err = c
+        .commit(&contract("http://meta.example/", EffectClass::Pure))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("resolves to"), "{err}");
+}
+
+#[tokio::test]
+async fn allowlisted_public_flow_is_pinned_to_resolved_ip() {
+    // Full happy path: an allowlisted hostname is resolved by the injected
+    // resolver, vetted, and the connection pinned to that exact address
+    // (the mock server) via the reqwest resolver override.
+    let base = spawn_mock().await;
+    let port = Url::parse(&base).unwrap().port().unwrap();
+    let c = connector_resolving_to(
+        &["svc.example"],
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        true,
+    );
+    let ok = c
+        .commit(&contract(
+            &format!("http://svc.example:{port}/ok"),
+            EffectClass::Pure,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok.response["status"], 200);
+    assert_eq!(ok.response["body"], "hello world");
 }

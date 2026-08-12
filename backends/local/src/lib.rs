@@ -3,26 +3,50 @@
 //! A real, working local OS-sandbox [`Backend`] for macOS and Linux, used by
 //! tests and examples. It executes [`ActionKind::Shell`], [`ActionKind::ReadFile`],
 //! [`ActionKind::WriteFile`] and [`ActionKind::DeletePath`] inside a
-//! **per-branch workspace directory** with:
+//! **per-branch workspace directory**.
+//!
+//! ## Fail-closed sandbox enforcement (AK-001)
+//!
+//! Shell commands only ever run inside a **verified** OS sandbox:
+//!
+//! - **Linux** — bubblewrap (`bwrap`) with an unshared network + PID
+//!   namespace, a read-only rootfs and the compiled readable/writable
+//!   workspace prefixes bound in (everything else in the workspace shadowed
+//!   by tmpfs when read confinement is requested);
+//! - **macOS** — Seatbelt (`sandbox-exec`) with a generated deny-default
+//!   profile: reads limited to the system paths needed to execute binaries
+//!   plus the workspace's readable prefixes, writes limited to the writable
+//!   prefixes, and **all network denied**.
+//!
+//! At construction the backend *probes* the host sandbox by executing a
+//! canary inside it and verifying that a host file outside the workspace is
+//! unreadable. [`BackendProfile::isolation_strength`] reports the **verified**
+//! capability, never a declared one. When no sandbox passes the probe, shell
+//! execution is **refused** (fail closed) unless the operator explicitly
+//! constructs the backend with
+//! [`LocalBackendConfig::dangerously_allow_unsandboxed`] — intended for
+//! trusted-code development only.
+//!
+//! Because the local sandbox denies all direct network access, egress
+//! happens exclusively through typed connectors ([`ActionKind::HttpRead`]
+//! and effect proposals), where `egress_domains` are enforced on resolved
+//! addresses. A shell step can therefore never bypass the domain policy.
+//!
+//! Additional confinement (all platforms):
 //!
 //! - a **scrubbed environment**: the child process environment is cleared and
-//!   only `PATH` (host value), `HOME` (set to the workspace) and `LANG` are
-//!   provided, plus any explicitly pre-authorized variables carried on the
-//!   action itself;
+//!   only `PATH` (host value), `HOME` (set to the workspace), `TMPDIR` (a
+//!   workspace-internal scratch dir) and `LANG` are provided, plus any
+//!   explicitly pre-authorized variables carried on the action itself;
 //! - a **wall-clock timeout** derived from `budget.cpu_ms`, with
 //!   kill-on-timeout via the child's process group where available;
 //! - **output capture with byte caps** (see [`LocalBackendConfig::max_capture_bytes`]);
-//! - **in-process path confinement**: every path is verified to be inside the
-//!   workspace (no absolute paths, no `..`, symlink escapes rejected by
-//!   canonicalizing the deepest existing ancestor) and to match the request's
-//!   readable/writable prefixes;
+//! - **in-process path confinement** for structured file actions: every path
+//!   is verified to be inside the workspace (no absolute paths, no `..`,
+//!   symlink escapes rejected by canonicalizing the deepest existing
+//!   ancestor) and to match the request's readable/writable prefixes;
 //! - **`paths_written` detection** via an mtime/size scan diff of the
 //!   workspace before and after execution.
-//!
-//! On Linux, if a `bwrap` (bubblewrap) binary is found at runtime, shell
-//! commands are additionally wrapped in a bubblewrap sandbox with network and
-//! PID namespaces unshared. This is feature-detected at *runtime*, not compile
-//! time; without it the backend performs a plain confined exec.
 //!
 //! Replay class: [`ReplayClass::FilesystemOnly`] — the workspace tree is the
 //! only state this backend can faithfully restore.
@@ -41,6 +65,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod b64;
+mod sandbox;
+
+pub use sandbox::SandboxTech;
 
 /// Configuration for [`LocalBackend`].
 #[derive(Debug, Clone)]
@@ -53,6 +80,11 @@ pub struct LocalBackendConfig {
     /// "no time at all"; a zero budget is refused, this is only a hard upper
     /// clamp on very large budgets.
     pub max_wall_clock: Duration,
+    /// When `false` (**default**), shell commands are refused unless a
+    /// verified OS sandbox is available (fail closed). Setting this to
+    /// `true` lets shell commands run as plain confined host processes and
+    /// is **only** safe for fully trusted code on a development machine.
+    pub dangerously_allow_unsandboxed: bool,
 }
 
 impl LocalBackendConfig {
@@ -61,29 +93,44 @@ impl LocalBackendConfig {
             root: root.into(),
             max_capture_bytes: 1 << 20,
             max_wall_clock: Duration::from_secs(600),
+            dangerously_allow_unsandboxed: false,
         }
+    }
+
+    /// Opt out of fail-closed sandboxing. The name is deliberately loud:
+    /// without an OS sandbox the workspace directory is **not** a security
+    /// boundary for shell commands.
+    pub fn dangerously_allow_unsandboxed(mut self) -> Self {
+        self.dangerously_allow_unsandboxed = true;
+        self
     }
 }
 
 /// Local OS-sandbox backend. See the crate docs for the confinement model.
 pub struct LocalBackend {
     config: LocalBackendConfig,
-    /// Whether `bwrap` was found on this host (Linux only, runtime-detected).
-    bwrap: bool,
+    /// The sandbox technology that passed the construction-time probe.
+    tech: SandboxTech,
 }
 
 impl LocalBackend {
-    /// Create the backend, ensuring the workspace root exists and probing for
-    /// bubblewrap on Linux.
+    /// Create the backend, ensuring the workspace root exists and probing the
+    /// host's sandbox capability (see [`sandbox::probe`]).
     pub fn new(config: LocalBackendConfig) -> KernelResult<Self> {
         std::fs::create_dir_all(&config.root)?;
-        let bwrap = detect_bwrap();
-        Ok(Self { config, bwrap })
+        let tech = sandbox::probe();
+        tracing::info!(?tech, "local backend sandbox probe");
+        Ok(Self { config, tech })
+    }
+
+    /// The verified sandbox technology for shell commands.
+    pub fn sandbox_tech(&self) -> SandboxTech {
+        self.tech
     }
 
     /// Whether shell commands will be wrapped in bubblewrap.
     pub fn uses_bwrap(&self) -> bool {
-        self.bwrap
+        self.tech == SandboxTech::Bwrap
     }
 
     /// The workspace directory for a branch, created on demand.
@@ -92,20 +139,6 @@ impl LocalBackend {
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
     }
-}
-
-/// Runtime bubblewrap detection (Linux only; always `false` elsewhere).
-fn detect_bwrap() -> bool {
-    if !cfg!(target_os = "linux") {
-        return false;
-    }
-    std::process::Command::new("bwrap")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 fn denial(code: DenialCode, op: &str, reason: impl Into<String>) -> KernelError {
@@ -225,7 +258,8 @@ fn resolve_confined(
 }
 
 /// Snapshot of `(mtime, len)` per workspace-relative path, used to diff
-/// written paths across an execution.
+/// written paths across an execution. The sandbox scratch dir
+/// ([`sandbox::SCRATCH_DIR`]) is internal and excluded.
 fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
     let mut out = BTreeMap::new();
     let mut stack = vec![workspace.to_path_buf()];
@@ -233,6 +267,11 @@ fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.file_name().is_some_and(|n| n == sandbox::SCRATCH_DIR)
+                && path.parent() == Some(workspace)
+            {
+                continue;
+            }
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
                 stack.push(path);
@@ -272,6 +311,7 @@ struct ExecResult {
 }
 
 impl LocalBackend {
+    #[allow(clippy::too_many_arguments)]
     async fn run_shell(
         &self,
         workspace: &Path,
@@ -279,6 +319,8 @@ impl LocalBackend {
         cwd: Option<&str>,
         env: &BTreeMap<String, String>,
         budget: &ResourceBudget,
+        readable_prefixes: &[String],
+        writable_prefixes: &[String],
     ) -> KernelResult<ExecResult> {
         if budget.cpu_ms == 0 {
             return Err(denial(
@@ -302,41 +344,62 @@ impl LocalBackend {
 
         let host_path =
             std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        let ws_canon = workspace.canonicalize()?;
+        let scratch = ws_canon.join(sandbox::SCRATCH_DIR);
+        std::fs::create_dir_all(&scratch)?;
 
-        let mut cmd = if self.bwrap {
-            // Runtime-detected bubblewrap wrap (Linux): read-only rootfs,
-            // writable workspace bind, no network, fresh PID namespace.
-            let mut c = tokio::process::Command::new("bwrap");
-            c.arg("--die-with-parent")
-                .arg("--unshare-net")
-                .arg("--unshare-pid")
-                .arg("--ro-bind")
-                .arg("/")
-                .arg("/")
-                .arg("--dev")
-                .arg("/dev")
-                .arg("--proc")
-                .arg("/proc")
-                .arg("--bind")
-                .arg(workspace)
-                .arg(workspace)
-                .arg("--chdir")
-                .arg(&cwd)
-                .arg("/bin/sh")
-                .arg("-c")
-                .arg(command);
-            c
-        } else {
-            let mut c = tokio::process::Command::new("/bin/sh");
-            c.arg("-c").arg(command).current_dir(&cwd);
-            c
+        // Profile files live outside the workspace so a confined shell can
+        // never rewrite its own sandbox rules.
+        let mut profile_file: Option<tempfile::NamedTempFile> = None;
+
+        let mut cmd = match self.tech {
+            SandboxTech::Bwrap => {
+                let mut c = tokio::process::Command::new("bwrap");
+                c.args(sandbox::bwrap_args(&ws_canon, readable_prefixes, writable_prefixes));
+                c.arg("--chdir").arg(&cwd).arg("/bin/sh").arg("-c").arg(command);
+                c
+            }
+            SandboxTech::SandboxExec => {
+                let profile =
+                    sandbox::seatbelt_profile(&ws_canon, readable_prefixes, writable_prefixes);
+                let file = tempfile::Builder::new()
+                    .prefix("ak-seatbelt-")
+                    .suffix(".sb")
+                    .tempfile()
+                    .map_err(KernelError::Io)?;
+                std::fs::write(file.path(), profile)?;
+                let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
+                c.arg("-f").arg(file.path()).arg("/bin/sh").arg("-c").arg(command).current_dir(&cwd);
+                profile_file = Some(file);
+                c
+            }
+            SandboxTech::None => {
+                if !self.config.dangerously_allow_unsandboxed {
+                    // Fail closed (AK-001): the workspace directory is not a
+                    // security boundary and must never silently become one.
+                    return Err(KernelError::BackendUnavailable {
+                        backend: "local".into(),
+                        reason: "no verified OS sandbox on this host: install bubblewrap (Linux) \
+                                 or ensure /usr/bin/sandbox-exec works (macOS). Shell execution \
+                                 fails closed; route the step to a stronger backend, or opt in \
+                                 to unsandboxed execution for trusted development code only via \
+                                 LocalBackendConfig::dangerously_allow_unsandboxed."
+                            .into(),
+                    });
+                }
+                let mut c = tokio::process::Command::new("/bin/sh");
+                c.arg("-c").arg(command).current_dir(&cwd);
+                c
+            }
         };
 
         // Environment scrub: cleared, then a minimal safe set plus the
-        // explicitly pre-authorized action environment.
+        // explicitly pre-authorized action environment. TMPDIR points at a
+        // workspace-internal scratch dir the sandbox allows writes to.
         cmd.env_clear()
             .env("PATH", host_path)
-            .env("HOME", workspace)
+            .env("HOME", &ws_canon)
+            .env("TMPDIR", &scratch)
             .env("LANG", "C.UTF-8");
         for (k, v) in env {
             cmd.env(k, v);
@@ -354,7 +417,7 @@ impl LocalBackend {
         })?;
         let pid = child.id();
 
-        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        let outcome = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => Ok(ExecResult {
                 exit_code: output.status.code().unwrap_or(-1),
                 stdout: cap(output.stdout, self.config.max_capture_bytes),
@@ -382,7 +445,9 @@ impl LocalBackend {
                     .into_bytes(),
                 })
             }
-        }
+        };
+        drop(profile_file);
+        outcome
     }
 }
 
@@ -391,12 +456,14 @@ impl Backend for LocalBackend {
     fn profile(&self) -> BackendProfile {
         BackendProfile {
             name: "local".into(),
-            isolation_strength: if self.bwrap { 35 } else { 20 },
+            // Verified at construction by the sandbox probe — never declared.
+            isolation_strength: self.tech.isolation_strength(),
             cold_start_ms: 5,
             replay_class: ReplayClass::FilesystemOnly,
             supports_fork: false,
             supports_gui: false,
-            full_linux: true,
+            // Honest: only a Linux host runs arbitrary Linux binaries.
+            full_linux: cfg!(target_os = "linux"),
         }
     }
 
@@ -407,8 +474,16 @@ impl Backend for LocalBackend {
 
         let result = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
-                self.run_shell(&workspace, command, cwd.as_deref(), env, &req.budget)
-                    .await?
+                self.run_shell(
+                    &workspace,
+                    command,
+                    cwd.as_deref(),
+                    env,
+                    &req.budget,
+                    &req.readable_prefixes,
+                    &req.writable_prefixes,
+                )
+                .await?
             }
             ActionKind::ReadFile { path } => {
                 let full = resolve_confined("fs.read", &workspace, path, &req.readable_prefixes)?;

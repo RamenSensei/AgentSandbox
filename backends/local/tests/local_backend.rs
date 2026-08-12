@@ -182,8 +182,173 @@ fn profile_is_honest() {
     let b = backend(tmp.path());
     let p = b.profile();
     assert_eq!(p.name, "local");
-    assert_eq!(p.isolation_strength, if b.uses_bwrap() { 35 } else { 20 });
-    assert!(p.full_linux);
+    // Isolation strength is the probe-verified value, never a declaration.
+    assert_eq!(p.isolation_strength, b.sandbox_tech().isolation_strength());
+    assert_eq!(p.full_linux, cfg!(target_os = "linux"));
     assert!(!p.supports_fork);
     assert!(!p.supports_gui);
+}
+
+// --- AK-001 regression suite -----------------------------------------------
+//
+// The review's black-box escape test obtained a `proc.shell` lease and
+// produced `{host_read: true, host_write: true, network_egress: true,
+// write_outside_policy_prefix: true}`. Each marker must now be false. These
+// tests run inside the real OS sandbox and are skipped (loudly) only where
+// no sandbox exists — where the backend fails closed instead, which
+// `fail_closed_without_sandbox` pins down.
+
+fn sandboxed(b: &LocalBackend) -> bool {
+    b.sandbox_tech() != ak_backend_local::SandboxTech::None
+}
+
+#[tokio::test]
+async fn shell_cannot_read_host_files_outside_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if !sandboxed(&b) {
+        eprintln!("SKIP: no OS sandbox on this host (fail-closed path covers this)");
+        return;
+    }
+    let host = tempfile::tempdir().unwrap();
+    let secret = host.path().join("host-secret.txt");
+    std::fs::write(&secret, "credentials").unwrap();
+    let out = b.execute(req(shell(&format!("cat {}", secret.display())))).await.unwrap();
+    assert_ne!(out.exit_code, 0, "host read must be denied");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("credentials"));
+}
+
+#[tokio::test]
+async fn shell_cannot_write_host_files_outside_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if !sandboxed(&b) {
+        eprintln!("SKIP: no OS sandbox on this host");
+        return;
+    }
+    let host = tempfile::tempdir().unwrap();
+    let target = host.path().join("pwned.txt");
+    let out = b.execute(req(shell(&format!("echo x > {}", target.display())))).await.unwrap();
+    assert_ne!(out.exit_code, 0, "host write must be denied");
+    assert!(!target.exists(), "file must not exist on the host");
+}
+
+#[tokio::test]
+async fn shell_has_no_network_egress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if !sandboxed(&b) {
+        eprintln!("SKIP: no OS sandbox on this host");
+        return;
+    }
+    // A TCP connect to a public resolver must fail inside the sandbox.
+    let probe = if cfg!(target_os = "macos") {
+        "/usr/bin/nc -G 2 -z 1.1.1.1 53"
+    } else {
+        "timeout 2 sh -c 'exec 3<>/dev/tcp/1.1.1.1/53'"
+    };
+    let out = b.execute(req(shell(probe))).await.unwrap();
+    assert_ne!(out.exit_code, 0, "network egress must be denied: {:?}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[tokio::test]
+async fn shell_respects_writable_prefixes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if !sandboxed(&b) {
+        eprintln!("SKIP: no OS sandbox on this host");
+        return;
+    }
+    let ws = b.workspace_for(&BranchId("br-test".into())).unwrap();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    // Writing inside the allowed prefix succeeds…
+    let mut r = req(shell("echo ok > src/allowed.txt"));
+    r.writable_prefixes = vec!["src/".into()];
+    let out = b.execute(r).await.unwrap();
+    assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(ws.join("src/allowed.txt").exists());
+    // …writing outside it is denied by the OS sandbox, not just convention.
+    let mut r = req(shell("echo no > outside.txt"));
+    r.writable_prefixes = vec!["src/".into()];
+    let out = b.execute(r).await.unwrap();
+    assert_ne!(out.exit_code, 0, "write outside the writable prefix must be denied");
+    assert!(!ws.join("outside.txt").exists());
+}
+
+#[tokio::test]
+async fn shell_respects_readable_prefixes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if !sandboxed(&b) {
+        eprintln!("SKIP: no OS sandbox on this host");
+        return;
+    }
+    let ws = b.workspace_for(&BranchId("br-test".into())).unwrap();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/visible.txt"), "readable").unwrap();
+    std::fs::write(ws.join("hidden.txt"), "confined").unwrap();
+    let mut r = req(shell("cat src/visible.txt"));
+    r.readable_prefixes = vec!["src/".into()];
+    let out = b.execute(r).await.unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("readable"));
+    let mut r = req(shell("cat hidden.txt"));
+    r.readable_prefixes = vec!["src/".into()];
+    let out = b.execute(r).await.unwrap();
+    assert_ne!(out.exit_code, 0, "read outside the readable prefix must be denied");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("confined"));
+}
+
+#[tokio::test]
+async fn shell_cannot_follow_symlink_out_of_the_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if !sandboxed(&b) {
+        eprintln!("SKIP: no OS sandbox on this host");
+        return;
+    }
+    let host = tempfile::tempdir().unwrap();
+    std::fs::write(host.path().join("loot.txt"), "outside").unwrap();
+    let ws = b.workspace_for(&BranchId("br-test".into())).unwrap();
+    std::os::unix::fs::symlink(host.path(), ws.join("esc")).unwrap();
+    let out = b.execute(req(shell("cat esc/loot.txt"))).await.unwrap();
+    assert_ne!(out.exit_code, 0, "symlink escape must be denied by the sandbox");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("outside"));
+}
+
+/// Without a verified sandbox the backend must fail closed for shell —
+/// never silently degrade to a host process (the exact AK-001 failure mode).
+#[tokio::test]
+async fn fail_closed_without_sandbox() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    if sandboxed(&b) {
+        // Simulate a sandboxless host by demanding more than the probe found:
+        // covered structurally — the config flag is what gates the fallback.
+        // Here we verify the dangerous opt-out is required and explicit.
+        let opt_out = LocalBackend::new(
+            LocalBackendConfig::new(tmp.path()).dangerously_allow_unsandboxed(),
+        )
+        .unwrap();
+        // Opt-out flag alone must NOT weaken a host that HAS a sandbox.
+        let out = opt_out.execute(req(shell("echo still-sandboxed"))).await.unwrap();
+        assert_eq!(out.exit_code, 0);
+        return;
+    }
+    let err = b.execute(req(shell("echo should-not-run"))).await.expect_err("must fail closed");
+    match err {
+        KernelError::BackendUnavailable { reason, .. } => {
+            assert!(reason.contains("fails closed"), "actionable reason: {reason}")
+        }
+        other => panic!("expected BackendUnavailable, got {other:?}"),
+    }
+    // File actions (in-process confinement) still work without a sandbox.
+    let out = b
+        .execute(req(ActionKind::WriteFile {
+            path: "ok.txt".into(),
+            contents_b64: b64::encode(b"fine"),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
 }

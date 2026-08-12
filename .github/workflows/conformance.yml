@@ -17,7 +17,13 @@ jobs:
         run: cargo test -p ak-conformance -- --nocapture
       - name: Run adversarial bench
         run: cargo run -p ak-adversarial-bench -- --report target/adversarial-report.json
+      - name: Run agent utility bench
+        run: cargo run -p ak-agent-utility-bench -- --report target/utility-report.json
       - uses: actions/upload-artifact@v4
         with:
           name: adversarial-report
           path: target/adversarial-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: utility-report
+          path: target/utility-report.json

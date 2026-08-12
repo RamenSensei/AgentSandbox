@@ -19,6 +19,7 @@ members = [
     "connectors/mcp",
     "conformance",
     "adversarial-bench",
+    "agent-utility-bench",
     "examples/coding-agent-github",
 ]
 

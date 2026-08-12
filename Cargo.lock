@@ -51,6 +51,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ak-agent-utility-bench"
+version = "0.7.0"
+dependencies = [
+ "ak-api",
+ "ak-backend-local",
+ "ak-causal-ledger",
+ "ak-core",
+ "ak-policy",
+ "anyhow",
+ "async-trait",
+ "clap",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ak-api"
 version = "0.7.0"
 dependencies = [

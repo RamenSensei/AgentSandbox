@@ -9,6 +9,16 @@ and on-disk formats.
 
 ## [Unreleased]
 
+### Added
+- `ak-agent-utility-bench`: the enablement-side benchmark. Measures how far
+  an autonomous agent gets inside one pre-approved capability envelope:
+  envelope autonomy (steps per lease request, zero human interventions),
+  autonomous denial recovery rate across five structured denial kinds,
+  fork/search effectiveness (parallel candidate fixes, winner selection),
+  causal introspection without shell spelunking, and exactly-once effect
+  transactions with signed receipts. Runs in CI next to the adversarial
+  bench with an uploaded JSON report.
+
 ## [0.7.0] - 2026-08-12
 
 Security-focused release addressing the external review (AK-001 … AK-012).

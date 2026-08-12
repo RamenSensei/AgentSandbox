@@ -91,6 +91,12 @@ cargo run -p ak-example-coding-agent --bin coding-agent
 # budget bypasses, self-merge) and write a JSON report
 cargo run -p ak-adversarial-bench -- --report target/adversarial-report.json
 
+# Run the agent utility bench: measures the *enablement* side — how far
+# an autonomous agent gets inside one pre-approved capability envelope
+# (envelope autonomy, autonomous denial recovery rate, fork/search,
+# causal introspection, effect transactions)
+cargo run -p ak-agent-utility-bench -- --report target/utility-report.json
+
 # Serve the HTTP control plane (unauthenticated mode is loopback-only
 # and must be opted into explicitly; use --auth-config in production)
 cargo run -p ak-api --bin agent-kernel-server -- --insecure-no-auth
@@ -135,7 +141,8 @@ agent-kernel/
 ├── sdk/                 # python, typescript
 ├── ui/                  # timeline, branch_graph, policy_view, receipt_view
 ├── conformance/         # protocol conformance suite
-├── adversarial-bench/   # security/abuse scenario benchmark
+├── adversarial-bench/   # security/abuse scenario benchmark (restriction side)
+├── agent-utility-bench/ # agent enablement benchmark (autonomy metrics)
 ├── examples/
 │   └── coding-agent-github/
 └── docs/                # design, adr, devlog

@@ -29,6 +29,7 @@ pub mod error;
 pub mod keys;
 pub mod lease_store;
 pub mod registry;
+pub mod sealing;
 
 pub use db::IdentityDb;
 pub use delegation::{DelegationRecord, DelegationService};
@@ -36,3 +37,4 @@ pub use error::{IdentityError, IdentityResult};
 pub use keys::KernelKeypair;
 pub use lease_store::LeaseStore;
 pub use registry::PrincipalRegistry;
+pub use sealing::SealKey;

@@ -15,6 +15,7 @@
 //!   redeems it once via [`SecretVault::redeem_scoped_token`].
 
 use ak_core::{KernelError, KernelResult};
+use ak_identity::sealing::{self, SealKey};
 use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use std::collections::HashMap;
@@ -38,12 +39,15 @@ struct TokenState {
 
 /// In-memory (optionally file-backed) store of named secrets.
 ///
-/// File-backed vaults persist as JSON with `0600` permissions. See the module
-/// docs for the exposure invariant.
+/// File-backed vaults persist as a ChaCha20-Poly1305-sealed JSON envelope
+/// (see [`ak_identity::sealing`]) with `0600` permissions. Legacy plaintext
+/// JSON vaults are read once and transparently re-saved sealed. See the
+/// module docs for the exposure invariant.
 pub struct SecretVault {
     secrets: Mutex<HashMap<String, String>>,
     tokens: Mutex<HashMap<String, TokenState>>,
     path: Option<PathBuf>,
+    seal_key: Option<SealKey>,
 }
 
 impl std::fmt::Debug for SecretVault {
@@ -66,16 +70,26 @@ impl SecretVault {
             secrets: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             path: None,
+            seal_key: None,
         }
     }
 
-    /// Open (or create) a file-backed vault. The file is created with `0600`
-    /// permissions on Unix.
+    /// Open (or create) a file-backed vault sealed at rest with `seal_key`
+    /// (resolve one with [`SealKey::resolve`], keeping the key file outside
+    /// the data dir). The vault file is created with `0600` permissions on
+    /// Unix. A legacy plaintext-JSON vault is accepted and immediately
+    /// re-saved sealed.
     #[instrument(skip_all, fields(path = %path.display()))]
-    pub fn open(path: PathBuf) -> KernelResult<Self> {
+    pub fn open(path: PathBuf, seal_key: SealKey) -> KernelResult<Self> {
         let secrets: HashMap<String, String> = if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&raw)?
+            let raw = std::fs::read(&path)?;
+            if sealing::is_sealed(&raw) {
+                let plain = sealing::unseal(&seal_key, &raw).map_err(KernelError::from)?;
+                serde_json::from_slice(&plain)?
+            } else {
+                info!("migrating legacy plaintext vault to sealed format");
+                serde_json::from_slice(&raw)?
+            }
         } else {
             HashMap::new()
         };
@@ -83,6 +97,7 @@ impl SecretVault {
             secrets: Mutex::new(secrets),
             tokens: Mutex::new(HashMap::new()),
             path: Some(path),
+            seal_key: Some(seal_key),
         };
         vault.persist()?;
         Ok(vault)
@@ -92,10 +107,14 @@ impl SecretVault {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        let Some(seal_key) = &self.seal_key else {
+            return Ok(());
+        };
         let map = self.secrets.lock().map_err(|_| poisoned())?;
         let json = serde_json::to_string(&*map)?;
         drop(map);
-        std::fs::write(path, json)?;
+        let sealed = sealing::seal(seal_key, json.as_bytes()).map_err(KernelError::from)?;
+        std::fs::write(path, sealed)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -220,7 +239,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("vault.json");
         {
-            let v = SecretVault::open(path.clone()).expect("open");
+            let v = SecretVault::open(path.clone(), SealKey::from_bytes([9u8; 32])).expect("open");
             v.insert("gh", "tok-123").expect("insert");
         }
         #[cfg(unix)]
@@ -229,9 +248,55 @@ mod tests {
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        let v = SecretVault::open(path).expect("reopen");
+        let v = SecretVault::open(path, SealKey::from_bytes([9u8; 32])).expect("reopen");
         assert_eq!(
             v.with_secret("gh", |s| s.to_string()).expect("read"),
+            "tok-123"
+        );
+    }
+
+    #[test]
+    fn vault_file_is_sealed_and_leaks_no_secret_bytes() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("vault.json");
+        let v = SecretVault::open(path.clone(), SealKey::from_bytes([9u8; 32])).expect("open");
+        v.insert("gh", "tok-123-very-secret").expect("insert");
+        let raw = std::fs::read(&path).expect("read raw");
+        assert!(sealing::is_sealed(&raw));
+        let haystack = String::from_utf8_lossy(&raw);
+        assert!(!haystack.contains("tok-123-very-secret"));
+        assert!(!haystack.contains("gh\""));
+    }
+
+    #[test]
+    fn wrong_seal_key_fails_to_open() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("vault.json");
+        {
+            let v = SecretVault::open(path.clone(), SealKey::from_bytes([1u8; 32])).expect("open");
+            v.insert("gh", "tok-123").expect("insert");
+        }
+        assert!(SecretVault::open(path, SealKey::from_bytes([2u8; 32])).is_err());
+    }
+
+    #[test]
+    fn legacy_plaintext_vault_migrates_to_sealed() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, r#"{"gh":"tok-123"}"#).expect("write legacy");
+        let v = SecretVault::open(path.clone(), SealKey::from_bytes([9u8; 32])).expect("open");
+        assert_eq!(
+            v.with_secret("gh", |s| s.to_string()).expect("read"),
+            "tok-123"
+        );
+        // The file was rewritten sealed and no longer contains plaintext.
+        let raw = std::fs::read(&path).expect("read raw");
+        assert!(sealing::is_sealed(&raw));
+        assert!(!String::from_utf8_lossy(&raw).contains("tok-123"));
+        // And it keeps working across reopen.
+        let v2 = SecretVault::open(path, SealKey::from_bytes([9u8; 32])).expect("reopen");
+        assert_eq!(
+            v2.with_secret("gh", |s| s.to_string()).expect("read"),
             "tok-123"
         );
     }

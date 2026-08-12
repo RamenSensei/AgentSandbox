@@ -1,6 +1,7 @@
 //! The kernel's Ed25519 signing identity, used for effect receipts.
 
 use crate::error::{IdentityError, IdentityResult};
+use crate::sealing::{self, SealKey};
 use ak_core::hash::canonical_json;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::Serialize;
@@ -29,26 +30,42 @@ impl KernelKeypair {
         }
     }
 
-    /// Load a keypair from a file containing the 32-byte secret seed encoded
-    /// as lowercase hex (optionally with trailing whitespace).
-    pub fn load(path: impl AsRef<Path>) -> IdentityResult<Self> {
-        let text = std::fs::read_to_string(path)?;
-        let bytes = hex::decode(text.trim())
+    /// Load a keypair from a file holding the 32-byte secret seed, sealed at
+    /// rest with `key` (see [`crate::sealing`]). Legacy files containing the
+    /// seed as plaintext lowercase hex are accepted and transparently
+    /// re-saved sealed.
+    pub fn load(path: impl AsRef<Path>, key: &SealKey) -> IdentityResult<Self> {
+        let raw = std::fs::read(path.as_ref())?;
+        let was_sealed = sealing::is_sealed(&raw);
+        let hex_text = if was_sealed {
+            String::from_utf8(sealing::unseal(key, &raw)?)
+                .map_err(|_| IdentityError::Key("sealed key file is not valid UTF-8".into()))?
+        } else {
+            String::from_utf8(raw)
+                .map_err(|_| IdentityError::Key("key file is not valid UTF-8".into()))?
+        };
+        let bytes = hex::decode(hex_text.trim())
             .map_err(|e| IdentityError::Key(format!("key file is not valid hex: {e}")))?;
         let seed: [u8; 32] = bytes
             .as_slice()
             .try_into()
             .map_err(|_| IdentityError::Key("key file must contain exactly 32 bytes".into()))?;
-        Ok(Self {
+        let kp = Self {
             signing: SigningKey::from_bytes(&seed),
-        })
+        };
+        if !was_sealed {
+            // Legacy plaintext seed on disk: migrate to the sealed format.
+            kp.save(path, key)?;
+        }
+        Ok(kp)
     }
 
-    /// Persist the secret seed as hex. On Unix the file is created with
-    /// owner-only (0600) permissions.
-    pub fn save(&self, path: impl AsRef<Path>) -> IdentityResult<()> {
+    /// Persist the secret seed (hex-encoded, then sealed with `key`). On
+    /// Unix the file is created with owner-only (0600) permissions.
+    pub fn save(&self, path: impl AsRef<Path>, key: &SealKey) -> IdentityResult<()> {
         let hex_seed = hex::encode(self.signing.to_bytes());
-        std::fs::write(&path, hex_seed)?;
+        let sealed = sealing::seal(key, hex_seed.as_bytes())?;
+        std::fs::write(&path, sealed)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -58,12 +75,12 @@ impl KernelKeypair {
     }
 
     /// Load from `path` if it exists, otherwise generate and save a new key.
-    pub fn load_or_generate(path: impl AsRef<Path>) -> IdentityResult<Self> {
+    pub fn load_or_generate(path: impl AsRef<Path>, key: &SealKey) -> IdentityResult<Self> {
         if path.as_ref().exists() {
-            Self::load(path)
+            Self::load(path, key)
         } else {
             let kp = Self::generate();
-            kp.save(path)?;
+            kp.save(path, key)?;
             Ok(kp)
         }
     }
@@ -133,35 +150,72 @@ mod tests {
     }
 
     #[test]
-    fn save_load_roundtrip() {
+    fn save_load_roundtrip_sealed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kernel.key");
+        let seal_key = SealKey::from_bytes([9u8; 32]);
         let kp = KernelKeypair::generate();
-        kp.save(&path).unwrap();
-        let loaded = KernelKeypair::load(&path).unwrap();
+        kp.save(&path, &seal_key).unwrap();
+        // On-disk bytes are sealed and never contain the hex seed.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(sealing::is_sealed(&raw));
+        let hex_seed = hex::encode(kp.signing.to_bytes());
+        assert!(!String::from_utf8_lossy(&raw).contains(&hex_seed));
+        let loaded = KernelKeypair::load(&path, &seal_key).unwrap();
         assert_eq!(kp.key_id(), loaded.key_id());
         // load_or_generate keeps an existing key…
-        let again = KernelKeypair::load_or_generate(&path).unwrap();
+        let again = KernelKeypair::load_or_generate(&path, &seal_key).unwrap();
         assert_eq!(again.key_id(), kp.key_id());
         // …and creates one when missing.
         let fresh_path = dir.path().join("fresh.key");
-        let fresh = KernelKeypair::load_or_generate(&fresh_path).unwrap();
+        let fresh = KernelKeypair::load_or_generate(&fresh_path, &seal_key).unwrap();
         assert!(fresh_path.exists());
         assert_ne!(fresh.key_id(), kp.key_id());
+    }
+
+    #[test]
+    fn wrong_seal_key_fails_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.key");
+        let kp = KernelKeypair::generate();
+        kp.save(&path, &SealKey::from_bytes([1u8; 32])).unwrap();
+        assert!(matches!(
+            KernelKeypair::load(&path, &SealKey::from_bytes([2u8; 32])),
+            Err(IdentityError::Key(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_plaintext_hex_seed_migrates_to_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.key");
+        let kp = KernelKeypair::generate();
+        let hex_seed = hex::encode(kp.signing.to_bytes());
+        std::fs::write(&path, format!("{hex_seed}\n")).unwrap();
+        let seal_key = SealKey::from_bytes([9u8; 32]);
+        let loaded = KernelKeypair::load(&path, &seal_key).unwrap();
+        assert_eq!(loaded.key_id(), kp.key_id());
+        // The file was re-saved sealed and no longer leaks the seed.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(sealing::is_sealed(&raw));
+        assert!(!String::from_utf8_lossy(&raw).contains(&hex_seed));
+        let reloaded = KernelKeypair::load(&path, &seal_key).unwrap();
+        assert_eq!(reloaded.key_id(), kp.key_id());
     }
 
     #[test]
     fn bad_key_files_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.key");
+        let seal_key = SealKey::from_bytes([9u8; 32]);
         std::fs::write(&path, "not-hex!").unwrap();
         assert!(matches!(
-            KernelKeypair::load(&path),
+            KernelKeypair::load(&path, &seal_key),
             Err(IdentityError::Key(_))
         ));
         std::fs::write(&path, hex::encode([0u8; 16])).unwrap();
         assert!(matches!(
-            KernelKeypair::load(&path),
+            KernelKeypair::load(&path, &seal_key),
             Err(IdentityError::Key(_))
         ));
     }

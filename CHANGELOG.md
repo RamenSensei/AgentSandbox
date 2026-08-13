@@ -100,12 +100,22 @@ environment** — the runtime a strong agent actually wants to work in.
   user's home or runtime sockets (first slice of the minimal-rootfs work).
 
 ### Security
-- **MCP servers spawn with a scrubbed environment**: `McpGateway::spawn`
-  clears the child environment down to `PATH` — an MCP server no longer
-  inherits the embedder's tokens, keys or `HOME`. `spawn_with(SpawnOptions)`
-  grants exactly what a server needs (env vars, cwd, and a sandbox wrapper
-  argv for OS-level confinement) — first slice of running MCP servers as
-  low-trust tool processes instead of extensions of the control plane.
+- **MCP servers run as confined, low-trust tool processes.**
+  `McpGateway::spawn` clears the child environment down to `PATH` — an MCP
+  server no longer inherits the embedder's tokens, keys or `HOME`;
+  `spawn_with(SpawnOptions)` grants exactly what a server needs (env vars,
+  cwd, sandbox wrapper argv). `KernelConfig.mcp` (and
+  `agent-kernel-server --mcp-server name=command…`) spawns servers at
+  `Kernel::open` inside the verified OS sandbox via
+  `ak_backend_local::sandbox::tool_wrapper`: reads and writes confined to a
+  private scratch cell under `data_dir/mcp/<name>`, no network, `HOME` and
+  `TMPDIR` inside the cell, and the Seatbelt profile stored *outside* the
+  cell so a server can never rewrite its own rules. Hosts without a
+  verified sandbox refuse to spawn (fail closed) unless the server setup
+  opts out explicitly. Signed manifests (`manifest_file` +
+  `manifest_public_key_hex`) vouch per-tool effect classes; without one,
+  every tool classifies `OpaqueExternal` and only runs through the
+  approval path.
 
 ## [0.7.0] - 2026-08-12
 

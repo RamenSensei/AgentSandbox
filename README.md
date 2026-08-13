@@ -101,9 +101,12 @@ cargo run -p ak-agent-utility-bench -- --report target/utility-report.json
 # and must be opted into explicitly; use --auth-config in production).
 # --http-read-safe enables the built-in observation plane: GETs to these
 # domains execute inline in one step; everything else needs the effect
-# approval path.
+# approval path. --mcp-server spawns an MCP server as a confined,
+# low-trust tool process (OS sandbox, scrubbed env, no network) and
+# registers it as a connector.
 cargo run -p ak-api --bin agent-kernel-server -- --insecure-no-auth \
-    --http-read-safe docs.rs --http-read-safe '*.wikipedia.org'
+    --http-read-safe docs.rs --http-read-safe '*.wikipedia.org' \
+    --mcp-server 'notes=python3 notes_server.py'
 ```
 
 ### The agent loop, without bookkeeping
@@ -120,6 +123,10 @@ control-plane ceremony:
 - **Observation vs. effect plane** — `http_read` of an allowlisted domain
   and manifest-vouched `Pure` MCP tools run inline; external *writes* go
   through propose → prepare → approve → commit with signed receipts.
+- **MCP servers are low-trust tool processes** — spawned inside the
+  verified OS sandbox with a scrubbed environment and a private scratch
+  cell, never as extensions of the control plane; signed manifests vouch
+  per-tool effect classes.
 - **Transparent egress** — grant egress domains in the policy and
   `pip install` / `cargo fetch` / `git fetch` / `curl` work unmodified:
   the sandbox stays offline except a token-authenticated loopback proxy

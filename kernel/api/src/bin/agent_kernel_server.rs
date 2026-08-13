@@ -35,6 +35,15 @@ struct Args {
     /// Merged with any `http` block in the config file.
     #[arg(long = "http-read-safe")]
     http_read_safe: Vec<String>,
+
+    /// Spawn a confined MCP server at startup and register it as a
+    /// connector (repeatable). Format: `name=command [args…]`
+    /// (whitespace-split; use the config file's `mcp` block for env,
+    /// manifest and advanced options). Servers run inside the verified OS
+    /// sandbox with a scrubbed environment and no network; hosts without a
+    /// verified sandbox refuse to start them.
+    #[arg(long = "mcp-server")]
+    mcp_server: Vec<String>,
 }
 
 #[tokio::main]
@@ -53,6 +62,24 @@ async fn main() -> anyhow::Result<()> {
         let http = config.http.get_or_insert_with(Default::default);
         http.read_safe_domains
             .extend(args.http_read_safe.iter().cloned());
+    }
+    for spec in &args.mcp_server {
+        let Some((name, cmdline)) = spec.split_once('=') else {
+            anyhow::bail!("--mcp-server expects `name=command [args…]`, got `{spec}`");
+        };
+        let mut parts = cmdline.split_whitespace();
+        let Some(command) = parts.next() else {
+            anyhow::bail!("--mcp-server {name}: empty command");
+        };
+        config.mcp.push(ak_api::McpServerSetup {
+            name: name.trim().to_string(),
+            command: command.to_string(),
+            args: parts.map(str::to_string).collect(),
+            manifest_file: None,
+            manifest_public_key_hex: None,
+            env: Default::default(),
+            dangerously_allow_unsandboxed: false,
+        });
     }
     let auth = match &args.auth_config {
         Some(path) => AuthConfig::from_yaml_file(path).map_err(|e| anyhow::anyhow!("{e}"))?,

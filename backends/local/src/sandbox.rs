@@ -321,6 +321,42 @@ pub fn bwrap_args(ws: &Path, readable: &[String], writable: &[String]) -> Vec<St
     args
 }
 
+/// Sandbox wrapper argv for a long-lived **tool process** (an MCP server, a
+/// language server, …) confined to `scratch_canon`: the same deny-default
+/// posture as shell steps — read-only host view (bwrap adds the tmpfs
+/// shadows over `/home`, `/root` and `/run`), reads and writes only inside
+/// the scratch dir, no network.
+///
+/// For Seatbelt the profile is written to `profile_out`, which must lie
+/// **outside** `scratch_canon` (a confined process must never be able to
+/// rewrite its own rules) and must outlive every process started with the
+/// wrapper. Returns `Ok(None)` when no verified sandbox tech is available —
+/// the caller decides whether that fails closed.
+pub fn tool_wrapper(
+    tech: SandboxTech,
+    scratch_canon: &Path,
+    profile_out: &Path,
+) -> std::io::Result<Option<Vec<String>>> {
+    // Shell steps point TMPDIR here; bwrap_args binds it read-write.
+    std::fs::create_dir_all(scratch_canon.join(SCRATCH_DIR))?;
+    match tech {
+        SandboxTech::SandboxExec => {
+            std::fs::write(profile_out, seatbelt_profile(scratch_canon, &[], &[], None))?;
+            Ok(Some(vec![
+                "/usr/bin/sandbox-exec".into(),
+                "-f".into(),
+                profile_out.display().to_string(),
+            ]))
+        }
+        SandboxTech::Bwrap => {
+            let mut argv = vec!["bwrap".to_string()];
+            argv.extend(bwrap_args(scratch_canon, &[], &[]));
+            Ok(Some(argv))
+        }
+        SandboxTech::None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +437,39 @@ mod tests {
             // Linux: bwrap when present, else honest None.
             assert!(matches!(tech, SandboxTech::Bwrap | SandboxTech::None));
         }
+    }
+
+    #[test]
+    fn tool_wrapper_confines_per_tech_and_fails_open_only_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scratch = tmp.path().join("cell");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = scratch.canonicalize().unwrap();
+        let profile = tmp.path().join("cell.sb");
+
+        let w = tool_wrapper(SandboxTech::SandboxExec, &scratch, &profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(w[0], "/usr/bin/sandbox-exec");
+        assert_eq!(w[1], "-f");
+        let text = std::fs::read_to_string(&profile).unwrap();
+        assert!(text.contains("(deny default)"));
+        assert!(text.contains("(deny network*)"));
+        assert!(text.contains(&format!("(subpath \"{}\")", scratch.display())));
+        // The profile itself lies outside the scratch subtree the wrapper
+        // grants writes to — the confined process cannot rewrite its rules.
+        assert!(!profile.starts_with(&scratch));
+
+        let w = tool_wrapper(SandboxTech::Bwrap, &scratch, &profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(w[0], "bwrap");
+        assert!(w.contains(&"--unshare-net".to_string()));
+        assert!(w.contains(&"--die-with-parent".to_string()));
+
+        // No verified sandbox → None; the caller must fail closed.
+        assert!(tool_wrapper(SandboxTech::None, &scratch, &profile)
+            .unwrap()
+            .is_none());
     }
 }

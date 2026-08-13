@@ -3,6 +3,7 @@
 use ak_backend_local::{LocalBackend, LocalBackendConfig};
 use ak_causal_ledger::{EventKind, Ledger, LedgerEvent, TraceQuery};
 use ak_connector_http::{HttpConnector, HttpConnectorConfig};
+use ak_connector_mcp::{McpGateway, SignedManifest, SpawnOptions};
 use ak_core::action::{Action, ActionKind};
 use ak_core::budget::ResourceBudget;
 use ak_core::capability::{glob_match, CapabilityLease, Constraint, LeaseCheckFailure, Operation};
@@ -63,6 +64,46 @@ pub struct KernelConfig {
     /// observation plane is not an optional accessory for an agent runtime.
     #[serde(default)]
     pub http: Option<HttpEgressSetup>,
+    /// Out-of-the-box MCP servers: each is spawned at [`Kernel::open`] as a
+    /// **confined, low-trust tool process** (verified OS sandbox, scrubbed
+    /// environment, private scratch cell, no network) and registered as a
+    /// connector. Hosts without a verified sandbox refuse to spawn a server
+    /// unless it opts out explicitly. When non-empty, `open` must be called
+    /// inside a tokio runtime (the servers are tokio child processes).
+    #[serde(default)]
+    pub mcp: Vec<McpServerSetup>,
+}
+
+/// One out-of-the-box MCP server (see [`KernelConfig::mcp`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerSetup {
+    /// Server/connector name: `McpInvoke { server, .. }` refers to it and
+    /// its tools become `"<name>.<tool>"` operations. Must match
+    /// `[a-z0-9_-]+` — it also names the server's on-disk scratch cell.
+    pub name: String,
+    /// Command launching the stdio (newline-delimited JSON-RPC) server.
+    pub command: String,
+    /// Arguments for `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// YAML file holding the signed tool manifest (`manifest_yaml`,
+    /// `signature`, `key_id`); requires `manifest_public_key_hex`. Without
+    /// a manifest every tool classifies `OpaqueExternal`: still callable,
+    /// but only through the effect-approval path — never inline.
+    #[serde(default)]
+    pub manifest_file: Option<PathBuf>,
+    /// Hex Ed25519 public key the manifest must verify against.
+    #[serde(default)]
+    pub manifest_public_key_hex: Option<String>,
+    /// Environment granted to the server on top of `PATH` (plus `HOME` and
+    /// `TMPDIR`, which default to the server's scratch cell).
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// **Development only.** Spawn as a plain host process (still with a
+    /// scrubbed environment) when no verified OS sandbox is available.
+    /// Default: such hosts refuse the server entirely (fail closed).
+    #[serde(default)]
+    pub dangerously_allow_unsandboxed: bool,
 }
 
 /// Out-of-the-box HTTP observation-plane configuration.
@@ -117,6 +158,7 @@ impl KernelConfig {
             max_concurrent_branches: default_fanout(),
             vault_key_file: None,
             http: None,
+            mcp: Vec::new(),
         }
     }
 
@@ -451,6 +493,12 @@ impl Kernel {
             })?;
             kernel.register_connector(Arc::new(connector))?;
         }
+        // Out-of-the-box MCP: every configured server spawns as a confined,
+        // low-trust tool process and registers as a connector.
+        let mcp_setups = kernel.config.mcp.clone();
+        for setup in &mcp_setups {
+            kernel.spawn_mcp_server(setup)?;
+        }
         Ok(kernel)
     }
 
@@ -537,6 +585,101 @@ impl Kernel {
     /// The registered connector named `name`, if any.
     pub fn connector(&self, name: &str) -> KernelResult<Option<Arc<dyn Connector>>> {
         Ok(lock(&self.connectors)?.get(name).cloned())
+    }
+
+    /// Spawn one configured MCP server as a confined, low-trust tool process
+    /// and register it as a connector.
+    ///
+    /// The server gets a scrubbed environment, a private scratch cell at
+    /// `data_dir/mcp/<name>` as cwd/`HOME`/`TMPDIR`, and — when a verified
+    /// OS sandbox is available — a Seatbelt/bwrap wrapper confining reads
+    /// and writes to that cell with no network. The Seatbelt profile lives
+    /// *outside* the cell, so the server can never rewrite its own rules.
+    /// Hosts without a verified sandbox fail closed unless the setup sets
+    /// `dangerously_allow_unsandboxed`.
+    fn spawn_mcp_server(&self, setup: &McpServerSetup) -> KernelResult<()> {
+        if setup.name.is_empty()
+            || !setup
+                .name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        {
+            return Err(KernelError::Other(format!(
+                "mcp server name `{}` must match [a-z0-9_-]+ — it names an on-disk scratch \
+                 cell and an operation prefix",
+                setup.name
+            )));
+        }
+        let mcp_root = self.config.data_dir.join("mcp");
+        let cell = mcp_root.join(&setup.name);
+        std::fs::create_dir_all(&cell)?;
+        let cell = cell.canonicalize()?;
+        let profile_out = mcp_root.join(format!("{}.sb", setup.name));
+        let wrapper = ak_backend_local::sandbox::tool_wrapper(
+            self.backend.sandbox_tech(),
+            &cell,
+            &profile_out,
+        )?;
+        let wrapper = match wrapper {
+            Some(w) => w,
+            None if setup.dangerously_allow_unsandboxed => {
+                warn!(
+                    server = %setup.name,
+                    "spawning MCP server WITHOUT OS confinement (explicit dev opt-out)"
+                );
+                Vec::new()
+            }
+            None => {
+                return Err(KernelError::BackendUnavailable {
+                    backend: "local".into(),
+                    reason: format!(
+                        "no verified OS sandbox on this host: MCP server `{}` is a low-trust \
+                         tool process and fails closed. Install bubblewrap (Linux) or ensure \
+                         /usr/bin/sandbox-exec works (macOS), or opt in for trusted \
+                         development servers only via `dangerously_allow_unsandboxed`.",
+                        setup.name
+                    ),
+                });
+            }
+        };
+        let manifest = match (&setup.manifest_file, &setup.manifest_public_key_hex) {
+            (Some(path), Some(key)) => {
+                let text = std::fs::read_to_string(path)?;
+                let signed: SignedManifest = serde_yaml::from_str(&text).map_err(|e| {
+                    KernelError::Other(format!(
+                        "mcp manifest `{}` is not a SignedManifest document: {e}",
+                        path.display()
+                    ))
+                })?;
+                Some((signed, key.clone()))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(KernelError::Other(format!(
+                    "mcp server `{}`: `manifest_file` and `manifest_public_key_hex` must be \
+                     set together",
+                    setup.name
+                )));
+            }
+        };
+        let mut env = setup.env.clone();
+        env.entry("HOME".into())
+            .or_insert_with(|| cell.display().to_string());
+        env.entry("TMPDIR".into())
+            .or_insert_with(|| cell.display().to_string());
+        let args: Vec<&str> = setup.args.iter().map(String::as_str).collect();
+        let gateway = McpGateway::spawn_with(
+            &setup.name,
+            &setup.command,
+            &args,
+            manifest.as_ref().map(|(m, k)| (m, k.as_str())),
+            SpawnOptions {
+                env,
+                cwd: Some(cell),
+                wrapper,
+            },
+        )?;
+        self.register_connector(Arc::new(gateway))
     }
 
     /// Names of every registered connector.

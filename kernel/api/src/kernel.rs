@@ -220,6 +220,48 @@ pub struct AutoStepResult {
 /// Hard cap on candidates per [`Kernel::explore`] call.
 pub const MAX_EXPLORE_CANDIDATES: usize = 16;
 
+/// Hard cap on requests per [`Kernel::compile_envelope`] call.
+pub const MAX_ENVELOPE_ITEMS: usize = 64;
+
+/// One requested capability inside an autonomy envelope
+/// (see [`Kernel::compile_envelope`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvelopeRequest {
+    /// Operation the task needs (e.g. `proc.shell`, `net.http_read`,
+    /// `github.create_pr`).
+    pub operation: String,
+    /// Constraint parameters, the same shape as a single capability
+    /// request (`domain`, `path_prefix`, …).
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// Per-request outcome of [`Kernel::compile_envelope`]: exactly one of
+/// `lease` / `denial` is set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvelopeItemReport {
+    pub operation: String,
+    /// Minted lease when policy allowed the request outright.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease: Option<CapabilityLease>,
+    /// Structured denial (with requestable scopes) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denial: Option<Denial>,
+}
+
+/// The compiled envelope: explicit partial autonomy, one call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvelopeReport {
+    /// Per-request outcomes, in request order.
+    pub items: Vec<EnvelopeItemReport>,
+    /// Items that minted a lease.
+    pub granted: usize,
+    /// Denied items whose requestable scopes name a human escalation.
+    pub needs_human: usize,
+    /// Denied items with no human escalation on offer.
+    pub refused: usize,
+}
+
 /// One candidate in a server-side exploration: a named sequence of actions
 /// applied to a fresh fork of the source branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -899,6 +941,78 @@ impl Kernel {
             }
             Decision::Deny { denial } => Err(KernelError::Denied(Box::new(denial))),
         }
+    }
+
+    /// Compile an **autonomy envelope**: request every capability a task
+    /// needs in one call, before the first step.
+    ///
+    /// Items are evaluated independently. Policy-allowed items mint leases
+    /// immediately — the same leases [`Kernel::execute_step_auto`] resolves,
+    /// so the task then runs with zero per-step authorization ceremony.
+    /// Items requiring out-of-band approval or refused outright come back
+    /// as structured denials with their requestable scopes. The result is
+    /// explicit *partial* autonomy: the agent knows exactly which subset of
+    /// its plan it holds, instead of discovering scope gaps one denial at a
+    /// time, mid-task.
+    ///
+    /// Infrastructure failures (unknown principal, storage errors) fail the
+    /// whole call; policy outcomes never do.
+    pub fn compile_envelope(
+        &self,
+        principal: &PrincipalId,
+        branch: Option<&BranchId>,
+        requests: &[EnvelopeRequest],
+    ) -> KernelResult<EnvelopeReport> {
+        if requests.is_empty() {
+            return Err(KernelError::Other(
+                "an autonomy envelope needs at least one capability request".into(),
+            ));
+        }
+        if requests.len() > MAX_ENVELOPE_ITEMS {
+            return Err(KernelError::Other(format!(
+                "envelope has {} requests; the maximum is {MAX_ENVELOPE_ITEMS}",
+                requests.len()
+            )));
+        }
+        let mut items = Vec::with_capacity(requests.len());
+        let (mut granted, mut needs_human, mut refused) = (0usize, 0usize, 0usize);
+        for req in requests {
+            let operation = Operation::new(&req.operation);
+            let params = if req.params.is_null() {
+                serde_json::json!({})
+            } else {
+                req.params.clone()
+            };
+            match self.request_capability(principal, &operation, &params, branch) {
+                Ok(lease) => {
+                    granted += 1;
+                    items.push(EnvelopeItemReport {
+                        operation: req.operation.clone(),
+                        lease: Some(lease),
+                        denial: None,
+                    });
+                }
+                Err(KernelError::Denied(denial)) => {
+                    if denial.requestable_scopes.iter().any(|s| s.requires_human) {
+                        needs_human += 1;
+                    } else {
+                        refused += 1;
+                    }
+                    items.push(EnvelopeItemReport {
+                        operation: req.operation.clone(),
+                        lease: None,
+                        denial: Some(*denial),
+                    });
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(EnvelopeReport {
+            items,
+            granted,
+            needs_human,
+            refused,
+        })
     }
 
     /// Delegate (attenuate) a lease from `delegator` to `delegatee`.

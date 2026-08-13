@@ -38,6 +38,14 @@ environment** — the runtime a strong agent actually wants to work in.
   `Kernel::execute_step_auto`) takes just an action kind — the kernel
   finds the narrowest active lease or mints one via policy, clamps the
   budget into the lease envelope, and reports which lease was used.
+- **Autonomy envelopes**: `POST /v1/capabilities/compile_envelope` (and
+  `Kernel::compile_envelope`) requests every capability a task needs in
+  one call, before the first step. Policy-allowed items mint leases
+  immediately — the same leases `execute_auto` resolves, so the task then
+  runs with zero per-step authorization ceremony; items needing a human
+  or refused come back as structured denials with requestable scopes.
+  Explicit partial autonomy instead of discovering scope gaps one denial
+  at a time, mid-task. Both SDKs gained `compile_envelope`.
 - **Server-side exploration**: `POST /v1/branches/{id}/explore` forks one
   branch per candidate, runs candidates + evaluator concurrently under a
   parallelism cap with auto-leases, supports early-stop, merges the winner

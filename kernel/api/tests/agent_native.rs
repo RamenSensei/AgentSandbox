@@ -1230,3 +1230,125 @@ async fn http_api_execute_auto_raw_pagination_and_explore() {
     assert_eq!(report["winner"], 1);
     assert!(report["merged_state"].is_string());
 }
+
+// ==================================================== autonomy envelopes
+
+/// A policy with all three envelope outcomes: shell allowed, PR creation
+/// gated behind a human, payments not covered at all (default deny).
+fn envelope_policy() -> PolicyDocument {
+    let mut approval = allow_rule("pr", &["github.create_pr"], 5);
+    approval.effect = RuleEffect::RequireApproval;
+    PolicyDocument {
+        rules: vec![allow_rule("shell", &["proc.shell"], 100), approval],
+        ..PolicyDocument::default()
+    }
+}
+
+#[tokio::test]
+async fn compile_envelope_grants_up_front_and_reports_gaps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    kernel
+        .with_policy_mut(|p| *p.document_mut() = envelope_policy())
+        .unwrap();
+    let who = agent(&kernel);
+    let ep = kernel.create_episode(&who.id, None, "envelope").unwrap();
+
+    let report = kernel
+        .compile_envelope(
+            &who.id,
+            Some(&ep.branch),
+            &[
+                ak_api::EnvelopeRequest {
+                    operation: "proc.shell".into(),
+                    params: json!({}),
+                },
+                ak_api::EnvelopeRequest {
+                    operation: "github.create_pr".into(),
+                    params: json!({ "repo": "acme/site" }),
+                },
+                ak_api::EnvelopeRequest {
+                    operation: "payments.transfer".into(),
+                    params: json!({}),
+                },
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(report.granted, 1, "shell must be granted up front");
+    assert_eq!(report.needs_human, 1, "PR creation must name a human gate");
+    assert_eq!(report.refused, 1, "payments must be refused outright");
+    let shell_lease = report.items[0].lease.as_ref().expect("shell lease");
+    assert!(report.items[1]
+        .denial
+        .as_ref()
+        .is_some_and(|d| d.requestable_scopes.iter().any(|s| s.requires_human)));
+    assert!(report.items[2].denial.is_some());
+
+    // The envelope lease IS the lease auto steps resolve: the whole task
+    // now runs with zero further authorization requests.
+    let step = auto(&kernel, &who, &ep.branch, shell_kind("echo enveloped")).await;
+    assert!(
+        !step.lease_minted,
+        "auto execution must reuse the envelope lease, not mint"
+    );
+    assert_eq!(step.lease, shell_lease.id);
+}
+
+#[tokio::test]
+async fn compile_envelope_rejects_empty_and_oversized() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let who = agent(&kernel);
+    assert!(kernel.compile_envelope(&who.id, None, &[]).is_err());
+    let too_many: Vec<_> = (0..65)
+        .map(|i| ak_api::EnvelopeRequest {
+            operation: format!("op.{i}"),
+            params: json!({}),
+        })
+        .collect();
+    assert!(kernel.compile_envelope(&who.id, None, &too_many).is_err());
+}
+
+#[tokio::test]
+async fn http_compile_envelope_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    kernel
+        .with_policy_mut(|p| *p.document_mut() = envelope_policy())
+        .unwrap();
+    let who = agent(&kernel);
+    let app = http::router(kernel.clone());
+
+    let (status, ep) = req_json(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some(json!({ "principal": who.id, "objective": "envelope over http" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{ep}");
+    let branch = ep["branch"].as_str().unwrap();
+
+    let (status, report) = req_json(
+        &app,
+        "POST",
+        "/v1/capabilities/compile_envelope",
+        Some(json!({
+            "principal": who.id,
+            "branch": branch,
+            "requests": [
+                { "operation": "proc.shell" },
+                { "operation": "github.create_pr", "params": { "repo": "acme/site" } },
+                { "operation": "payments.transfer" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["granted"], 1);
+    assert_eq!(report["needs_human"], 1);
+    assert_eq!(report["refused"], 1);
+    assert!(report["items"][0]["lease"]["id"].is_string());
+    assert!(report["items"][1]["denial"].is_object());
+}

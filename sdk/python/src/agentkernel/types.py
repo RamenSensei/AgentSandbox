@@ -530,6 +530,44 @@ class CapabilityLease:
         )
 
 
+@dataclass(frozen=True)
+class EnvelopeItemReport:
+    """Per-request outcome of an envelope compilation: exactly one of
+    `lease` / `denial` is set."""
+
+    operation: str
+    lease: Optional[CapabilityLease] = None
+    denial: Optional[Denial] = None
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EnvelopeItemReport":
+        return cls(
+            operation=d.get("operation", ""),
+            lease=CapabilityLease.from_wire(d["lease"]) if d.get("lease") else None,
+            denial=Denial.from_wire(d["denial"]) if d.get("denial") else None,
+        )
+
+
+@dataclass(frozen=True)
+class EnvelopeReport:
+    """A compiled autonomy envelope: which capabilities were granted up
+    front, which need a human, which are refused."""
+
+    items: List[EnvelopeItemReport]
+    granted: int
+    needs_human: int
+    refused: int
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "EnvelopeReport":
+        return cls(
+            items=[EnvelopeItemReport.from_wire(i) for i in d.get("items", [])],
+            granted=int(d.get("granted", 0)),
+            needs_human=int(d.get("needs_human", 0)),
+            refused=int(d.get("refused", 0)),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Effects
 # ---------------------------------------------------------------------------

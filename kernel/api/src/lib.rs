@@ -30,7 +30,7 @@ pub mod kernel;
 
 pub use ak_core as core;
 pub use kernel::{
-    AutoStepResult, EpisodeDescription, ExploreCandidate, ExploreCandidateReport, ExploreOptions,
-    ExploreReport, HttpEgressSetup, Kernel, KernelConfig, McpServerSetup, ReplaySandboxReport,
-    StepExplanation, StepResult,
+    AutoStepResult, EnvelopeItemReport, EnvelopeReport, EnvelopeRequest, EpisodeDescription,
+    ExploreCandidate, ExploreCandidateReport, ExploreOptions, ExploreReport, HttpEgressSetup,
+    Kernel, KernelConfig, McpServerSetup, ReplaySandboxReport, StepExplanation, StepResult,
 };

@@ -116,6 +116,10 @@ control-plane ceremony:
 
 - **`POST /v1/steps/execute_auto`** — send just the action kind; the
   kernel resolves (or mints) the lease and clamps the budget.
+- **`POST /v1/capabilities/compile_envelope`** — approve a capability
+  *space*, not one command at a time: request everything a task needs in
+  one call, get leases for the allowed subset up front and structured
+  denials (with the exact scopes to escalate) for the rest.
 - **Persistent process sessions** — `process_start` a dev server, REPL or
   database; later steps write its stdin, tail its logs from a byte offset
   (`process_logs`), signal and query it. Sessions are branch-scoped and

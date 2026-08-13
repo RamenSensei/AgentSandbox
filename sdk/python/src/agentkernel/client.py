@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .errors import DenialError, KernelError, TransportError
 from .types import (
@@ -25,6 +25,7 @@ from .types import (
     CapabilityLease,
     Denial,
     EffectPreview,
+    EnvelopeReport,
     EpisodeDescription,
     Json,
     PendingEffect,
@@ -333,6 +334,30 @@ class Kernel:
             body["branch"] = branch
         resp = self._request("POST", "/v1/capabilities/request", body)
         return CapabilityLease.from_wire(resp)
+
+    def compile_envelope(
+        self,
+        principal: str,
+        requests: Sequence[Mapping[str, Any]],
+        *,
+        branch: Optional[str] = None,
+    ) -> EnvelopeReport:
+        """POST /v1/capabilities/compile_envelope — request every capability
+        a task needs in one call, before the first step.
+
+        Each request is ``{"operation": ..., "params": {...}}``. Allowed
+        items mint leases immediately (the same leases ``execute_step_auto``
+        resolves); items needing a human or refused come back as structured
+        denials inside the report — policy outcomes never raise.
+        """
+        body: Dict[str, Any] = {
+            "principal": principal,
+            "requests": [dict(r) for r in requests],
+        }
+        if branch is not None:
+            body["branch"] = branch
+        resp = self._request("POST", "/v1/capabilities/compile_envelope", body)
+        return EnvelopeReport.from_wire(resp)
 
     def delegate_capability(
         self,

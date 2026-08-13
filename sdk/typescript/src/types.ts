@@ -224,6 +224,30 @@ export interface CapabilityLease {
   revoked: boolean;
 }
 
+/** One requested capability inside an autonomy envelope. */
+export interface EnvelopeRequest {
+  operation: string;
+  /** Constraint parameters evaluated against policy. */
+  params?: Json;
+}
+
+/** Per-request outcome: exactly one of `lease` / `denial` is present. */
+export interface EnvelopeItemReport {
+  operation: string;
+  lease?: CapabilityLease;
+  denial?: Denial;
+}
+
+/** A compiled autonomy envelope: explicit partial autonomy, one call. */
+export interface EnvelopeReport {
+  /** Per-request outcomes, in request order. */
+  items: EnvelopeItemReport[];
+  granted: number;
+  /** Denied items whose requestable scopes name a human escalation. */
+  needs_human: number;
+  refused: number;
+}
+
 // ---------------------------------------------------------------------------
 // State DAG
 // ---------------------------------------------------------------------------

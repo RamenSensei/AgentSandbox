@@ -5,7 +5,7 @@
 //! are HTTP 403 carrying the full machine-readable [`ak_core::Denial`].
 
 use crate::auth::{require_auth, AuthConfig, AuthContext, AuthError, Role};
-use crate::kernel::Kernel;
+use crate::kernel::{EnvelopeRequest, Kernel};
 use ak_causal_ledger::{EventKind, TraceQuery};
 use ak_core::action::Action;
 use ak_core::budget::ResourceBudget;
@@ -89,6 +89,7 @@ pub fn router_with_auth(kernel: Arc<Kernel>, auth: AuthConfig) -> Router {
         .route("/v1/branches/:id/compare/:other", get(compare_branches))
         .route("/v1/raw/:hash", get(fetch_raw))
         .route("/v1/capabilities/request", post(request_capability))
+        .route("/v1/capabilities/compile_envelope", post(compile_envelope))
         .route("/v1/capabilities/delegate", post(delegate_capability))
         .route("/v1/capabilities/revoke", post(revoke_capability))
         .route("/v1/capabilities/:principal", get(list_capabilities))
@@ -439,6 +440,26 @@ async fn request_capability(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::to_value(&lease).map_err(KernelError::from)?),
+    ))
+}
+
+#[derive(Deserialize)]
+struct CompileEnvelopeRequest {
+    principal: PrincipalId,
+    #[serde(default)]
+    branch: Option<BranchId>,
+    requests: Vec<EnvelopeRequest>,
+}
+
+async fn compile_envelope(
+    State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CompileEnvelopeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let principal = auth.act_as(&req.principal)?;
+    let report = k.compile_envelope(&principal, req.branch.as_ref(), &req.requests)?;
+    Ok(Json(
+        serde_json::to_value(&report).map_err(KernelError::from)?,
     ))
 }
 

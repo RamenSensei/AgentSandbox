@@ -349,6 +349,28 @@ paths:
         "403": { $ref: "#/components/responses/Denied" }
         default: { $ref: "#/components/responses/Error" }
 
+  /v1/capabilities/compile_envelope:
+    post:
+      tags: [capabilities]
+      operationId: capability.compileEnvelope
+      summary: >
+        Compile an autonomy envelope: request every capability a task needs
+        in one call. Policy-allowed items mint leases immediately (the same
+        leases execute_auto resolves); items needing a human or refused come
+        back as structured denials. Policy outcomes never fail the call.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompileEnvelopeRequest" }
+      responses:
+        "200":
+          description: Per-request grants and denials, in request order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeReport" }
+        default: { $ref: "#/components/responses/Error" }
+
   /v1/capabilities/delegate:
     post:
       tags: [capabilities]
@@ -1482,6 +1504,51 @@ components:
         uses: { type: integer, minimum: 0 }
         expires_at: { type: string, format: date-time }
         budget: { $ref: "#/components/schemas/ResourceBudget" }
+
+    CompileEnvelopeRequest:
+      type: object
+      required: [principal, requests]
+      properties:
+        principal: { type: string, pattern: "^pr-" }
+        branch:
+          type: string
+          pattern: "^br-"
+          description: Bind every minted lease to this branch.
+        requests:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/EnvelopeRequest" }
+
+    EnvelopeRequest:
+      type: object
+      required: [operation]
+      properties:
+        operation: { type: string }
+        params:
+          description: Constraint parameters evaluated against policy.
+
+    EnvelopeItemReport:
+      type: object
+      required: [operation]
+      description: Exactly one of `lease` / `denial` is present.
+      properties:
+        operation: { type: string }
+        lease: { $ref: "#/components/schemas/CapabilityLease" }
+        denial: { $ref: "#/components/schemas/Denial" }
+
+    EnvelopeReport:
+      type: object
+      required: [items, granted, needs_human, refused]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/EnvelopeItemReport" }
+        granted: { type: integer, minimum: 0 }
+        needs_human:
+          type: integer
+          minimum: 0
+          description: Denied items whose requestable scopes name a human escalation.
+        refused: { type: integer, minimum: 0 }
 
     ReplayRequest:
       type: object

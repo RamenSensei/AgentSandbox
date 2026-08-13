@@ -13,6 +13,8 @@ import type {
   CapabilityLease,
   Constraint,
   EffectPrepareResponse,
+  EnvelopeReport,
+  EnvelopeRequest,
   EpisodeCreateResponse,
   EpisodeDescription,
   ErrorEnvelope,
@@ -318,6 +320,28 @@ export class Kernel {
     };
     if (params.branch !== undefined) body.branch = params.branch;
     return this.request<CapabilityLease>("POST", "/v1/capabilities/request", body);
+  }
+
+  /** POST /v1/capabilities/compile_envelope — request every capability a
+   * task needs in one call, before the first step. Allowed items mint
+   * leases immediately (the same leases `executeStepAuto` resolves);
+   * items needing a human or refused come back as structured denials
+   * inside the report — policy outcomes never throw. */
+  async compileEnvelope(params: {
+    principal: string;
+    requests: EnvelopeRequest[];
+    branch?: string;
+  }): Promise<EnvelopeReport> {
+    const body: Record<string, unknown> = {
+      principal: params.principal,
+      requests: params.requests,
+    };
+    if (params.branch !== undefined) body.branch = params.branch;
+    return this.request<EnvelopeReport>(
+      "POST",
+      "/v1/capabilities/compile_envelope",
+      body,
+    );
   }
 
   /** POST /v1/capabilities/delegate — attenuate a lease for a delegatee.

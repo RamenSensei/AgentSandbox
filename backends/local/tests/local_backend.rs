@@ -489,3 +489,83 @@ async fn timeout_kill_reaps_the_whole_process_group() {
         "the process group kill must take the grandchild down too"
     );
 }
+
+#[tokio::test]
+async fn file_size_backstop_caps_runaway_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = LocalBackendConfig::new(tmp.path());
+    config.max_file_bytes = 1 << 20;
+    let b = LocalBackend::new(config).unwrap();
+    // Try to write 8 MiB; the inherited RLIMIT_FSIZE must cut the file at
+    // 1 MiB (the writer takes SIGXFSZ) while the step itself completes.
+    let out = b
+        .execute(req(shell(
+            "yes fill | head -c 8388608 > big.bin; echo after=$?",
+        )))
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("after="),
+        "the step must survive the capped write"
+    );
+    let ws = b.workspace_for(&BranchId("br-test".into())).unwrap();
+    let size = std::fs::metadata(ws.join("big.bin")).unwrap().len();
+    assert!(
+        size <= 1 << 20,
+        "RLIMIT_FSIZE must cap the file at 1 MiB, got {size} bytes"
+    );
+}
+
+#[tokio::test]
+async fn cpu_backstop_kills_process_group_escapees() {
+    if !std::path::Path::new("/usr/bin/perl").exists() {
+        eprintln!("skipping: needs /usr/bin/perl to daemonize an escapee");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    // The perl parent daemonizes a busy-looping child via setsid — escaping
+    // the process group that timeout kills sweep — writes its pid into the
+    // workspace and exits. Only the *inherited* RLIMIT_CPU (cpu_ms budget
+    // + 1s grace) can take the escapee down.
+    let script = r#"/usr/bin/perl -e '
+use POSIX qw(setsid);
+my $pid = fork();
+if ($pid) { open(my $f, ">", "escapee.pid"); print $f $pid; close($f); exit 0 }
+POSIX::setsid();
+open(STDIN, "<", "/dev/null"); open(STDOUT, ">", "/dev/null"); open(STDERR, ">", "/dev/null");
+1 while 1;
+'"#;
+    let mut r = req(shell(script));
+    r.budget.cpu_ms = 2000;
+    let out = b.execute(r).await.unwrap();
+    let ws = b.workspace_for(&BranchId("br-test".into())).unwrap();
+    let pid: i32 = std::fs::read_to_string(ws.join("escapee.pid"))
+        .unwrap_or_else(|e| {
+            panic!(
+                "escapee must have started (stderr: {}): {e}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+        .trim()
+        .parse()
+        .unwrap();
+
+    // The escapee burns CPU; its rlimit is ~3 CPU-seconds. Give it 15s of
+    // wall clock to die, then verify (and clean up on failure).
+    let mut dead = false;
+    for _ in 0..150 {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            dead = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if !dead {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(
+        dead,
+        "the group-escaped spinner must die on its inherited RLIMIT_CPU"
+    );
+}

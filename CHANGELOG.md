@@ -31,6 +31,15 @@ and on-disk formats.
   workspace root, and the observation summary names the executing backend.
   File actions and process sessions — anything the DAG must snapshot —
   stay pinned to workspace-sharing backends by construction.
+- **Inherited rlimit backstops** in the local backend: `RLIMIT_CPU` from
+  the step's `cpu_ms` budget (+1s grace) and `RLIMIT_FSIZE` from the new
+  `LocalBackendConfig::max_file_bytes` (default 4 GiB) are set before exec
+  and inherited by every descendant across fork and exec. A process that
+  escapes the timeout's process-group kill via `setsid` still dies on its
+  own CPU clock (proven in-test against a daemonized spinner), and no
+  single runaway write can fill the host disk. These are per-process
+  backstops, not per-tree ceilings — cgroup enforcement stays on the
+  roadmap.
 
 ## [0.8.0] - 2026-08-13
 

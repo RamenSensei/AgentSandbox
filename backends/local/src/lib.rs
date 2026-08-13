@@ -47,6 +47,13 @@
 //!   `usage.memory_bytes` the real peak RSS — not wall-clock or byte-count
 //!   proxies. (File actions and process-session operations, which reap no
 //!   child, keep the proxies.) Egress bytes are counted at the proxy;
+//! - **inherited rlimit backstops**: `RLIMIT_CPU` from the step's `cpu_ms`
+//!   budget (+1s grace) and `RLIMIT_FSIZE` from
+//!   [`LocalBackendConfig::max_file_bytes`] are set before exec and
+//!   inherited by every descendant — a process that escapes the group kill
+//!   via `setsid` still dies on its own CPU clock, and no single file can
+//!   fill the host disk. Per-process backstops, not per-tree ceilings;
+//!   cgroup enforcement stays on the roadmap;
 //! - **output capture with byte caps** (see [`LocalBackendConfig::max_capture_bytes`]);
 //! - **in-process path confinement** for structured file actions: every path
 //!   is verified to be inside the workspace (no absolute paths, no `..`,
@@ -100,6 +107,10 @@ pub struct LocalBackendConfig {
     /// whose compiled confinement grants egress domains get proxy
     /// environment; everything else stays fully offline.
     pub egress: EgressConfig,
+    /// `RLIMIT_FSIZE` backstop inherited by every sandboxed process: the
+    /// largest single file a workload can create. Prevents one runaway
+    /// write from filling the host disk.
+    pub max_file_bytes: u64,
     /// When `false` (**default**), shell commands are refused unless a
     /// verified OS sandbox is available (fail closed). Setting this to
     /// `true` lets shell commands run as plain confined host processes and
@@ -115,6 +126,7 @@ impl LocalBackendConfig {
             max_log_buffer_bytes: 1 << 20,
             max_wall_clock: Duration::from_secs(600),
             egress: EgressConfig::default(),
+            max_file_bytes: 4 << 30,
             dangerously_allow_unsandboxed: false,
         }
     }
@@ -502,6 +514,7 @@ impl LocalBackend {
         cwd: &Path,
         command: &str,
         env: &BTreeMap<String, String>,
+        budget: &ResourceBudget,
         readable_prefixes: &[String],
         writable_prefixes: &[String],
         egress: Option<&EgressGrant>,
@@ -596,6 +609,47 @@ impl LocalBackend {
         }
         #[cfg(unix)]
         cmd.process_group(0);
+        // Kernel-enforced resource backstops, inherited by every descendant
+        // across fork and exec — they hold even for a process that escapes
+        // the process group (setsid daemonization):
+        //
+        // - `RLIMIT_CPU` from the step's `cpu_ms` budget (+1s grace): a
+        //   group-escaped spinner dies on its own CPU clock. Process
+        //   sessions inherit the ceiling of the step that started them —
+        //   the lease granted exactly that much CPU.
+        // - `RLIMIT_FSIZE` from [`LocalBackendConfig::max_file_bytes`]: no
+        //   single file can fill the host disk.
+        //
+        // Per-process, not per-tree — a true group ceiling needs cgroups
+        // (Linux) and stays on the roadmap; these are honest backstops,
+        // not accounting.
+        #[cfg(unix)]
+        {
+            let cpu_secs = budget.cpu_ms.div_ceil(1000).saturating_add(1);
+            let file_bytes = self.config.max_file_bytes;
+            let set = move |resource: libc::c_int, value: u64| -> std::io::Result<()> {
+                let lim = libc::rlimit {
+                    rlim_cur: value as libc::rlim_t,
+                    rlim_max: value as libc::rlim_t,
+                };
+                // SAFETY: setrlimit with a valid, fully initialized rlimit.
+                if unsafe { libc::setrlimit(resource, &lim) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            };
+            // SAFETY: the pre-exec closure only calls async-signal-safe
+            // setrlimit and allocates nothing.
+            unsafe {
+                cmd.pre_exec(move || {
+                    set(libc::RLIMIT_CPU, cpu_secs)?;
+                    set(libc::RLIMIT_FSIZE, file_bytes)?;
+                    Ok(())
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = budget;
         Ok((cmd, profile_file))
     }
 
@@ -640,6 +694,7 @@ impl LocalBackend {
             &cwd,
             command,
             env,
+            budget,
             readable_prefixes,
             writable_prefixes,
             egress.as_ref(),
@@ -752,6 +807,7 @@ impl LocalBackend {
             &cwd,
             command,
             env,
+            budget,
             readable_prefixes,
             writable_prefixes,
             egress.as_ref(),

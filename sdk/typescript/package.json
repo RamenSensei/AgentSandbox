@@ -1,6 +1,6 @@
 {
   "name": "@agentkernel/sdk",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Typed TypeScript client for the AgentKernel Execution Protocol HTTP API",
   "license": "Apache-2.0",
   "type": "module",

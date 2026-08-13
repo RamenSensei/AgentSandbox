@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "ak-adversarial-bench"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-api",
  "ak-backend-local",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "ak-agent-utility-bench"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-api",
  "ak-backend-local",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "ak-api"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-backend-cube",
  "ak-backend-forkd",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "ak-backend-cube"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "ak-backend-forkd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "ak-backend-gvisor"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "ak-backend-kubernetes"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "ak-backend-local"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "ak-causal-ledger"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "chrono",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "ak-conformance"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-api",
  "ak-causal-ledger",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "ak-connector-github"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "ak-connector-http"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "ak-connector-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "async-trait",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "ak-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "ak-effect-broker"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "ak-identity",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "ak-example-coding-agent"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-api",
  "ak-backend-local",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "ak-identity"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "base64",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "ak-policy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "chrono",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "ak-scheduler"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-backend-local",
  "ak-core",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "ak-state-dag"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ak-core",
  "chrono",

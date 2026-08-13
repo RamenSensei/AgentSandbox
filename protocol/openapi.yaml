@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AgentKernel Execution Protocol — HTTP/JSON binding
-  version: 0.7.0
+  version: 0.8.0
   description: |
     JSON/HTTP binding of the AgentKernel Execution Protocol exposed by the
     kernel API server (kernel/api/src/http.rs). Wire objects use the

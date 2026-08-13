@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Until 1.0.0, minor releases may contain breaking changes to APIs, the protocol,
 and on-disk formats.
 
-## [Unreleased]
+## [0.8.0] - 2026-08-13
 
 Enablement release: the development focus shifts from richer governance
 semantics to a high-throughput, connected, branchable **agent execution

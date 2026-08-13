@@ -13,6 +13,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install bubblewrap (verified OS sandbox for shell steps)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Run conformance suite
         run: cargo test -p ak-conformance -- --nocapture
       - name: Run adversarial bench

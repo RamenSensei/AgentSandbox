@@ -72,6 +72,45 @@ pub struct KernelConfig {
     /// inside a tokio runtime (the servers are tokio child processes).
     #[serde(default)]
     pub mcp: Vec<McpServerSetup>,
+    /// Additional isolation backends registered at [`Kernel::open`] — the
+    /// public configuration for multi-backend routing. Each entry becomes a
+    /// router candidate next to the built-in local sandbox: the policy
+    /// rule's `risk_weight` sets a step's isolation floor and the router
+    /// picks the cheapest satisfying backend. Auth tokens come from each
+    /// adapter's environment variable (`GVISOR_API_TOKEN`,
+    /// `FORKD_API_TOKEN`, `CUBE_API_TOKEN`, `KUBERNETES_API_TOKEN`), never
+    /// from this file.
+    #[serde(default)]
+    pub backends: Vec<BackendSetup>,
+}
+
+/// One configured remote isolation backend (see [`KernelConfig::backends`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BackendSetup {
+    /// gVisor (runsc) control host.
+    Gvisor {
+        endpoint: String,
+        #[serde(default)]
+        image: Option<String>,
+    },
+    /// forkd CoW-fork host.
+    Forkd { endpoint: String },
+    /// Cube microVM host.
+    Cube { endpoint: String },
+    /// Kubernetes exec service. `isolation_strength` MUST match the
+    /// configured runtime class — there is no safe guess, so the operator
+    /// declares it.
+    Kubernetes {
+        endpoint: String,
+        isolation_strength: u8,
+        #[serde(default)]
+        namespace: Option<String>,
+        #[serde(default)]
+        runtime_class: Option<String>,
+        #[serde(default)]
+        image: Option<String>,
+    },
 }
 
 /// One out-of-the-box MCP server (see [`KernelConfig::mcp`]).
@@ -159,6 +198,7 @@ impl KernelConfig {
             vault_key_file: None,
             http: None,
             mcp: Vec::new(),
+            backends: Vec::new(),
         }
     }
 
@@ -173,6 +213,67 @@ impl KernelConfig {
                 .join(".agent-kernel")
                 .join("vault.key"),
         }
+    }
+}
+
+/// Construct a remote backend adapter from its setup. Auth tokens are read
+/// from each adapter's environment variable, never from configuration.
+fn build_backend(setup: &BackendSetup) -> KernelResult<Arc<dyn Backend>> {
+    Ok(match setup {
+        BackendSetup::Gvisor { endpoint, image } => {
+            let mut config = ak_backend_gvisor::GvisorConfig::from_env(endpoint.clone());
+            config.image = image.clone();
+            Arc::new(ak_backend_gvisor::GvisorBackend::new(config)?)
+        }
+        BackendSetup::Forkd { endpoint } => Arc::new(ak_backend_forkd::ForkdBackend::new(
+            ak_backend_forkd::ForkdConfig::from_env(endpoint.clone()),
+        )?),
+        BackendSetup::Cube { endpoint } => Arc::new(ak_backend_cube::CubeBackend::new(
+            ak_backend_cube::CubeConfig::from_env(endpoint.clone()),
+        )?),
+        BackendSetup::Kubernetes {
+            endpoint,
+            isolation_strength,
+            namespace,
+            runtime_class,
+            image,
+        } => {
+            let mut config = ak_backend_kubernetes::KubernetesConfig::from_env(
+                endpoint.clone(),
+                *isolation_strength,
+            );
+            if let Some(ns) = namespace {
+                config.namespace = ns.clone();
+            }
+            config.runtime_class = runtime_class.clone();
+            if let Some(image) = image {
+                config.image = image.clone();
+            }
+            Arc::new(ak_backend_kubernetes::KubernetesBackend::new(config)?)
+        }
+    })
+}
+
+/// Map a policy rule's risk weight to the scheduler's risk tier (and so an
+/// isolation floor): `0..=2` low, `3..=6` medium, `>=7` high. The tier is
+/// decided by policy — never by the agent's own hints.
+fn risk_tier_of(weight: u32) -> RiskTier {
+    match weight {
+        0..=2 => RiskTier::Low,
+        3..=6 => RiskTier::Medium,
+        _ => RiskTier::High,
+    }
+}
+
+/// Compatibility needs implied by the action itself. Anything whose effects
+/// the state DAG must snapshot — file actions, process sessions — pins the
+/// step to a workspace-sharing backend. A plain shell command may route to
+/// any backend satisfying the risk floor; when a non-sharing backend runs
+/// it, the step is recorded as an audit-only excursion.
+fn needs_of(kind: &ActionKind) -> Needs {
+    Needs {
+        workspace: !matches!(kind, ActionKind::Shell { .. }),
+        ..Needs::default()
     }
 }
 
@@ -541,6 +642,12 @@ impl Kernel {
         for setup in &mcp_setups {
             kernel.spawn_mcp_server(setup)?;
         }
+        // Public multi-backend routing: configured remote backends become
+        // router candidates next to the built-in local sandbox.
+        let backend_setups = kernel.config.backends.clone();
+        for setup in &backend_setups {
+            kernel.register_backend(build_backend(setup)?);
+        }
         Ok(kernel)
     }
 
@@ -627,6 +734,21 @@ impl Kernel {
     /// The registered connector named `name`, if any.
     pub fn connector(&self, name: &str) -> KernelResult<Option<Arc<dyn Connector>>> {
         Ok(lock(&self.connectors)?.get(name).cloned())
+    }
+
+    /// Register an additional isolation backend with the router. Steps whose
+    /// policy risk tier demands more isolation than the built-in local
+    /// sandbox provides route to the cheapest satisfying backend. A backend
+    /// whose profile does not share the kernel workspace has its steps
+    /// recorded as **audit-only excursions**: full observations in the
+    /// ledger, no local state transition claimed.
+    pub fn register_backend(&self, backend: Arc<dyn Backend>) {
+        self.scheduler.register_backend(backend);
+    }
+
+    /// Profiles of every registered isolation backend.
+    pub fn backend_profiles(&self) -> Vec<ak_core::traits::BackendProfile> {
+        self.scheduler.backend_profiles()
     }
 
     /// Spawn one configured MCP server as a confined, low-trust tool process
@@ -1980,6 +2102,10 @@ impl Kernel {
     ) -> KernelResult<StepResult> {
         // Ensure the branch workspace reflects the branch head.
         let base_state = b.head.clone();
+        // Policy decides the isolation floor; the action decides the
+        // compatibility needs. Neither is influenced by agent hints.
+        let risk = risk_tier_of(confinement.risk_weight);
+        let needs = needs_of(&action.kind);
         let req = ExecutionRequest {
             branch: branch.clone(),
             base_state: base_state.clone(),
@@ -1997,15 +2123,9 @@ impl Kernel {
                 "lease": action.lease, "budget": action.budget,
             }),
         )?;
-        let outcome = match self
+        let routed = match self
             .scheduler
-            .execute_step(
-                &b.episode,
-                step.clone(),
-                req,
-                RiskTier::Low,
-                &Needs::default(),
-            )
+            .execute_step(&b.episode, step.clone(), req, risk, &needs)
             .await
         {
             Ok(o) => o,
@@ -2013,14 +2133,51 @@ impl Kernel {
                 let who = self.registry().get(principal).map_err(KernelError::from)?;
                 return self.deny_step(writer, b, step, &who, *denial);
             }
+            // A routing failure is a *recorded* denial with a recovery path,
+            // not a bare 500: the agent (or operator) can see exactly which
+            // floor was unsatisfiable.
+            Err(KernelError::BackendUnavailable { backend, reason }) if backend == "router" => {
+                let who = self.registry().get(principal).map_err(KernelError::from)?;
+                let denial = Denial {
+                    code: DenialCode::BackendUnavailable,
+                    attempted_operation: action.kind.required_operation(),
+                    reason: format!(
+                        "{reason}. The policy rule's risk_weight demands this isolation \
+                         floor; register a stronger backend (KernelConfig.backends) or \
+                         lower the rule's risk_weight"
+                    ),
+                    safe_alternatives: Vec::new(),
+                    requestable_scopes: Vec::new(),
+                    escalation_allowed: false,
+                };
+                return self.deny_step(writer, b, step, &who, denial);
+            }
             Err(e) => return Err(e),
         };
+        let outcome = routed.outcome;
 
-        // Snapshot the workspace and append to the DAG.
-        let dir = self.backend.workspace_for(branch)?;
-        let node =
+        // Record the state transition honestly. Only a workspace-sharing
+        // backend's effects are visible to the snapshotter; an excursion to
+        // any other backend leaves the local tree untouched and is recorded
+        // as exactly that: an audit-only node with an empty file delta.
+        let node = if routed.backend.shares_workspace {
+            let dir = self.backend.workspace_for(branch)?;
             self.dag
-                .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?;
+                .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?
+        } else {
+            let head = self.dag.head(branch)?;
+            self.dag.append_step(
+                branch,
+                &step,
+                principal,
+                StateDelta {
+                    policy_epoch: head.delta.policy_epoch,
+                    ..StateDelta::default()
+                },
+                head.workspace_root.clone(),
+                ReplayClass::AuditOnly,
+            )?
+        };
         let delta_ev = writer.record_caused_by(
             EventKind::StateDeltaRecorded,
             serde_json::json!({ "state_id": node.id, "delta": node.delta }),
@@ -2037,9 +2194,14 @@ impl Kernel {
         let d = distill_output(&raw, 2048, 1024);
         debug_assert_eq!(d.hash, ak_core::hash::hash_bytes(&raw));
         let observation = if outcome.exit_code == 0 {
+            let via = if routed.backend.shares_workspace {
+                String::new()
+            } else {
+                format!(" via `{}` (audit-only excursion)", routed.backend.name)
+            };
             Observation::Success {
                 summary: format!(
-                    "{} exited 0 ({} file(s) changed)",
+                    "{} exited 0 ({} file(s) changed){via}",
                     action.kind.required_operation().0,
                     node.delta.files.len()
                 ),

@@ -39,6 +39,12 @@ pub struct CompiledConfinement {
     pub env_scrub: bool,
     /// Syscall profile the backend applies.
     pub syscall_profile: SyscallProfile,
+    /// Risk weight of the rule that authorized this grant (`0` when no rule
+    /// was involved). The scheduler maps it to a risk tier and therefore an
+    /// isolation floor: `0..=2` low, `3..=6` medium, `>=7` high. Policy
+    /// decides the tier — never the agent's own hints.
+    #[serde(default)]
+    pub risk_weight: u32,
 }
 
 /// A fully compiled grant: the lease (authority) plus the confinement
@@ -80,6 +86,7 @@ pub fn compile_confinement(doc: &PolicyDocument, principal: &Principal) -> Compi
         egress_domains,
         env_scrub: principal.trust < TrustLevel::Elevated,
         syscall_profile,
+        risk_weight: 0,
     }
 }
 
@@ -140,10 +147,9 @@ pub fn compile_grant(
         preconditions: IndexMap::new(),
         revoked: false,
     };
-    Ok(CompiledGrant {
-        lease,
-        confinement: compile_confinement(doc, principal),
-    })
+    let mut confinement = compile_confinement(doc, principal);
+    confinement.risk_weight = rule.risk_weight;
+    Ok(CompiledGrant { lease, confinement })
 }
 
 #[cfg(test)]

@@ -52,6 +52,7 @@ fn profile(name: &str, iso: u8, cold: u64, fork: bool) -> BackendProfile {
         supports_fork: fork,
         supports_gui: false,
         full_linux: true,
+        shares_workspace: name == "local",
     }
 }
 
@@ -496,7 +497,10 @@ async fn end_to_end_with_real_local_backend() {
         )
         .await
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "routed");
+    assert_eq!(
+        String::from_utf8_lossy(&out.outcome.stdout).trim(),
+        "routed"
+    );
     let records = scheduler.records().await;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].backend, "local");

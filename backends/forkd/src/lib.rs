@@ -396,6 +396,9 @@ impl Backend for ForkdBackend {
             supports_fork: true,
             supports_gui: false,
             full_linux: true,
+            // Remote workspace, no state sync into the kernel's CAS yet:
+            // steps are recorded as audit-only excursions.
+            shares_workspace: false,
         }
     }
 

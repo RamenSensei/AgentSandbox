@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Until 1.0.0, minor releases may contain breaking changes to APIs, the protocol,
 and on-disk formats.
 
+## [Unreleased]
+
+### Added
+- **Config-driven multi-backend routing.** `KernelConfig.backends` (and
+  `agent-kernel-server --backend kind=endpoint`) registers remote isolation
+  backends — gVisor, forkd, Cube, Kubernetes — as router candidates next to
+  the built-in local sandbox; `Kernel::register_backend` does the same for
+  embedder-provided backends. Auth tokens come from each adapter's
+  environment variable, never from config files.
+- **Policy decides the isolation floor.** The authorizing rule's
+  `risk_weight` now travels in the compiled confinement and maps to the
+  scheduler's risk tier (`0..=2` low, `3..=6` medium, `>=7` high), so a
+  policy author raises a workload's isolation requirement with one number —
+  and agent hints still cannot lower it. An unsatisfiable floor is a
+  *recorded* denial naming the floor and the recovery (register a stronger
+  backend or lower the rule's weight), not a bare 500.
+- **Honest excursion recording.** A backend that does not share the kernel
+  workspace (`BackendProfile.shares_workspace = false`, the honest value
+  for every remote adapter until state sync lands) runs shell steps as
+  **audit-only excursions**: the full observation lands in the ledger, the
+  DAG records an `AuditOnly` node with an empty file delta and an unchanged
+  workspace root, and the observation summary names the executing backend.
+  File actions and process sessions — anything the DAG must snapshot —
+  stay pinned to workspace-sharing backends by construction.
+
 ## [0.8.0] - 2026-08-13
 
 Enablement release: the development focus shifts from richer governance

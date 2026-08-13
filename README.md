@@ -144,6 +144,11 @@ control-plane ceremony:
   line, with the whole blob a hash away.
 - **Denials are recovery plans** — every runtime denial names the exact
   scope to request (`requestable_scopes`) and whether a human is needed.
+- **Risk-routed backends** — the policy rule's `risk_weight` sets each
+  step's isolation floor; configured backends (gVisor, forkd, Cube,
+  Kubernetes) are routed to when the floor demands them, and steps on a
+  backend that does not share the kernel workspace are recorded as
+  audit-only excursions, never as pretended local state transitions.
 
 ### Authentication
 

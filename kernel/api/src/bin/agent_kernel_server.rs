@@ -44,6 +44,14 @@ struct Args {
     /// verified sandbox refuse to start them.
     #[arg(long = "mcp-server")]
     mcp_server: Vec<String>,
+
+    /// Register a remote isolation backend (repeatable). Format:
+    /// `kind=endpoint` with kind one of `gvisor`, `forkd`, `cube` (use the
+    /// config file's `backends` block for kubernetes, which requires an
+    /// operator-declared isolation strength). Auth tokens come from
+    /// `GVISOR_API_TOKEN` / `FORKD_API_TOKEN` / `CUBE_API_TOKEN`.
+    #[arg(long = "backend")]
+    backend: Vec<String>,
 }
 
 #[tokio::main]
@@ -79,6 +87,24 @@ async fn main() -> anyhow::Result<()> {
             manifest_public_key_hex: None,
             env: Default::default(),
             dangerously_allow_unsandboxed: false,
+        });
+    }
+    for spec in &args.backend {
+        let Some((kind, endpoint)) = spec.split_once('=') else {
+            anyhow::bail!("--backend expects `kind=endpoint`, got `{spec}`");
+        };
+        let endpoint = endpoint.trim().to_string();
+        config.backends.push(match kind.trim() {
+            "gvisor" => ak_api::BackendSetup::Gvisor {
+                endpoint,
+                image: None,
+            },
+            "forkd" => ak_api::BackendSetup::Forkd { endpoint },
+            "cube" => ak_api::BackendSetup::Cube { endpoint },
+            other => anyhow::bail!(
+                "--backend kind `{other}` is not supported on the CLI; use the config \
+                 file's `backends` block (kinds: gvisor, forkd, cube, kubernetes)"
+            ),
         });
     }
     let auth = match &args.auth_config {

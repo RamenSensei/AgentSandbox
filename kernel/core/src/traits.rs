@@ -53,6 +53,13 @@ pub struct BackendProfile {
     pub supports_gui: bool,
     /// Whether arbitrary Linux binaries run (vs. e.g. WASI-only).
     pub full_linux: bool,
+    /// Whether the backend executes against the kernel's own workspace
+    /// tree, so the state DAG can snapshot its filesystem effects. Remote
+    /// backends without state sync must report `false`: their steps are
+    /// recorded as audit-only excursions, never as local state
+    /// transitions.
+    #[serde(default)]
+    pub shares_workspace: bool,
 }
 
 /// An isolation backend: local OS sandbox, gVisor, microVM, cluster, …

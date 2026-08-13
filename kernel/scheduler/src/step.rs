@@ -18,7 +18,7 @@ use ak_core::capability::Operation;
 use ak_core::denial::{Denial, DenialCode};
 use ak_core::error::{KernelError, KernelResult};
 use ak_core::ids::{BranchId, EpisodeId, StepId};
-use ak_core::traits::{ExecutionOutcome, ExecutionRequest};
+use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -26,8 +26,19 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
+
+/// An executed step's outcome plus the profile of the backend that ran
+/// it. The kernel's state recording depends on the profile: only a
+/// workspace-sharing backend's effects can be snapshotted into the DAG;
+/// everything else is recorded as an audit-only excursion.
+#[derive(Debug)]
+pub struct RoutedOutcome {
+    pub outcome: ExecutionOutcome,
+    pub backend: BackendProfile,
+}
 
 /// Step-boundary accounting record, exposed for the ledger: which backend ran
 /// the step, how long it queued behind the fan-out limit, how long it
@@ -153,7 +164,7 @@ fn budget_denial(op: &str, reason: String) -> KernelError {
 /// concurrent branch fan-out with a semaphore, and records accounting for
 /// the ledger.
 pub struct StepScheduler {
-    router: BackendRouter,
+    router: StdRwLock<BackendRouter>,
     fanout: Arc<Semaphore>,
     /// Per-episode budget accounts. A `std` mutex: critical sections are
     /// short and never held across an await point.
@@ -167,7 +178,7 @@ pub struct StepScheduler {
 impl StepScheduler {
     pub fn new(router: BackendRouter, config: SchedulerConfig) -> Self {
         Self {
-            router,
+            router: StdRwLock::new(router),
             fanout: Arc::new(Semaphore::new(config.max_concurrent_branches.max(1))),
             accounts: StdMutex::new(HashMap::new()),
             default_episode_budget: config.episode_budget,
@@ -183,9 +194,23 @@ impl StepScheduler {
         self
     }
 
-    /// Read-only access to the router (e.g. for capability introspection).
-    pub fn router(&self) -> &BackendRouter {
-        &self.router
+    /// Register an additional isolation backend after construction.
+    /// Registration order never affects routing (see [`BackendRouter`]).
+    pub fn register_backend(&self, backend: Arc<dyn Backend>) {
+        self.router_write().register(backend);
+    }
+
+    /// Profiles of every registered backend, for introspection.
+    pub fn backend_profiles(&self) -> Vec<BackendProfile> {
+        self.router_read().profiles()
+    }
+
+    fn router_read(&self) -> std::sync::RwLockReadGuard<'_, BackendRouter> {
+        self.router.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn router_write(&self) -> std::sync::RwLockWriteGuard<'_, BackendRouter> {
+        self.router.write().unwrap_or_else(|p| p.into_inner())
     }
 
     fn accounts(&self) -> std::sync::MutexGuard<'_, HashMap<EpisodeId, BudgetAccount>> {
@@ -314,7 +339,7 @@ impl StepScheduler {
             .any(|k| lower.contains(k));
         if fork_like {
             let warm_backend = self
-                .router
+                .router_read()
                 .profiles()
                 .into_iter()
                 .filter(|p| p.supports_fork)
@@ -366,7 +391,7 @@ impl StepScheduler {
         req: ExecutionRequest,
         risk: RiskTier,
         needs: &Needs,
-    ) -> KernelResult<ExecutionOutcome> {
+    ) -> KernelResult<RoutedOutcome> {
         let op = req.action.required_operation().0.clone();
         if self.is_paused(&req.branch).await {
             return Err(KernelError::Denied(Box::new(Denial {
@@ -405,14 +430,15 @@ impl StepScheduler {
         let _permit = permit;
         let queue_ms = queued.elapsed().as_millis() as u64;
 
-        let backend = match self.router.route(risk, needs) {
+        let backend = match self.router_read().route(risk, needs) {
             Ok(b) => b,
             Err(e) => {
                 self.refund(episode, &reserved);
                 return Err(e);
             }
         };
-        let backend_name = backend.profile().name;
+        let backend_profile = backend.profile();
+        let backend_name = backend_profile.name.clone();
         let branch = req.branch.clone();
 
         let started = Instant::now();
@@ -447,7 +473,10 @@ impl StepScheduler {
             recorded_at: Utc::now(),
         });
 
-        Ok(outcome)
+        Ok(RoutedOutcome {
+            outcome,
+            backend: backend_profile,
+        })
     }
 
     /// Drain a copy of the step-boundary accounting records for the ledger.

@@ -976,6 +976,9 @@ impl Backend for LocalBackend {
             supports_gui: false,
             // Honest: only a Linux host runs arbitrary Linux binaries.
             full_linux: cfg!(target_os = "linux"),
+            // Executes in the kernel's own workspace tree: snapshots see
+            // every filesystem effect.
+            shares_workspace: true,
         }
     }
 

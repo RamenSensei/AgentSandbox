@@ -53,6 +53,10 @@ pub struct Needs {
     pub gui: bool,
     /// Requires native CoW fork for branch fan-out.
     pub fork: bool,
+    /// Requires execution against the kernel's own workspace tree (file
+    /// actions, process sessions — anything whose effects the state DAG
+    /// must snapshot).
+    pub workspace: bool,
     /// Requires at least this replay guarantee.
     pub replay_at_least: Option<ReplayClass>,
 }
@@ -98,6 +102,7 @@ impl BackendRouter {
             && (!needs.full_linux || profile.full_linux)
             && (!needs.gui || profile.supports_gui)
             && (!needs.fork || profile.supports_fork)
+            && (!needs.workspace || profile.shares_workspace)
             && needs
                 .replay_at_least
                 .map(|floor| profile.replay_class >= floor)
@@ -172,6 +177,7 @@ mod tests {
             supports_fork: fork,
             supports_gui: false,
             full_linux: true,
+            shares_workspace: name == "local",
         }
     }
 
@@ -246,6 +252,29 @@ mod tests {
             Err(KernelError::BackendUnavailable { .. }) => {}
             Err(other) => panic!("expected BackendUnavailable, got {other:?}"),
             Ok(b) => panic!("unexpectedly routed to {}", b.profile().name),
+        }
+    }
+
+    #[test]
+    fn workspace_need_filters_non_sharing_backends() {
+        // Only the "local" fake shares the kernel workspace; a workspace
+        // requirement must exclude every remote even at higher cost.
+        let r = router();
+        let needs = Needs {
+            workspace: true,
+            ..Needs::default()
+        };
+        assert_eq!(
+            r.route(RiskTier::Low, &needs).unwrap().profile().name,
+            "local"
+        );
+        match r.route(RiskTier::Medium, &needs) {
+            Err(KernelError::BackendUnavailable { .. }) => {}
+            Err(other) => panic!("expected BackendUnavailable, got {other:?}"),
+            Ok(b) => panic!(
+                "medium floor + workspace has no candidate, routed to {}",
+                b.profile().name
+            ),
         }
     }
 

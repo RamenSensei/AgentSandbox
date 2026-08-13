@@ -2,16 +2,17 @@
 
 use ak_backend_local::{LocalBackend, LocalBackendConfig};
 use ak_causal_ledger::{EventKind, Ledger, LedgerEvent, TraceQuery};
+use ak_connector_http::{HttpConnector, HttpConnectorConfig};
 use ak_core::action::{Action, ActionKind};
 use ak_core::budget::ResourceBudget;
-use ak_core::capability::{CapabilityLease, Constraint, LeaseCheckFailure, Operation};
-use ak_core::denial::{Denial, DenialCode};
+use ak_core::capability::{glob_match, CapabilityLease, Constraint, LeaseCheckFailure, Operation};
+use ak_core::denial::{Denial, DenialCode, RequestableScope};
 use ak_core::effect::{EffectClass, EffectContract, PendingEffect, Receipt};
 use ak_core::hash::ContentHash;
 use ak_core::ids::{
     BranchId, EffectId, EpisodeId, LeaseId, PrincipalId, ReceiptId, StateId, StepId,
 };
-use ak_core::observation::{distill_output, Observation};
+use ak_core::observation::{distill_output, extract_causal_failure, Observation};
 use ak_core::replay::ReplayClass;
 use ak_core::state::{FileChange, StateDelta, StateNode};
 use ak_core::traits::{Backend, Connector, ExecutionRequest, PreparedEffect};
@@ -57,6 +58,38 @@ pub struct KernelConfig {
     /// `AK_VAULT_KEY` env var; defaults to `~/.agent-kernel/vault.key`.
     #[serde(default)]
     pub vault_key_file: Option<PathBuf>,
+    /// When set, [`Kernel::open`] registers the built-in HTTP read connector
+    /// so `HttpRead` steps and `http.get` effects work out of the box — the
+    /// observation plane is not an optional accessory for an agent runtime.
+    #[serde(default)]
+    pub http: Option<HttpEgressSetup>,
+}
+
+/// Out-of-the-box HTTP observation-plane configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpEgressSetup {
+    /// `*`-glob patterns of read-safe domains (e.g. `docs.rs`,
+    /// `*.wikipedia.org`). GETs to these classify `Pure` and execute inline
+    /// on the observation plane; every other target becomes a proposed
+    /// `OpaqueExternal` effect requiring approval.
+    #[serde(default)]
+    pub read_safe_domains: Vec<String>,
+    /// Response body cap in bytes.
+    #[serde(default = "default_http_response_cap")]
+    pub max_response_bytes: usize,
+}
+
+impl Default for HttpEgressSetup {
+    fn default() -> Self {
+        Self {
+            read_safe_domains: Vec::new(),
+            max_response_bytes: default_http_response_cap(),
+        }
+    }
+}
+
+fn default_http_response_cap() -> usize {
+    4 << 20
 }
 
 fn default_episode_budget() -> ResourceBudget {
@@ -83,6 +116,7 @@ impl KernelConfig {
             episode_budget: default_episode_budget(),
             max_concurrent_branches: default_fanout(),
             vault_key_file: None,
+            http: None,
         }
     }
 
@@ -127,6 +161,95 @@ pub struct StepResult {
     /// Branch head after the step (unchanged when the step was denied).
     pub state: StateId,
     pub observation: Observation,
+}
+
+/// Result of one [`Kernel::execute_step_auto`] call: the step result plus
+/// which lease authorized it (and whether it was freshly minted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoStepResult {
+    #[serde(flatten)]
+    pub result: StepResult,
+    /// The lease the kernel selected or minted for this step.
+    pub lease: LeaseId,
+    /// Whether the lease was minted by this call (vs. reusing an active one).
+    pub lease_minted: bool,
+}
+
+/// Hard cap on candidates per [`Kernel::explore`] call.
+pub const MAX_EXPLORE_CANDIDATES: usize = 16;
+
+/// One candidate in a server-side exploration: a named sequence of actions
+/// applied to a fresh fork of the source branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExploreCandidate {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub actions: Vec<ActionKind>,
+}
+
+/// Options for [`Kernel::explore`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExploreOptions {
+    pub candidates: Vec<ExploreCandidate>,
+    /// Success criterion, run after a candidate's actions: the candidate
+    /// passes iff the evaluator observation is `Success` with exit code 0.
+    /// Without an evaluator, a candidate passes when all its actions succeed.
+    #[serde(default)]
+    pub evaluator: Option<ActionKind>,
+    /// Concurrent candidate cap (default 4, clamped to the kernel fanout).
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
+    /// Skip remaining candidates once one has passed (default true).
+    #[serde(default = "default_true")]
+    pub early_stop: bool,
+    /// Merge the winning branch back into the source branch.
+    #[serde(default)]
+    pub merge_winner: bool,
+    /// Discard non-winning branches (default true).
+    #[serde(default = "default_true")]
+    pub discard_losers: bool,
+    /// Per-step budget for candidate/evaluator steps (clamped into each
+    /// auto-resolved lease's envelope).
+    #[serde(default)]
+    pub step_budget: Option<ResourceBudget>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Per-candidate outcome of an exploration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExploreCandidateReport {
+    pub index: usize,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The fork this candidate ran on (`None` when skipped before forking).
+    pub branch: Option<BranchId>,
+    pub steps: Vec<StepResult>,
+    pub evaluation: Option<StepResult>,
+    pub passed: bool,
+    /// Skipped because early-stop already had a winner.
+    pub skipped: bool,
+    /// Infrastructure error (fork/step/evaluator), when one occurred.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Result of [`Kernel::explore`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExploreReport {
+    pub source: BranchId,
+    /// Index of the winning candidate (lowest passing index).
+    pub winner: Option<usize>,
+    /// Head state of the source branch after merging the winner (when
+    /// `merge_winner` was set and the merge succeeded).
+    pub merged_state: Option<StateId>,
+    /// Why the merge failed, when it did (e.g. a conflict).
+    #[serde(default)]
+    pub merge_error: Option<String>,
+    pub candidates: Vec<ExploreCandidateReport>,
+    pub discarded: Vec<BranchId>,
 }
 
 /// Structured answer to "why did this step do what it did" — the causal
@@ -188,6 +311,9 @@ pub struct Kernel {
     op_classes: Mutex<HashMap<String, EffectClass>>,
     /// Registered connector names (routing prefixes).
     connector_names: Mutex<Vec<String>>,
+    /// Registered connector objects, for canonicalization, per-invocation
+    /// classification and inline observation-plane reads.
+    connectors: Mutex<HashMap<String, Arc<dyn Connector>>>,
 }
 
 impl std::fmt::Debug for Kernel {
@@ -298,7 +424,8 @@ impl Kernel {
             );
         }
         info!(restored = episodes.len(), "kernel opened");
-        Ok(Self {
+        let http_setup = config.http.clone();
+        let kernel = Self {
             config,
             dag,
             ledger,
@@ -312,7 +439,19 @@ impl Kernel {
             episodes: Mutex::new(episodes),
             op_classes: Mutex::new(HashMap::new()),
             connector_names: Mutex::new(Vec::new()),
-        })
+            connectors: Mutex::new(HashMap::new()),
+        };
+        // Out-of-the-box observation plane: a configured HTTP connector makes
+        // `HttpRead` a first-class action instead of a declared-but-dead one.
+        if let Some(http) = http_setup {
+            let connector = HttpConnector::new(HttpConnectorConfig {
+                allowlist: http.read_safe_domains,
+                max_response_bytes: http.max_response_bytes,
+                ..HttpConnectorConfig::default()
+            })?;
+            kernel.register_connector(Arc::new(connector))?;
+        }
+        Ok(kernel)
     }
 
     // ------------------------------------------------------------ accessors
@@ -389,9 +528,20 @@ impl Kernel {
                 classes.insert(op, class);
             }
             lock(&self.connector_names)?.push(connector.name().to_string());
+            lock(&self.connectors)?.insert(connector.name().to_string(), Arc::clone(&connector));
         }
         self.broker.register_connector(connector);
         Ok(())
+    }
+
+    /// The registered connector named `name`, if any.
+    pub fn connector(&self, name: &str) -> KernelResult<Option<Arc<dyn Connector>>> {
+        Ok(lock(&self.connectors)?.get(name).cloned())
+    }
+
+    /// Names of every registered connector.
+    pub fn connector_names(&self) -> KernelResult<Vec<String>> {
+        Ok(lock(&self.connector_names)?.clone())
     }
 
     /// The declared effect class for a connector operation; undeclared
@@ -596,7 +746,11 @@ impl Kernel {
                          approved constraint sketch: {constraints}"
                     ),
                     safe_alternatives: Vec::new(),
-                    requestable_scopes: Vec::new(),
+                    requestable_scopes: vec![RequestableScope {
+                        operation: operation.clone(),
+                        constraints: constraints.clone(),
+                        requires_human: true,
+                    }],
                     escalation_allowed: true,
                 })))
             }
@@ -676,16 +830,21 @@ impl Kernel {
                 let denial = Denial {
                     code: DenialCode::CapabilityDenied,
                     attempted_operation: operation.clone(),
-                    reason: format!("lease `{}` is unknown: {e}", action.lease),
+                    reason: format!(
+                        "lease `{}` is unknown: {e}. Recover by requesting a fresh lease for \
+                         this operation via capability.request (POST /v1/capabilities/request), \
+                         or use steps/execute_auto to have the kernel resolve leases for you",
+                        action.lease
+                    ),
                     safe_alternatives: Vec::new(),
-                    requestable_scopes: Vec::new(),
+                    requestable_scopes: vec![scope_sketch(&operation, &params, false)],
                     escalation_allowed: true,
                 };
                 return self.deny_step(&writer, &b, step, &who, denial);
             }
         };
         if let Err(failure) = lease.check(principal, &operation, &params, Some(branch), now) {
-            let denial = denial_from_lease_failure(&operation, &failure);
+            let denial = denial_from_lease_failure(&operation, &params, &failure);
             return self.deny_step(&writer, &b, step, &who, denial);
         }
 
@@ -697,11 +856,20 @@ impl Kernel {
                 code: DenialCode::BudgetExhausted,
                 attempted_operation: operation.clone(),
                 reason: format!(
-                    "the action budget exceeds the lease budget envelope in: {}",
+                    "the action budget exceeds the lease budget envelope in: {}. Recover by \
+                     lowering the action budget to fit the lease, or request a lease with a \
+                     larger envelope",
                     over.join(", ")
                 ),
                 safe_alternatives: Vec::new(),
-                requestable_scopes: Vec::new(),
+                requestable_scopes: vec![RequestableScope {
+                    operation: operation.clone(),
+                    constraints: serde_json::json!({
+                        "params": params,
+                        "budget": action.budget,
+                    }),
+                    requires_human: false,
+                }],
                 escalation_allowed: true,
             };
             return self.deny_step(&writer, &b, step, &who, denial);
@@ -718,9 +886,12 @@ impl Kernel {
                     let denial = Denial {
                         code: DenialCode::EffectRequiresApproval,
                         attempted_operation: operation.clone(),
-                        reason: format!("rule `{rule_id}` requires out-of-band approval"),
+                        reason: format!(
+                            "rule `{rule_id}` requires out-of-band approval; a human (or an \
+                             approver-role principal) must grant this scope before it can run"
+                        ),
                         safe_alternatives: Vec::new(),
-                        requestable_scopes: Vec::new(),
+                        requestable_scopes: vec![scope_sketch(&operation, &params, true)],
                         escalation_allowed: true,
                     };
                     return self.deny_step(&writer, &b, step, &who, denial);
@@ -736,7 +907,7 @@ impl Kernel {
         // exactly one wins and the rest get a machine-readable denial here
         // (AK-004).
         if let Err(e) = self.leases().consume_use(&action.lease, now) {
-            let denial = denial_from_consume_failure(&operation, &e);
+            let denial = denial_from_consume_failure(&operation, &params, &e);
             return self.deny_step(&writer, &b, step, &who, denial);
         }
 
@@ -751,18 +922,48 @@ impl Kernel {
                 )
                 .await
             }
+            ActionKind::HttpRead { url } => {
+                self.execute_http_read(
+                    &writer,
+                    &b,
+                    branch,
+                    step,
+                    principal,
+                    &action,
+                    url,
+                    &confinement.egress_domains,
+                )
+                .await
+            }
+            ActionKind::McpInvoke {
+                server,
+                tool,
+                arguments,
+            } => {
+                self.execute_mcp_invoke(
+                    &writer, &b, branch, step, principal, &action, server, tool, arguments,
+                )
+                .await
+            }
             ActionKind::TraceQuery { query } => {
-                let events = self.trace_query(&TraceQuery {
-                    episode: Some(b.episode.clone()),
-                    limit: Some(200),
-                    ..TraceQuery::default()
-                })?;
+                let q = parse_trace_query(b.episode.clone(), query);
+                let events = self.trace_query(&q)?;
                 let raw = serde_json::to_vec(&events)?;
                 let full = self.ledger.store_raw(&raw)?;
                 let obs = Observation::Success {
                     summary: format!("trace query `{query}` returned {} events", events.len()),
-                    data: Some(serde_json::json!({ "count": events.len() })),
+                    data: Some(serde_json::json!({
+                        "count": events.len(),
+                        "applied": {
+                            "kinds": q.kinds,
+                            "branch": q.branch,
+                            "step": q.step,
+                            "principal": q.principal,
+                            "limit": q.limit,
+                        },
+                    })),
                     stdout_head: None,
+                    stdout_tail: None,
                     exit_code: 0,
                     full_output: full,
                     truncated: false,
@@ -777,6 +978,7 @@ impl Kernel {
                     summary: format!("{} file(s) changed since {since}", changes.len()),
                     data: Some(serde_json::to_value(&changes)?),
                     stdout_head: None,
+                    stdout_tail: None,
                     exit_code: 0,
                     full_output: full,
                     truncated: false,
@@ -788,6 +990,266 @@ impl Kernel {
                     .await
             }
         }
+    }
+
+    /// Execute a step with **automatic lease resolution** (`steps/execute_auto`
+    /// in the protocol): the kernel finds the narrowest active lease that
+    /// authorizes the action on this branch, or mints one through the policy
+    /// engine, and picks a step budget clamped inside the lease envelope.
+    ///
+    /// Lease bookkeeping is deterministic control-plane work; making the
+    /// model do it wastes reasoning tokens and invites avoidable denials.
+    pub async fn execute_step_auto(
+        &self,
+        principal: &PrincipalId,
+        branch: &BranchId,
+        kind: ActionKind,
+        intent_hint: Option<String>,
+        budget: Option<ResourceBudget>,
+    ) -> KernelResult<AutoStepResult> {
+        let operation = kind.required_operation();
+        let params = kind.params();
+        let now = Utc::now();
+        // Prefer branch-bound leases over unbound ones, then the one
+        // expiring soonest (spend narrow authority before broad authority).
+        let mut chosen: Option<CapabilityLease> = None;
+        for lease in self
+            .leases()
+            .active_for_principal(principal, now)
+            .map_err(KernelError::from)?
+        {
+            if lease
+                .check(principal, &operation, &params, Some(branch), now)
+                .is_err()
+            {
+                continue;
+            }
+            let better = match &chosen {
+                None => true,
+                Some(current) => {
+                    let bound = |l: &CapabilityLease| l.bound_branch.is_some();
+                    (bound(&lease), std::cmp::Reverse(lease.expires_at))
+                        > (bound(current), std::cmp::Reverse(current.expires_at))
+                }
+            };
+            if better {
+                chosen = Some(lease);
+            }
+        }
+        let (lease, lease_minted) = match chosen {
+            Some(l) => (l, false),
+            // No usable lease: ask the policy engine. A policy denial (or
+            // approval requirement) propagates as the structured denial —
+            // which now carries the requestable scope.
+            None => (
+                self.request_capability(principal, &operation, &params, Some(branch))?,
+                true,
+            ),
+        };
+        let budget = budget
+            .unwrap_or_else(ResourceBudget::step_default)
+            .clamped_to(&lease.budget);
+        let result = self
+            .execute_step(
+                principal,
+                branch,
+                Action {
+                    kind,
+                    lease: lease.id.clone(),
+                    intent_hint,
+                    budget,
+                },
+            )
+            .await?;
+        Ok(AutoStepResult {
+            result,
+            lease: lease.id,
+            lease_minted,
+        })
+    }
+
+    /// Server-side parallel branch exploration (`branches/{id}/explore`).
+    ///
+    /// Forks one branch per candidate, executes each candidate's actions
+    /// (with automatic lease resolution) under a parallelism cap, runs the
+    /// optional evaluator, and reports which candidates passed. With
+    /// `early_stop`, later candidates are skipped once a winner passed; with
+    /// `merge_winner`, the first passing candidate is merged back into the
+    /// source branch; with `discard_losers`, non-winning branches are torn
+    /// down. The agent supplies candidates and the success criterion; the
+    /// kernel does the fork/lease/collect/merge bookkeeping.
+    pub async fn explore(
+        self: &Arc<Self>,
+        principal: &PrincipalId,
+        source: &BranchId,
+        options: ExploreOptions,
+    ) -> KernelResult<ExploreReport> {
+        if options.candidates.is_empty() {
+            return Err(KernelError::Other(
+                "explore requires at least one candidate".into(),
+            ));
+        }
+        if options.candidates.len() > MAX_EXPLORE_CANDIDATES {
+            return Err(KernelError::Other(format!(
+                "explore accepts at most {MAX_EXPLORE_CANDIDATES} candidates per call"
+            )));
+        }
+        let max_parallel = options
+            .max_parallel
+            .unwrap_or(4)
+            .clamp(1, self.config.max_concurrent_branches.max(1));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_parallel));
+        let won = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for (index, candidate) in options.candidates.iter().cloned().enumerate() {
+            let kernel = Arc::clone(self);
+            let principal = principal.clone();
+            let source = source.clone();
+            let evaluator = options.evaluator.clone();
+            let step_budget = options.step_budget;
+            let early_stop = options.early_stop;
+            let semaphore = Arc::clone(&semaphore);
+            let won = Arc::clone(&won);
+            handles.push(tokio::spawn(async move {
+                use std::sync::atomic::Ordering;
+                let _permit = semaphore.acquire_owned().await;
+                let mut report = ExploreCandidateReport {
+                    index,
+                    name: candidate.name.clone(),
+                    branch: None,
+                    steps: Vec::new(),
+                    evaluation: None,
+                    passed: false,
+                    skipped: false,
+                    error: None,
+                };
+                if early_stop && won.load(Ordering::SeqCst) {
+                    report.skipped = true;
+                    return report;
+                }
+                let branch = match kernel.fork_branch(&source) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        report.error = Some(format!("fork failed: {e}"));
+                        return report;
+                    }
+                };
+                report.branch = Some(branch.id.clone());
+                let mut all_ok = true;
+                for kind in candidate.actions {
+                    if early_stop && won.load(Ordering::SeqCst) {
+                        report.skipped = true;
+                        all_ok = false;
+                        break;
+                    }
+                    match kernel
+                        .execute_step_auto(
+                            &principal,
+                            &branch.id,
+                            kind,
+                            Some(format!("explore candidate {index}")),
+                            step_budget,
+                        )
+                        .await
+                    {
+                        Ok(auto) => {
+                            let ok = matches!(
+                                auto.result.observation,
+                                Observation::Success { .. } | Observation::EffectPending { .. }
+                            );
+                            report.steps.push(auto.result);
+                            if !ok {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            report.error = Some(format!("step failed: {e}"));
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if all_ok {
+                    match evaluator {
+                        Some(eval_kind) => {
+                            match kernel
+                                .execute_step_auto(
+                                    &principal,
+                                    &branch.id,
+                                    eval_kind,
+                                    Some(format!("explore evaluator {index}")),
+                                    step_budget,
+                                )
+                                .await
+                            {
+                                Ok(auto) => {
+                                    report.passed = matches!(
+                                        auto.result.observation,
+                                        Observation::Success { exit_code: 0, .. }
+                                    );
+                                    report.evaluation = Some(auto.result);
+                                }
+                                Err(e) => {
+                                    report.error = Some(format!("evaluator failed: {e}"));
+                                }
+                            }
+                        }
+                        None => report.passed = true,
+                    }
+                }
+                if report.passed {
+                    won.store(true, Ordering::SeqCst);
+                }
+                report
+            }));
+        }
+        let mut candidates = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(report) => candidates.push(report),
+                Err(e) => {
+                    return Err(KernelError::Other(format!(
+                        "explore candidate task panicked: {e}"
+                    )))
+                }
+            }
+        }
+        candidates.sort_by_key(|c| c.index);
+        // Winner: the passing candidate with the lowest index (deterministic
+        // regardless of completion order).
+        let winner = candidates.iter().find(|c| c.passed).map(|c| c.index);
+        let mut merged_state = None;
+        let mut merge_error = None;
+        if let (true, Some(w)) = (options.merge_winner, winner) {
+            if let Some(branch) = candidates[w].branch.clone() {
+                match self.merge_branch(source, &branch, principal) {
+                    Ok(node) => merged_state = Some(node.id),
+                    Err(e) => merge_error = Some(e.to_string()),
+                }
+            }
+        }
+        let mut discarded = Vec::new();
+        if options.discard_losers {
+            for c in &candidates {
+                if Some(c.index) == winner {
+                    continue;
+                }
+                if let Some(branch) = &c.branch {
+                    if self.discard_branch(branch).await.is_ok() {
+                        discarded.push(branch.clone());
+                    }
+                }
+            }
+        }
+        Ok(ExploreReport {
+            source: source.clone(),
+            winner,
+            merged_state,
+            merge_error,
+            candidates,
+            discarded,
+        })
     }
 
     /// Record a denial as a full step: `DenialIssued` + `ObservationEmitted`.
@@ -828,7 +1290,6 @@ impl Kernel {
         op_params: &serde_json::Value,
     ) -> KernelResult<StepResult> {
         let full_op = format!("{connector}.{op}");
-        let class = self.effect_class_of(&full_op)?;
         let resource = op_params
             .get("resource")
             .and_then(|v| v.as_str())
@@ -847,6 +1308,14 @@ impl Kernel {
             obj.remove("resource");
             obj.remove("preconditions");
         }
+        // Per-invocation classification happens BEFORE the contract is
+        // created: an allowlisted read must carry `Pure` in its contract, not
+        // the operation's worst-case class (which would force human approval
+        // onto plain observation).
+        let class = match self.connector(connector)? {
+            Some(c) => c.classify_operation(&full_op, &arguments),
+            None => self.effect_class_of(&full_op)?,
+        };
         let contract = EffectContract {
             operation: full_op,
             resource,
@@ -905,6 +1374,282 @@ impl Kernel {
             contract_hash: effect.contract_hash.clone(),
             class: effect.contract.class,
         };
+        writer.record_caused_by(
+            EventKind::ObservationEmitted,
+            serde_json::to_value(&observation)?,
+            vec![delta_ev.seq],
+        )?;
+        Ok(StepResult {
+            step,
+            state: node.id,
+            observation,
+        })
+    }
+
+    /// Deny helper for connector-plane paths (already past lease
+    /// consumption): records the denial as a step.
+    fn deny_connector_step(
+        &self,
+        writer: &ak_causal_ledger::EventWriter,
+        b: &Branch,
+        step: StepId,
+        principal: &PrincipalId,
+        denial: Denial,
+    ) -> KernelResult<StepResult> {
+        let who = self.registry().get(principal).map_err(KernelError::from)?;
+        self.deny_step(writer, b, step, &who, denial)
+    }
+
+    /// `HttpRead` on the main execution path.
+    ///
+    /// Observation/effect plane split: a guard-passing, allowlisted GET is
+    /// `Pure` and executes **inline** (low-latency observation, full body in
+    /// the raw store); anything else becomes a proposed `http.get` effect
+    /// and returns [`Observation::EffectPending`] for the transactional
+    /// path. Requires a registered `http` connector.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_http_read(
+        &self,
+        writer: &ak_causal_ledger::EventWriter,
+        b: &Branch,
+        branch: &BranchId,
+        step: StepId,
+        principal: &PrincipalId,
+        action: &Action,
+        url: &str,
+        egress_domains: &[String],
+    ) -> KernelResult<StepResult> {
+        let operation = Operation::new("net.http_read");
+        let Some(connector) = self.connector("http")? else {
+            let denial = Denial {
+                code: DenialCode::BackendUnavailable,
+                attempted_operation: operation,
+                reason: "no `http` connector is registered with this kernel; configure \
+                         `http` in KernelConfig (or register an HttpConnector) to enable \
+                         the observation plane"
+                    .into(),
+                safe_alternatives: Vec::new(),
+                requestable_scopes: Vec::new(),
+                escalation_allowed: false,
+            };
+            return self.deny_connector_step(writer, b, step, principal, denial);
+        };
+        // Canonicalize runs the full SSRF guard set.
+        let canon = match connector.canonicalize("http.get", &serde_json::json!({ "url": url })) {
+            Ok(c) => c,
+            Err(e) => {
+                let denial = Denial {
+                    code: DenialCode::ConstraintViolated,
+                    attempted_operation: operation,
+                    reason: format!("url refused: {e}"),
+                    safe_alternatives: Vec::new(),
+                    requestable_scopes: Vec::new(),
+                    escalation_allowed: false,
+                };
+                return self.deny_connector_step(writer, b, step, principal, denial);
+            }
+        };
+        let canon_url = canon
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(url)
+            .to_string();
+        let host = host_of(&canon_url).unwrap_or_default();
+        // Compiled egress confinement is enforced at the kernel boundary:
+        // empty means no network for this grant.
+        if !egress_domains.iter().any(|g| glob_match(g, &host)) {
+            let denial = Denial {
+                code: DenialCode::PolicyForbidden,
+                attempted_operation: operation,
+                reason: format!(
+                    "host `{host}` is not covered by this grant's egress domains; request \
+                     net.http_read scoped to the domain, or ask an operator to extend the \
+                     policy egress allowlist"
+                ),
+                safe_alternatives: Vec::new(),
+                requestable_scopes: vec![RequestableScope {
+                    operation: Operation::new("net.http_read"),
+                    constraints: serde_json::json!({ "domain": host }),
+                    requires_human: false,
+                }],
+                escalation_allowed: true,
+            };
+            return self.deny_connector_step(writer, b, step, principal, denial);
+        }
+        let class = connector.classify_operation("http.get", &canon);
+        if class == EffectClass::Pure {
+            self.execute_read_via_connector(
+                writer, b, branch, step, principal, action, connector, "http.get", host, canon,
+            )
+            .await
+        } else {
+            // Not read-safe: route through the transactional effect plane.
+            let mut params = canon;
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("resource".into(), serde_json::json!(host));
+            }
+            self.propose_connector_op(
+                writer, b, branch, step, principal, action, "http", "get", &params,
+            )
+            .await
+        }
+    }
+
+    /// `McpInvoke` on the main execution path: manifest-vouched `Pure` tools
+    /// execute inline on the observation plane; everything else becomes a
+    /// proposed effect requiring the transactional path.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_mcp_invoke(
+        &self,
+        writer: &ak_causal_ledger::EventWriter,
+        b: &Branch,
+        branch: &BranchId,
+        step: StepId,
+        principal: &PrincipalId,
+        action: &Action,
+        server: &str,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> KernelResult<StepResult> {
+        let operation = Operation::new("mcp.invoke");
+        let Some(connector) = self.connector(server)? else {
+            let known = self.connector_names()?.join(", ");
+            let denial = Denial {
+                code: DenialCode::BackendUnavailable,
+                attempted_operation: operation,
+                reason: format!(
+                    "no MCP server `{server}` is registered with this kernel (registered \
+                     connectors: [{known}])"
+                ),
+                safe_alternatives: Vec::new(),
+                requestable_scopes: Vec::new(),
+                escalation_allowed: false,
+            };
+            return self.deny_connector_step(writer, b, step, principal, denial);
+        };
+        let full_op = format!("{server}.{tool}");
+        let canon = match connector.canonicalize(&full_op, arguments) {
+            Ok(c) => c,
+            Err(e) => {
+                let denial = Denial {
+                    code: DenialCode::ConstraintViolated,
+                    attempted_operation: operation,
+                    reason: format!("arguments refused by the `{server}` manifest: {e}"),
+                    safe_alternatives: Vec::new(),
+                    requestable_scopes: Vec::new(),
+                    escalation_allowed: false,
+                };
+                return self.deny_connector_step(writer, b, step, principal, denial);
+            }
+        };
+        let class = connector.classify_operation(&full_op, &canon);
+        if class == EffectClass::Pure {
+            self.execute_read_via_connector(
+                writer,
+                b,
+                branch,
+                step,
+                principal,
+                action,
+                connector,
+                &full_op,
+                server.to_string(),
+                canon,
+            )
+            .await
+        } else {
+            self.propose_connector_op(
+                writer, b, branch, step, principal, action, server, tool, &canon,
+            )
+            .await
+        }
+    }
+
+    /// Inline observation-plane read through a connector: the operation was
+    /// classified `Pure` for these exact arguments, so it commits directly —
+    /// no proposal, no approval, no receipt. The full response body goes to
+    /// the raw store; the observation carries head+tail and metadata.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_read_via_connector(
+        &self,
+        writer: &ak_causal_ledger::EventWriter,
+        b: &Branch,
+        branch: &BranchId,
+        step: StepId,
+        principal: &PrincipalId,
+        action: &Action,
+        connector: Arc<dyn Connector>,
+        full_op: &str,
+        resource: String,
+        arguments: serde_json::Value,
+    ) -> KernelResult<StepResult> {
+        let contract = EffectContract {
+            operation: full_op.to_string(),
+            resource,
+            arguments,
+            preconditions: serde_json::json!({}),
+            idempotency_key: format!("{}-{}-read", b.episode, step),
+            class: EffectClass::Pure,
+        };
+        let tool = writer.record(
+            EventKind::ToolInvocation,
+            serde_json::json!({
+                "action": action.kind, "intent_hint": action.intent_hint,
+                "lease": action.lease, "budget": action.budget,
+                "plane": "observation",
+            }),
+        )?;
+        let started = std::time::Instant::now();
+        let outcome = connector.commit(&contract).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let observation = match outcome {
+            Ok(result) => {
+                let (raw, data) = shape_read_response(&result.response);
+                let full_output = self.ledger.store_raw(&raw)?;
+                let d = distill_output(&raw, 2048, 1024);
+                Observation::Success {
+                    summary: format!("{full_op} returned {} bytes in {elapsed_ms} ms", raw.len()),
+                    data,
+                    stdout_head: d.head,
+                    stdout_tail: d.tail,
+                    exit_code: 0,
+                    full_output,
+                    truncated: d.truncated,
+                }
+            }
+            Err(e) => {
+                // Network/tool failures are normal agent-visible outcomes,
+                // not kernel errors: return a Failure observation the agent
+                // can react to (retry, different URL, …).
+                let msg = e.to_string();
+                let full_output = self.ledger.store_raw(msg.as_bytes())?;
+                Observation::Failure {
+                    summary: format!("{full_op} failed"),
+                    exit_code: 1,
+                    first_causal_failure: Some(msg.chars().take(400).collect()),
+                    output_tail: None,
+                    full_output,
+                }
+            }
+        };
+        let head = self.dag.head(branch)?;
+        let node = self.dag.append_step(
+            branch,
+            &step,
+            principal,
+            StateDelta {
+                tool_sessions: vec![full_op.to_string()],
+                policy_epoch: head.delta.policy_epoch,
+                ..StateDelta::default()
+            },
+            head.workspace_root.clone(),
+            head.replay_class,
+        )?;
+        let delta_ev = writer.record_caused_by(
+            EventKind::StateDeltaRecorded,
+            serde_json::json!({ "state_id": node.id, "delta": node.delta }),
+            vec![tool.seq],
+        )?;
         writer.record_caused_by(
             EventKind::ObservationEmitted,
             serde_json::to_value(&observation)?,
@@ -1032,8 +1777,8 @@ impl Kernel {
             raw.extend_from_slice(&outcome.stderr);
         }
         let full_output = self.ledger.store_raw(&raw)?;
-        let (head, hashed, truncated) = distill_output(&raw, 2048);
-        debug_assert_eq!(hashed, ak_core::hash::hash_bytes(&raw));
+        let d = distill_output(&raw, 2048, 1024);
+        debug_assert_eq!(d.hash, ak_core::hash::hash_bytes(&raw));
         let observation = if outcome.exit_code == 0 {
             Observation::Success {
                 summary: format!(
@@ -1042,12 +1787,21 @@ impl Kernel {
                     node.delta.files.len()
                 ),
                 data: None,
-                stdout_head: head,
+                stdout_head: d.head,
+                stdout_tail: d.tail,
                 exit_code: 0,
                 full_output,
-                truncated,
+                truncated: d.truncated,
             }
         } else {
+            // Root-cause scan prefers stderr; falls back to stdout (build
+            // tools that print errors to stdout exist). The tail carries the
+            // end of the combined stream — where summaries live.
+            let causal = extract_causal_failure(&outcome.stderr)
+                .or_else(|| extract_causal_failure(&outcome.stdout));
+            let tail_start = raw.len().saturating_sub(1024);
+            let output_tail =
+                (!raw.is_empty()).then(|| String::from_utf8_lossy(&raw[tail_start..]).into_owned());
             Observation::Failure {
                 summary: format!(
                     "{} exited {}",
@@ -1055,10 +1809,8 @@ impl Kernel {
                     outcome.exit_code
                 ),
                 exit_code: outcome.exit_code,
-                first_causal_failure: String::from_utf8_lossy(&outcome.stderr)
-                    .lines()
-                    .next()
-                    .map(str::to_string),
+                first_causal_failure: causal,
+                output_tail,
                 full_output,
             }
         };
@@ -1539,9 +2291,99 @@ fn lock<'a, T>(m: &'a Mutex<T>) -> KernelResult<std::sync::MutexGuard<'a, T>> {
         .map_err(|_| KernelError::Storage("kernel mutex poisoned".into()))
 }
 
+/// A requestable-scope sketch for `operation` with these exact parameters:
+/// the concrete recovery action an agent can take after a denial.
+fn scope_sketch(
+    operation: &Operation,
+    params: &serde_json::Value,
+    requires_human: bool,
+) -> RequestableScope {
+    RequestableScope {
+        operation: operation.clone(),
+        constraints: serde_json::json!({ "params": params }),
+        requires_human,
+    }
+}
+
+/// Extract the host from an http(s) URL without pulling a URL crate into the
+/// façade. Ports and userinfo are stripped; bracketed IPv6 hosts keep their
+/// brackets (they never match domain globs, which is correct — literal IPs
+/// are refused by the connector guards anyway).
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1)?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = if let Some(stripped) = host.strip_prefix('[') {
+        // Bracketed IPv6: keep up to the closing bracket.
+        format!("[{}", stripped.split(']').next().unwrap_or(""))
+    } else {
+        host.split(':').next().unwrap_or("").to_string()
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Split a connector read response into raw bytes for the raw store and a
+/// small structured `data` payload. HTTP-shaped responses (`{body, ...}`)
+/// keep their metadata in `data` and their body in the raw stream; anything
+/// else is stored as pretty JSON with no separate metadata.
+fn shape_read_response(response: &serde_json::Value) -> (Vec<u8>, Option<serde_json::Value>) {
+    if let Some(obj) = response.as_object() {
+        if let Some(body) = obj.get("body").and_then(|v| v.as_str()) {
+            let mut meta = obj.clone();
+            meta.remove("body");
+            return (
+                body.as_bytes().to_vec(),
+                Some(serde_json::Value::Object(meta)),
+            );
+        }
+    }
+    (
+        serde_json::to_vec_pretty(response).unwrap_or_default(),
+        None,
+    )
+}
+
+/// Parse a `TraceQuery` action's query string: whitespace-separated
+/// `key=value` tokens (`kind=`, `limit=`, `step=`, `branch=`, `principal=`).
+/// Unknown keys and malformed values are ignored; the query always stays
+/// scoped to the step's episode and capped at 1000 events (200 by default).
+fn parse_trace_query(episode: EpisodeId, query: &str) -> TraceQuery {
+    let mut q = TraceQuery {
+        episode: Some(episode),
+        limit: Some(200),
+        ..TraceQuery::default()
+    };
+    for token in query.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        match key {
+            "kind" => {
+                if let Some(kind) = EventKind::parse(value) {
+                    q.kinds.push(kind);
+                }
+            }
+            "limit" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    q.limit = Some(n.clamp(1, 1000));
+                }
+            }
+            "step" => q.step = StepId::parse(value).ok(),
+            "branch" => q.branch = BranchId::parse(value).ok(),
+            "principal" => q.principal = PrincipalId::parse(value).ok(),
+            _ => {}
+        }
+    }
+    q
+}
+
 /// Map an atomic consume-use refusal (lost race, revoked, expired,
-/// exhausted) to a machine-readable denial.
-fn denial_from_consume_failure(operation: &Operation, err: &ak_identity::IdentityError) -> Denial {
+/// exhausted) to a machine-readable denial with a concrete recovery scope.
+fn denial_from_consume_failure(
+    operation: &Operation,
+    params: &serde_json::Value,
+    err: &ak_identity::IdentityError,
+) -> Denial {
     let (code, reason) = match err {
         ak_identity::IdentityError::LeaseUnusable { reason, .. } => match reason.as_str() {
             "expired" => (
@@ -1563,15 +2405,20 @@ fn denial_from_consume_failure(operation: &Operation, err: &ak_identity::Identit
     Denial {
         code,
         attempted_operation: operation.clone(),
-        reason,
+        reason: format!("{reason}. Recover by requesting a fresh lease for this operation"),
         safe_alternatives: Vec::new(),
-        requestable_scopes: Vec::new(),
+        requestable_scopes: vec![scope_sketch(operation, params, false)],
         escalation_allowed: true,
     }
 }
 
-/// Map a deterministic lease-check failure to a machine-readable denial.
-fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure) -> Denial {
+/// Map a deterministic lease-check failure to a machine-readable denial
+/// carrying the concrete scope to re-request.
+fn denial_from_lease_failure(
+    operation: &Operation,
+    params: &serde_json::Value,
+    failure: &LeaseCheckFailure,
+) -> Denial {
     let (code, reason) = match failure {
         LeaseCheckFailure::Revoked => {
             (DenialCode::CapabilityDenied, "the presented lease has been revoked".to_string())
@@ -1594,7 +2441,7 @@ fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure)
         ),
         LeaseCheckFailure::WrongBranch { bound } => (
             DenialCode::BranchMismatch,
-            format!("the presented lease is bound to branch `{bound}`; authority does not follow the agent across branches"),
+            format!("the presented lease is bound to branch `{bound}`; authority does not follow the agent across branches — request a lease bound to the current branch"),
         ),
         LeaseCheckFailure::ConstraintViolated { parameter } => (
             DenialCode::ConstraintViolated,
@@ -1604,9 +2451,12 @@ fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure)
     Denial {
         code,
         attempted_operation: operation.clone(),
-        reason,
+        reason: format!(
+            "{reason}. Recover by requesting the scope below (capability.request), or use \
+             steps/execute_auto to have the kernel resolve leases automatically"
+        ),
         safe_alternatives: Vec::new(),
-        requestable_scopes: Vec::new(),
+        requestable_scopes: vec![scope_sketch(operation, params, false)],
         escalation_allowed: true,
     }
 }

@@ -26,6 +26,7 @@ pub mod effect;
 pub mod error;
 pub mod hash;
 pub mod ids;
+pub mod net;
 pub mod observation;
 pub mod principal;
 pub mod replay;

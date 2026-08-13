@@ -115,6 +115,26 @@ pub trait Connector: Send + Sync {
     /// Operations this connector supports, with their effect class.
     fn operations(&self) -> Vec<(String, EffectClass)>;
 
+    /// Classify a **specific invocation** of `operation` with (already
+    /// canonicalized) arguments. Defaults to the statically declared class
+    /// from [`Connector::operations`], or [`EffectClass::OpaqueExternal`]
+    /// for undeclared operations.
+    ///
+    /// Connectors whose operations have argument-dependent semantics (e.g.
+    /// an HTTP GET that is `Pure` only for allowlisted read-safe hosts)
+    /// override this. The kernel calls it **before** creating an effect
+    /// contract, so the contract carries the real per-invocation class —
+    /// a read of an allowlisted docs site must never be gated behind the
+    /// human-approval path reserved for opaque external writes.
+    fn classify_operation(&self, operation: &str, arguments: &serde_json::Value) -> EffectClass {
+        let _ = arguments;
+        self.operations()
+            .iter()
+            .find(|(op, _)| op == operation)
+            .map(|(_, class)| *class)
+            .unwrap_or(EffectClass::OpaqueExternal)
+    }
+
     /// Validate + canonicalize arguments for an operation.
     fn canonicalize(
         &self,

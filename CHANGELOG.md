@@ -9,7 +9,66 @@ and on-disk formats.
 
 ## [Unreleased]
 
+Enablement release: the development focus shifts from richer governance
+semantics to a high-throughput, connected, branchable **agent execution
+environment** — the runtime a strong agent actually wants to work in.
+
 ### Added
+- **Observation/effect plane split on the main execution path.**
+  `HttpRead` and `McpInvoke` now execute through `Kernel::execute_step`
+  instead of being declared-but-dead: a guard-passing, allowlisted GET (or
+  a manifest-vouched `Pure` MCP tool) runs **inline** in one step — no
+  proposal, no approval — with the full response body in the raw store;
+  anything else automatically becomes a proposed effect on the
+  transactional path.
+- **Per-invocation effect classification.**
+  `Connector::classify_operation(operation, arguments)` runs **before**
+  contract creation, so an allowlisted `http.get` carries `Pure` in its
+  contract and commits straight from `Prepared` — reads no longer queue
+  behind the human-approval path reserved for opaque external writes.
+- **Persistent process sessions** in the local backend:
+  `process_start` / `process_stdin` / `process_logs` / `process_signal` /
+  `process_status` actions. A started process (dev server, REPL, database,
+  watcher) outlives its step, runs under the same verified OS sandbox with
+  piped stdin, and exposes an offset-based incremental log cursor
+  (capped ring buffer with honest eviction offsets). Sessions are
+  branch-scoped: invisible to sibling branches, killed on branch discard,
+  never inherited by forks; such steps are recorded `AuditOnly`.
+- **Automatic lease resolution**: `POST /v1/steps/execute_auto` (and
+  `Kernel::execute_step_auto`) takes just an action kind — the kernel
+  finds the narrowest active lease or mints one via policy, clamps the
+  budget into the lease envelope, and reports which lease was used.
+- **Server-side exploration**: `POST /v1/branches/{id}/explore` forks one
+  branch per candidate, runs candidates + evaluator concurrently under a
+  parallelism cap with auto-leases, supports early-stop, merges the winner
+  and discards losers — one call instead of dozens of client-orchestrated
+  RPCs.
+- **Raw output access**: `GET /v1/raw/{hash}` with `offset`/`limit`
+  pagination and `grep` line search over any recorded output blob. Both
+  SDKs gained `fetch_raw`/`grep_raw` and `execute_step_auto`.
+- **Out-of-the-box observation plane**: `KernelConfig.http`
+  (`read_safe_domains`, `max_response_bytes`) registers the HTTP connector
+  at `Kernel::open`; `agent-kernel-server --http-read-safe <glob>` enables
+  it from the CLI.
+- **Transparent egress proxy** in the local backend: a step whose compiled
+  confinement grants egress domains gets standard `HTTP_PROXY`/`HTTPS_PROXY`
+  environment pointing at a loopback proxy with a **per-step bearer token** —
+  `pip install`, `cargo fetch`, `npm install`, `git fetch` and `curl` work
+  unmodified, no per-tool connectors. The proxy enforces, per connection:
+  token auth (407 without it), the step's `*`-glob domain allowlist, SSRF
+  guards (literal IPs refused; every resolved address vetted and the
+  connection pinned to it), a port allowlist (default 80/443), and byte caps
+  metered into the step's `network_bytes` budget. CONNECT tunnels pass TLS
+  through end-to-end; the proxy never terminates TLS. On macOS the Seatbelt
+  profile opens **only** the proxy's loopback port, making it the sole route
+  out; under bwrap (unshared netns, host loopback unreachable) egress stays
+  **off** — honest fail-closed, never a silent bypass — until an
+  in-namespace forwarder lands. Process sessions keep their egress grant
+  until they die; the grant token is revoked the moment the session ends.
+- `ak_core::net`: shared guest-network guard (`is_forbidden_ip` — loopback,
+  RFC1918, link-local/metadata, CGNAT, unique-local, v4-mapped v6) now used
+  by both the HTTP connector and the egress proxy, so every egress path
+  refuses the same address ranges.
 - `ak-agent-utility-bench`: the enablement-side benchmark. Measures how far
   an autonomous agent gets inside one pre-approved capability envelope:
   envelope autonomy (steps per lease request, zero human interventions),
@@ -18,6 +77,35 @@ and on-disk formats.
   causal introspection without shell spelunking, and exactly-once effect
   transactions with signed receipts. Runs in CI next to the adversarial
   bench with an uploaded JSON report.
+
+### Changed
+- **Observations distill head + tail** (2 KiB + 1 KiB): test summaries and
+  final errors no longer vanish. Failures scan the whole stream for the
+  causal line (`error[…]`, `panic`, `Traceback`, …) instead of taking
+  stderr line one, and carry an `output_tail`.
+- **Denials are recovery plans**: unknown-lease, lease-check,
+  budget-envelope, consume-race and approval-required denials all carry
+  concrete `requestable_scopes` (operation + parameter sketch +
+  `requires_human`) so a benign agent can unblock itself without a human.
+- **Snapshots are incremental and tiered.** Cache/scratch components
+  (`node_modules`, `target`, `.venv`, `__pycache__`, sandbox scratch, …)
+  stay out of manifests and survive materialization, so branch history
+  costs track the step's change, not the workspace size; a per-workspace
+  stat cache (with a git-style racy-clean guard) skips re-reading
+  stat-unchanged files on every step.
+- `TraceQuery` actions now parse their query string
+  (`kind=… limit=… step=… branch=… principal=…`) instead of ignoring it.
+- Linux bwrap sandbox shadows `/home`, `/root` and `/run` with tmpfs on
+  top of the read-only rootfs: agent code can no longer read the service
+  user's home or runtime sockets (first slice of the minimal-rootfs work).
+
+### Security
+- **MCP servers spawn with a scrubbed environment**: `McpGateway::spawn`
+  clears the child environment down to `PATH` — an MCP server no longer
+  inherits the embedder's tokens, keys or `HOME`. `spawn_with(SpawnOptions)`
+  grants exactly what a server needs (env vars, cwd, and a sandbox wrapper
+  argv for OS-level confinement) — first slice of running MCP servers as
+  low-trust tool processes instead of extensions of the control plane.
 
 ## [0.7.0] - 2026-08-12
 

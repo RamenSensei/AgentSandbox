@@ -24,6 +24,47 @@ pub enum ActionKind {
     WriteFile { path: String, contents_b64: String },
     /// Delete a path in the branch workspace.
     DeletePath { path: String },
+    /// Start a **persistent** process in the branch workspace (dev server,
+    /// REPL, database, watcher, …). Unlike [`ActionKind::Shell`] the process
+    /// outlives the step: the returned handle can be written to, observed
+    /// incrementally and signalled by later steps. The process belongs to the
+    /// branch and is killed when the branch is discarded. It does NOT survive
+    /// a fork (forks get the files, not the live processes).
+    ProcessStart {
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        /// Optional human-readable name for status listings.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Write bytes to a running process's stdin (optionally closing it).
+    ProcessStdin {
+        process: String,
+        data_b64: String,
+        #[serde(default)]
+        close: bool,
+    },
+    /// Read combined stdout/stderr of a process from a byte offset. The
+    /// response reports `next_offset` so an agent can tail a long-running
+    /// process incrementally instead of waiting for it to finish.
+    ProcessLogs {
+        process: String,
+        #[serde(default)]
+        from_offset: u64,
+        #[serde(default)]
+        max_bytes: Option<u64>,
+    },
+    /// Send a signal to a running process: `"int"`, `"term"` or `"kill"`.
+    ProcessSignal { process: String, signal: String },
+    /// Report whether a process is running, its exit code, and log totals.
+    /// An empty `process` lists every live process on the branch.
+    ProcessStatus {
+        #[serde(default)]
+        process: String,
+    },
     /// Read-only HTTP fetch through the egress proxy.
     HttpRead { url: String },
     /// Invoke an MCP tool through the gateway.
@@ -55,6 +96,11 @@ impl ActionKind {
             ActionKind::ReadFile { .. } => Operation::new("fs.read"),
             ActionKind::WriteFile { .. } => Operation::new("fs.write"),
             ActionKind::DeletePath { .. } => Operation::new("fs.delete"),
+            ActionKind::ProcessStart { .. } => Operation::new("proc.start"),
+            ActionKind::ProcessStdin { .. } => Operation::new("proc.stdin"),
+            ActionKind::ProcessLogs { .. } => Operation::new("proc.logs"),
+            ActionKind::ProcessSignal { .. } => Operation::new("proc.signal"),
+            ActionKind::ProcessStatus { .. } => Operation::new("proc.status"),
             ActionKind::HttpRead { .. } => Operation::new("net.http_read"),
             ActionKind::McpInvoke { .. } => Operation::new("mcp.invoke"),
             ActionKind::ConnectorOp {
@@ -77,6 +123,17 @@ impl ActionKind {
                 serde_json::json!({"path": path})
             }
             ActionKind::WriteFile { path, .. } => serde_json::json!({"path": path}),
+            ActionKind::ProcessStart { command, cwd, .. } => {
+                serde_json::json!({"command": command, "cwd": cwd})
+            }
+            ActionKind::ProcessStdin { process, .. }
+            | ActionKind::ProcessLogs { process, .. }
+            | ActionKind::ProcessStatus { process } => {
+                serde_json::json!({"process": process})
+            }
+            ActionKind::ProcessSignal { process, signal } => {
+                serde_json::json!({"process": process, "signal": signal})
+            }
             ActionKind::HttpRead { url } => serde_json::json!({"url": url}),
             ActionKind::McpInvoke {
                 server,

@@ -162,6 +162,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
 pub struct StateDag {
     conn: Mutex<Connection>,
     cas: Cas,
+    /// Per-workspace-directory incremental stat caches (see
+    /// [`snapshot::StatCache`]): unchanged files skip the read+hash on every
+    /// step, so snapshot cost tracks the step's change, not workspace size.
+    stat_caches: Mutex<std::collections::HashMap<std::path::PathBuf, snapshot::StatCache>>,
 }
 
 impl StateDag {
@@ -209,6 +213,7 @@ impl StateDag {
         Ok(Self {
             conn: Mutex::new(conn),
             cas,
+            stat_caches: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -433,7 +438,8 @@ impl StateDag {
     }
 
     /// Convenience: snapshot `dir`, compute the file delta against the
-    /// branch head automatically, and append the resulting state.
+    /// branch head automatically, and append the resulting state. Uses the
+    /// per-directory incremental stat cache.
     pub fn snapshot_and_append(
         &self,
         branch: &BranchId,
@@ -443,7 +449,13 @@ impl StateDag {
         replay_class: ReplayClass,
     ) -> KernelResult<StateNode> {
         let head = self.head(branch)?;
-        let (new_root, new_manifest) = snapshot::snapshot_dir(&self.cas, dir)?;
+        // Take the cache out of the map so concurrent snapshots of *other*
+        // directories never serialize behind this one. A racing snapshot of
+        // the same directory just runs cold (perf, never correctness).
+        let mut cache = self.take_stat_cache(dir)?;
+        let result = snapshot::snapshot_dir_with_cache(&self.cas, dir, &mut cache);
+        self.put_stat_cache(dir, cache)?;
+        let (new_root, new_manifest) = result?;
         let old_manifest = Manifest::load(&self.cas, &head.workspace_root)?;
         let delta = StateDelta {
             files: snapshot::diff_manifests(&old_manifest, &new_manifest),
@@ -453,10 +465,32 @@ impl StateDag {
         self.append_step(branch, step, actor, delta, new_root, replay_class)
     }
 
-    /// Materialize a state's workspace into `target`.
+    /// Materialize a state's workspace into `target`, priming the
+    /// incremental stat cache for `target` so the next snapshot is cheap.
     pub fn materialize(&self, state: &StateId, target: &Path) -> KernelResult<()> {
         let node = self.get_state(state)?;
-        snapshot::materialize(&self.cas, &node.workspace_root, target)
+        let mut cache = self.take_stat_cache(target)?;
+        let result =
+            snapshot::materialize_with_cache(&self.cas, &node.workspace_root, target, &mut cache);
+        self.put_stat_cache(target, cache)?;
+        result
+    }
+
+    fn take_stat_cache(&self, dir: &Path) -> KernelResult<snapshot::StatCache> {
+        Ok(self
+            .stat_caches
+            .lock()
+            .map_err(|_| KernelError::Storage("stat cache mutex poisoned".into()))?
+            .remove(dir)
+            .unwrap_or_default())
+    }
+
+    fn put_stat_cache(&self, dir: &Path, cache: snapshot::StatCache) -> KernelResult<()> {
+        self.stat_caches
+            .lock()
+            .map_err(|_| KernelError::Storage("stat cache mutex poisoned".into()))?
+            .insert(dir.to_path_buf(), cache);
+        Ok(())
     }
 
     // ---------------------------------------------------------------- branches

@@ -74,6 +74,20 @@ impl ResourceBudget {
         over
     }
 
+    /// Dimension-wise minimum: the largest budget that fits inside both
+    /// `self` and `outer`. Used by auto-lease execution to pick a step
+    /// budget that can never out-spend the lease envelope.
+    pub fn clamped_to(&self, outer: &ResourceBudget) -> ResourceBudget {
+        ResourceBudget {
+            cpu_ms: self.cpu_ms.min(outer.cpu_ms),
+            memory_bytes: self.memory_bytes.min(outer.memory_bytes),
+            network_bytes: self.network_bytes.min(outer.network_bytes),
+            tokens: self.tokens.min(outer.tokens),
+            cost_micro_usd: self.cost_micro_usd.min(outer.cost_micro_usd),
+            risk_units: self.risk_units.min(outer.risk_units),
+        }
+    }
+
     /// Dimension-wise saturating subtraction (`self - other`, floored at 0).
     pub fn saturating_sub(&self, other: &ResourceBudget) -> ResourceBudget {
         ResourceBudget {

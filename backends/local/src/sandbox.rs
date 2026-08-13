@@ -105,7 +105,7 @@ fn probe_sandbox_exec() -> bool {
     let Ok(ws_canon) = ws.canonicalize() else {
         return false;
     };
-    let profile = seatbelt_profile(&ws_canon, &[], &[]);
+    let profile = seatbelt_profile(&ws_canon, &[], &[], None);
     let profile_path = dir.path().join("probe.sb");
     if std::fs::write(&profile_path, profile).is_err() {
         return false;
@@ -156,7 +156,17 @@ const MACOS_SYSTEM_READS: &[&str] = &[
 /// confinement; empty means the whole workspace. The workspace path must be
 /// canonical (macOS `/tmp` is a symlink to `/private/tmp`; Seatbelt matches
 /// on real paths).
-pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String]) -> String {
+///
+/// `egress_proxy_port`: when set, outbound TCP to **exactly**
+/// `localhost:<port>` is allowed — the egress proxy becomes the sole route
+/// out; everything else stays denied. SBPL applies the *last* matching
+/// rule, so the allow follows the `(deny network*)`.
+pub fn seatbelt_profile(
+    ws_canon: &Path,
+    readable: &[String],
+    writable: &[String],
+    egress_proxy_port: Option<u16>,
+) -> String {
     let mut reads: Vec<String> = Vec::new();
     #[cfg(target_os = "macos")]
     for p in MACOS_SYSTEM_READS {
@@ -194,6 +204,14 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
         ));
     }
 
+    let egress = match egress_proxy_port {
+        Some(port) => format!(
+            "(allow network-outbound (remote tcp \"localhost:{port}\"))\n\
+             (allow system-socket)\n"
+        ),
+        None => String::new(),
+    };
+
     format!(
         "(version 1)\n\
          (deny default)\n\
@@ -205,9 +223,11 @@ pub fn seatbelt_profile(ws_canon: &Path, readable: &[String], writable: &[String
          (allow file-ioctl)\n\
          (allow file-read* {reads})\n\
          (allow file-write* {writes})\n\
-         (deny network*)\n",
+         (deny network*)\n\
+         {egress}",
         reads = reads.join(" "),
         writes = writes.join(" "),
+        egress = egress,
     )
 }
 
@@ -254,6 +274,16 @@ pub fn bwrap_args(ws: &Path, readable: &[String], writable: &[String]) -> Vec<St
         "--ro-bind".into(),
         "/".into(),
         "/".into(),
+        // Shadow every user-data location the ro-bind of `/` would otherwise
+        // expose read-only: agent code must not be able to read the service
+        // user's home, root's home, or runtime sockets under /run. (The
+        // workspace binds below re-open exactly what confinement grants.)
+        "--tmpfs".into(),
+        "/home".into(),
+        "--tmpfs".into(),
+        "/root".into(),
+        "--tmpfs".into(),
+        "/run".into(),
         "--dev".into(),
         "/dev".into(),
         "--proc".into(),
@@ -298,7 +328,12 @@ mod tests {
     #[test]
     fn profile_embeds_canonical_workspace_and_prefixes() {
         let ws = Path::new("/private/tmp/ws-1");
-        let profile = seatbelt_profile(ws, &["src/".into()], &["src/".into(), "./docs".into()]);
+        let profile = seatbelt_profile(
+            ws,
+            &["src/".into()],
+            &["src/".into(), "./docs".into()],
+            None,
+        );
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("(subpath \"/private/tmp/ws-1/src\")"));
@@ -335,7 +370,7 @@ mod tests {
         assert!(!grants_whole_workspace(&["src".into()]));
 
         let ws = Path::new("/private/tmp/ws-2");
-        let profile = seatbelt_profile(ws, &["".into()], &["".into()]);
+        let profile = seatbelt_profile(ws, &["".into()], &["".into()], None);
         assert!(profile.contains("(subpath \"/private/tmp/ws-2\")"));
     }
 

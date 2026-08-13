@@ -98,9 +98,41 @@ cargo run -p ak-adversarial-bench -- --report target/adversarial-report.json
 cargo run -p ak-agent-utility-bench -- --report target/utility-report.json
 
 # Serve the HTTP control plane (unauthenticated mode is loopback-only
-# and must be opted into explicitly; use --auth-config in production)
-cargo run -p ak-api --bin agent-kernel-server -- --insecure-no-auth
+# and must be opted into explicitly; use --auth-config in production).
+# --http-read-safe enables the built-in observation plane: GETs to these
+# domains execute inline in one step; everything else needs the effect
+# approval path.
+cargo run -p ak-api --bin agent-kernel-server -- --insecure-no-auth \
+    --http-read-safe docs.rs --http-read-safe '*.wikipedia.org'
 ```
+
+### The agent loop, without bookkeeping
+
+The runtime is built so a model spends its reasoning on the task, not on
+control-plane ceremony:
+
+- **`POST /v1/steps/execute_auto`** — send just the action kind; the
+  kernel resolves (or mints) the lease and clamps the budget.
+- **Persistent process sessions** — `process_start` a dev server, REPL or
+  database; later steps write its stdin, tail its logs from a byte offset
+  (`process_logs`), signal and query it. Sessions are branch-scoped and
+  die with the branch.
+- **Observation vs. effect plane** — `http_read` of an allowlisted domain
+  and manifest-vouched `Pure` MCP tools run inline; external *writes* go
+  through propose → prepare → approve → commit with signed receipts.
+- **Transparent egress** — grant egress domains in the policy and
+  `pip install` / `cargo fetch` / `git fetch` / `curl` work unmodified:
+  the sandbox stays offline except a token-authenticated loopback proxy
+  that enforces the domain globs, SSRF guards, a port allowlist and byte
+  metering at the one hop where they can actually be enforced.
+- **`POST /v1/branches/{id}/explore`** — server-side parallel candidate
+  search: fork N branches, run candidates + an evaluator concurrently,
+  merge the winner, discard the losers, one call.
+- **`GET /v1/raw/{hash}`** — page or grep the *full* output of any step;
+  observations carry a distilled head **and tail** plus the causal error
+  line, with the whole blob a hash away.
+- **Denials are recovery plans** — every runtime denial names the exact
+  scope to request (`requestable_scopes`) and whether a human is needed.
 
 ### Authentication
 

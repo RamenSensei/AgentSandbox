@@ -115,6 +115,89 @@ class DeletePath(ActionKind):
 
 
 @dataclass(frozen=True)
+class ProcessStart(ActionKind):
+    """Start a persistent process session (dev server, REPL, database, …).
+
+    Unlike Shell, the process outlives the step; the success observation's
+    stdout is JSON naming the ``process`` handle for later ProcessStdin/
+    ProcessLogs/ProcessSignal/ProcessStatus steps. Sessions are branch-scoped
+    and die with the branch.
+    """
+
+    command: str
+    cwd: Optional[str] = None
+    env: Dict[str, str] = field(default_factory=dict)
+    name: Optional[str] = None
+    kind = "process_start"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {
+            "kind": "process_start",
+            "command": self.command,
+            "cwd": self.cwd,
+            "env": self.env,
+            "name": self.name,
+        }
+
+
+@dataclass(frozen=True)
+class ProcessStdin(ActionKind):
+    process: str
+    data_b64: str
+    close: bool = False
+    kind = "process_stdin"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {
+            "kind": "process_stdin",
+            "process": self.process,
+            "data_b64": self.data_b64,
+            "close": self.close,
+        }
+
+
+@dataclass(frozen=True)
+class ProcessLogs(ActionKind):
+    """Tail a process incrementally: read combined output from a byte
+    offset; the JSON response reports ``next_offset`` for the next poll."""
+
+    process: str
+    from_offset: int = 0
+    max_bytes: Optional[int] = None
+    kind = "process_logs"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {
+            "kind": "process_logs",
+            "process": self.process,
+            "from_offset": self.from_offset,
+            "max_bytes": self.max_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class ProcessSignal(ActionKind):
+    process: str
+    signal: str  # "int" | "term" | "kill"
+    kind = "process_signal"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "process_signal", "process": self.process, "signal": self.signal}
+
+
+@dataclass(frozen=True)
+class ProcessStatus(ActionKind):
+    """Status of one process, or of every session on the branch when
+    ``process`` is empty."""
+
+    process: str = ""
+    kind = "process_status"
+
+    def to_wire(self) -> Dict[str, Json]:
+        return {"kind": "process_status", "process": self.process}
+
+
+@dataclass(frozen=True)
 class HttpRead(ActionKind):
     url: str
     kind = "http_read"
@@ -344,6 +427,28 @@ class StepResult:
             step=d["step"],
             state=d.get("state", ""),
             observation=Observation.from_wire(d["observation"]),
+        )
+
+
+@dataclass(frozen=True)
+class AutoStepResult:
+    """Result of steps/execute_auto: the step plus the lease the kernel
+    selected or minted on the caller's behalf."""
+
+    step: str
+    state: str
+    observation: Observation
+    lease: str
+    lease_minted: bool
+
+    @classmethod
+    def from_wire(cls, d: Mapping[str, Any]) -> "AutoStepResult":
+        return cls(
+            step=d["step"],
+            state=d.get("state", ""),
+            observation=Observation.from_wire(d["observation"]),
+            lease=d.get("lease", ""),
+            lease_minted=bool(d.get("lease_minted", False)),
         )
 
 

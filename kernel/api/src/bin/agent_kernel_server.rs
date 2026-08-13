@@ -27,6 +27,14 @@ struct Args {
     /// address (local development only).
     #[arg(long)]
     insecure_no_auth: bool,
+
+    /// Enable the built-in HTTP observation plane with these read-safe
+    /// domains (repeatable; `*`-globs allowed, e.g. `--http-read-safe
+    /// docs.rs --http-read-safe '*.wikipedia.org'`). GETs to these domains
+    /// execute inline; every other target requires the effect approval path.
+    /// Merged with any `http` block in the config file.
+    #[arg(long = "http-read-safe")]
+    http_read_safe: Vec<String>,
 }
 
 #[tokio::main]
@@ -37,10 +45,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
-    let config: KernelConfig = match &args.config {
+    let mut config: KernelConfig = match &args.config {
         Some(path) => serde_yaml::from_str(&std::fs::read_to_string(path)?)?,
         None => KernelConfig::new("agent-kernel-data"),
     };
+    if !args.http_read_safe.is_empty() {
+        let http = config.http.get_or_insert_with(Default::default);
+        http.read_safe_domains
+            .extend(args.http_read_safe.iter().cloned());
+    }
     let auth = match &args.auth_config {
         Some(path) => AuthConfig::from_yaml_file(path).map_err(|e| anyhow::anyhow!("{e}"))?,
         None => AuthConfig::disabled(),

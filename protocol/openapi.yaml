@@ -109,6 +109,33 @@ paths:
         "403": { $ref: "#/components/responses/DeniedStep" }
         default: { $ref: "#/components/responses/Error" }
 
+  /v1/steps/execute_auto:
+    post:
+      tags: [steps]
+      operationId: step.executeAuto
+      summary: Execute one action with automatic lease resolution.
+      description: |
+        The caller sends only the action kind. The kernel finds the
+        narrowest active lease authorizing the action on the branch, or
+        mints one through the policy engine, clamps the step budget into
+        the lease envelope, and executes. The response is the step result
+        plus the lease used and whether it was freshly minted. Lease
+        bookkeeping is deterministic control-plane work; it never belongs
+        in a model's reasoning loop.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StepExecuteAutoRequest" }
+      responses:
+        "200":
+          description: The step ran.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutoStepResult" }
+        "403": { $ref: "#/components/responses/DeniedStep" }
+        default: { $ref: "#/components/responses/Error" }
+
   /v1/steps/{id}/explain:
     get:
       tags: [steps]
@@ -238,6 +265,69 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BranchCompareResponse" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/branches/{id}/explore:
+    post:
+      tags: [branches]
+      operationId: branch.explore
+      summary: Server-side parallel candidate exploration.
+      description: |
+        Forks one branch per candidate, executes each candidate's actions
+        with automatic lease resolution under a parallelism cap, runs the
+        optional evaluator, optionally merges the winner back and discards
+        losers. The agent supplies candidates and the success criterion;
+        the kernel does the fork/lease/collect/merge bookkeeping.
+      parameters:
+        - $ref: "#/components/parameters/BranchId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExploreRequest" }
+      responses:
+        "200":
+          description: Exploration report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExploreReport" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/raw/{hash}:
+    get:
+      tags: [trace]
+      operationId: raw.fetch
+      summary: Paginated access to a full recorded output blob.
+      description: |
+        Observations reference full outputs by content hash
+        (`full_output`); this route returns a byte-sliced page of the blob,
+        or, with `grep`, line matches with byte offsets. Closes the loop
+        between "the full output exists" and "the agent can actually read
+        it".
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, pattern: "^sha256:" }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1048576 }
+        - name: grep
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: One page (or grep matches) of the blob.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RawPage"
+                  - $ref: "#/components/schemas/RawGrep"
+        "404": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/capabilities/request:
@@ -822,6 +912,43 @@ components:
             kind: { const: delete_path }
             path: { type: string }
         - type: object
+          required: [kind, command]
+          properties:
+            kind: { const: process_start }
+            command: { type: string }
+            cwd: { type: [string, "null"] }
+            env:
+              type: object
+              additionalProperties: { type: string }
+            name: { type: [string, "null"] }
+        - type: object
+          required: [kind, process, data_b64]
+          properties:
+            kind: { const: process_stdin }
+            process: { type: string, pattern: "^proc-" }
+            data_b64: { type: string }
+            close: { type: boolean }
+        - type: object
+          required: [kind, process]
+          properties:
+            kind: { const: process_logs }
+            process: { type: string, pattern: "^proc-" }
+            from_offset: { type: integer, minimum: 0 }
+            max_bytes: { type: [integer, "null"] }
+        - type: object
+          required: [kind, process, signal]
+          properties:
+            kind: { const: process_signal }
+            process: { type: string, pattern: "^proc-" }
+            signal: { type: string, enum: [int, term, kill] }
+        - type: object
+          required: [kind]
+          properties:
+            kind: { const: process_status }
+            process:
+              type: string
+              description: Empty string lists every session on the branch.
+        - type: object
           required: [kind, url]
           properties:
             kind: { const: http_read }
@@ -870,6 +997,11 @@ components:
             summary: { type: string }
             data: {}
             stdout_head: { type: string }
+            stdout_tail:
+              type: string
+              description: >
+                Trailing bytes, present only when the middle was elided —
+                test summaries and final errors live here.
             exit_code: { type: integer }
             full_output: { type: string }
             truncated: { type: boolean }
@@ -880,6 +1012,7 @@ components:
             summary: { type: string }
             exit_code: { type: integer }
             first_causal_failure: { type: string }
+            output_tail: { type: string }
             full_output: { type: string }
         - type: object
           required: [kind, denial]
@@ -1149,6 +1282,110 @@ components:
         principal: { type: string, pattern: "^pr-" }
         branch: { type: string, pattern: "^br-" }
         action: { $ref: "#/components/schemas/Action" }
+
+    StepExecuteAutoRequest:
+      type: object
+      required: [principal, branch, kind]
+      properties:
+        principal: { type: string, pattern: "^pr-" }
+        branch: { type: string, pattern: "^br-" }
+        kind: { $ref: "#/components/schemas/ActionKind" }
+        intent_hint: { type: string }
+        budget: { $ref: "#/components/schemas/ResourceBudget" }
+
+    AutoStepResult:
+      allOf:
+        - $ref: "#/components/schemas/StepResult"
+        - type: object
+          required: [lease, lease_minted]
+          properties:
+            lease: { type: string, pattern: "^lease-" }
+            lease_minted:
+              type: boolean
+              description: Whether the lease was minted by this call.
+
+    ExploreRequest:
+      type: object
+      required: [principal, candidates]
+      properties:
+        principal: { type: string, pattern: "^pr-" }
+        candidates:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: object
+            required: [actions]
+            properties:
+              name: { type: [string, "null"] }
+              actions:
+                type: array
+                items: { $ref: "#/components/schemas/ActionKind" }
+        evaluator: { $ref: "#/components/schemas/ActionKind" }
+        max_parallel: { type: [integer, "null"], minimum: 1 }
+        early_stop: { type: boolean, default: true }
+        merge_winner: { type: boolean, default: false }
+        discard_losers: { type: boolean, default: true }
+        step_budget: { $ref: "#/components/schemas/ResourceBudget" }
+
+    ExploreReport:
+      type: object
+      required: [source, candidates, discarded]
+      properties:
+        source: { type: string, pattern: "^br-" }
+        winner: { type: [integer, "null"] }
+        merged_state: { type: [string, "null"] }
+        merge_error: { type: [string, "null"] }
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [index, steps, passed, skipped]
+            properties:
+              index: { type: integer }
+              name: { type: [string, "null"] }
+              branch: { type: [string, "null"] }
+              steps:
+                type: array
+                items: { $ref: "#/components/schemas/StepResult" }
+              evaluation:
+                oneOf:
+                  - { type: "null" }
+                  - $ref: "#/components/schemas/StepResult"
+              passed: { type: boolean }
+              skipped: { type: boolean }
+              error: { type: [string, "null"] }
+        discarded:
+          type: array
+          items: { type: string, pattern: "^br-" }
+
+    RawPage:
+      type: object
+      required: [hash, total_bytes, offset, returned_bytes, data]
+      properties:
+        hash: { type: string }
+        total_bytes: { type: integer }
+        offset: { type: integer }
+        returned_bytes: { type: integer }
+        next_offset: { type: [integer, "null"] }
+        data: { type: string }
+
+    RawGrep:
+      type: object
+      required: [hash, total_bytes, grep, matches, matches_truncated]
+      properties:
+        hash: { type: string }
+        total_bytes: { type: integer }
+        grep: { type: string }
+        matches:
+          type: array
+          items:
+            type: object
+            required: [offset, line]
+            properties:
+              offset: { type: integer }
+              line: { type: string }
+        matches_truncated: { type: boolean }
 
     StepResult:
       type: object

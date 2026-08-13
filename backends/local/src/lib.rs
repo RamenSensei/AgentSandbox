@@ -65,8 +65,12 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod b64;
+pub mod egress;
+pub mod process;
 pub mod sandbox;
 
+pub use egress::{EgressConfig, EgressGrant, EgressProxy};
+pub use process::{ProcessRegistry, ProcessSession};
 pub use sandbox::SandboxTech;
 
 /// Configuration for [`LocalBackend`].
@@ -76,10 +80,17 @@ pub struct LocalBackendConfig {
     pub root: PathBuf,
     /// Maximum bytes of stdout/stderr retained per stream.
     pub max_capture_bytes: usize,
+    /// Maximum bytes of combined output retained per **process session**
+    /// (ring buffer; older bytes are evicted, offsets stay honest).
+    pub max_log_buffer_bytes: usize,
     /// Timeout used when `budget.cpu_ms` is zero would otherwise mean
     /// "no time at all"; a zero budget is refused, this is only a hard upper
     /// clamp on very large budgets.
     pub max_wall_clock: Duration,
+    /// Transparent egress proxy configuration (see [`egress`]). Only steps
+    /// whose compiled confinement grants egress domains get proxy
+    /// environment; everything else stays fully offline.
+    pub egress: EgressConfig,
     /// When `false` (**default**), shell commands are refused unless a
     /// verified OS sandbox is available (fail closed). Setting this to
     /// `true` lets shell commands run as plain confined host processes and
@@ -92,7 +103,9 @@ impl LocalBackendConfig {
         Self {
             root: root.into(),
             max_capture_bytes: 1 << 20,
+            max_log_buffer_bytes: 1 << 20,
             max_wall_clock: Duration::from_secs(600),
+            egress: EgressConfig::default(),
             dangerously_allow_unsandboxed: false,
         }
     }
@@ -111,6 +124,10 @@ pub struct LocalBackend {
     config: LocalBackendConfig,
     /// The sandbox technology that passed the construction-time probe.
     tech: SandboxTech,
+    /// Persistent per-branch process sessions.
+    processes: ProcessRegistry,
+    /// Lazily started egress proxy (needs a tokio runtime).
+    egress_proxy: tokio::sync::OnceCell<EgressProxy>,
 }
 
 impl LocalBackend {
@@ -120,7 +137,53 @@ impl LocalBackend {
         std::fs::create_dir_all(&config.root)?;
         let tech = sandbox::probe();
         tracing::info!(?tech, "local backend sandbox probe");
-        Ok(Self { config, tech })
+        Ok(Self {
+            config,
+            tech,
+            processes: ProcessRegistry::default(),
+            egress_proxy: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    /// The process-session registry (tests and embedders).
+    pub fn processes(&self) -> &ProcessRegistry {
+        &self.processes
+    }
+
+    /// A per-step egress grant when the confinement allows any egress and
+    /// the sandbox technology can actually confine traffic to the proxy.
+    ///
+    /// - Seatbelt: the generated profile opens **only** the proxy's loopback
+    ///   port — the proxy is the sole route out.
+    /// - No sandbox (explicit dev opt-out): the proxy env is still set so
+    ///   tools work and the domain policy is enforced at the proxy.
+    /// - bwrap: the unshared network namespace cannot reach host loopback;
+    ///   egress stays **off** (fail closed, never a silent bypass) until an
+    ///   in-namespace forwarder lands.
+    async fn egress_grant(
+        &self,
+        domains: &[String],
+        budget_network_bytes: u64,
+    ) -> KernelResult<Option<EgressGrant>> {
+        if !self.config.egress.enabled || domains.is_empty() || budget_network_bytes == 0 {
+            return Ok(None);
+        }
+        if self.tech == SandboxTech::Bwrap {
+            tracing::warn!(
+                "egress domains granted but bwrap cannot reach the loopback proxy \
+                 from an unshared netns; step runs without network (fail closed)"
+            );
+            return Ok(None);
+        }
+        let proxy = self
+            .egress_proxy
+            .get_or_try_init(|| EgressProxy::start(self.config.egress.clone()))
+            .await
+            .map_err(|e| KernelError::BackendUnavailable {
+                backend: "local".into(),
+                reason: format!("egress proxy failed to start: {e}"),
+            })?;
+        Ok(Some(proxy.grant(domains.to_vec(), budget_network_bytes)))
     }
 
     /// The verified sandbox technology for shell commands.
@@ -258,8 +321,10 @@ fn resolve_confined(
 }
 
 /// Snapshot of `(mtime, len)` per workspace-relative path, used to diff
-/// written paths across an execution. The sandbox scratch dir
-/// ([`sandbox::SCRATCH_DIR`]) is internal and excluded.
+/// written paths across an execution. Cache/scratch components
+/// ([`ak_core::state::DEFAULT_SNAPSHOT_IGNORES`], which include the sandbox
+/// scratch dir) are excluded — they are the cache tier, not step artifacts,
+/// and skipping them keeps the scan proportional to the artifact tree.
 fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
     let mut out = BTreeMap::new();
     let mut stack = vec![workspace.to_path_buf()];
@@ -269,9 +334,7 @@ fn scan_workspace(workspace: &Path) -> BTreeMap<String, (SystemTime, u64)> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.file_name().is_some_and(|n| n == sandbox::SCRATCH_DIR)
-                && path.parent() == Some(workspace)
-            {
+            if ak_core::state::is_ignored_component(&entry.file_name().to_string_lossy()) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -310,9 +373,120 @@ struct ExecResult {
     exit_code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    /// Egress bytes transferred through the proxy during this execution.
+    network_bytes: u64,
 }
 
 impl LocalBackend {
+    /// Build a confined `/bin/sh -c` command under the verified sandbox tech
+    /// with the scrubbed environment. Returns the command plus the Seatbelt
+    /// profile file (which must outlive the child). Fails closed when no
+    /// sandbox is verified and the operator did not opt out.
+    #[allow(clippy::too_many_arguments)]
+    fn build_confined_command(
+        &self,
+        op: &str,
+        ws_canon: &Path,
+        cwd: &Path,
+        command: &str,
+        env: &BTreeMap<String, String>,
+        readable_prefixes: &[String],
+        writable_prefixes: &[String],
+        egress: Option<&EgressGrant>,
+    ) -> KernelResult<(tokio::process::Command, Option<tempfile::NamedTempFile>)> {
+        let host_path =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        let scratch = ws_canon.join(sandbox::SCRATCH_DIR);
+        std::fs::create_dir_all(&scratch)?;
+
+        // Profile files live outside the workspace so a confined shell can
+        // never rewrite its own sandbox rules.
+        let mut profile_file: Option<tempfile::NamedTempFile> = None;
+
+        let mut cmd = match self.tech {
+            SandboxTech::Bwrap => {
+                let mut c = tokio::process::Command::new("bwrap");
+                c.args(sandbox::bwrap_args(
+                    ws_canon,
+                    readable_prefixes,
+                    writable_prefixes,
+                ));
+                c.arg("--chdir")
+                    .arg(cwd)
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg(command);
+                c
+            }
+            SandboxTech::SandboxExec => {
+                let profile = sandbox::seatbelt_profile(
+                    ws_canon,
+                    readable_prefixes,
+                    writable_prefixes,
+                    egress.map(EgressGrant::port),
+                );
+                let file = tempfile::Builder::new()
+                    .prefix("ak-seatbelt-")
+                    .suffix(".sb")
+                    .tempfile()
+                    .map_err(KernelError::Io)?;
+                std::fs::write(file.path(), profile)?;
+                let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
+                c.arg("-f")
+                    .arg(file.path())
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(cwd);
+                profile_file = Some(file);
+                c
+            }
+            SandboxTech::None => {
+                if !self.config.dangerously_allow_unsandboxed {
+                    // Fail closed (AK-001): the workspace directory is not a
+                    // security boundary and must never silently become one.
+                    let _ = op;
+                    return Err(KernelError::BackendUnavailable {
+                        backend: "local".into(),
+                        reason: "no verified OS sandbox on this host: install bubblewrap (Linux) \
+                                 or ensure /usr/bin/sandbox-exec works (macOS). Shell execution \
+                                 fails closed; route the step to a stronger backend, or opt in \
+                                 to unsandboxed execution for trusted development code only via \
+                                 LocalBackendConfig::dangerously_allow_unsandboxed."
+                            .into(),
+                    });
+                }
+                let mut c = tokio::process::Command::new("/bin/sh");
+                c.arg("-c").arg(command).current_dir(cwd);
+                c
+            }
+        };
+
+        // Environment scrub: cleared, then a minimal safe set plus the
+        // explicitly pre-authorized action environment. TMPDIR points at a
+        // workspace-internal scratch dir the sandbox allows writes to.
+        cmd.env_clear()
+            .env("PATH", host_path)
+            .env("HOME", ws_canon)
+            .env("TMPDIR", &scratch)
+            .env("LANG", "C.UTF-8");
+        // Standard proxy environment: pip/cargo/npm/git/curl all speak it.
+        // The token-bearing URL is the workload's only route out.
+        if let Some(grant) = egress {
+            let url = grant.proxy_url();
+            cmd.env("HTTP_PROXY", &url)
+                .env("HTTPS_PROXY", &url)
+                .env("http_proxy", &url)
+                .env("https_proxy", &url);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        #[cfg(unix)]
+        cmd.process_group(0);
+        Ok((cmd, profile_file))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_shell(
         &self,
@@ -323,6 +497,7 @@ impl LocalBackend {
         budget: &ResourceBudget,
         readable_prefixes: &[String],
         writable_prefixes: &[String],
+        egress_domains: &[String],
     ) -> KernelResult<ExecResult> {
         if budget.cpu_ms == 0 {
             return Err(denial(
@@ -343,88 +518,24 @@ impl LocalBackend {
                 "cwd does not exist in the workspace",
             ));
         }
-
-        let host_path =
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
         let ws_canon = workspace.canonicalize()?;
-        let scratch = ws_canon.join(sandbox::SCRATCH_DIR);
-        std::fs::create_dir_all(&scratch)?;
-
-        // Profile files live outside the workspace so a confined shell can
-        // never rewrite its own sandbox rules.
-        let mut profile_file: Option<tempfile::NamedTempFile> = None;
-
-        let mut cmd = match self.tech {
-            SandboxTech::Bwrap => {
-                let mut c = tokio::process::Command::new("bwrap");
-                c.args(sandbox::bwrap_args(
-                    &ws_canon,
-                    readable_prefixes,
-                    writable_prefixes,
-                ));
-                c.arg("--chdir")
-                    .arg(&cwd)
-                    .arg("/bin/sh")
-                    .arg("-c")
-                    .arg(command);
-                c
-            }
-            SandboxTech::SandboxExec => {
-                let profile =
-                    sandbox::seatbelt_profile(&ws_canon, readable_prefixes, writable_prefixes);
-                let file = tempfile::Builder::new()
-                    .prefix("ak-seatbelt-")
-                    .suffix(".sb")
-                    .tempfile()
-                    .map_err(KernelError::Io)?;
-                std::fs::write(file.path(), profile)?;
-                let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
-                c.arg("-f")
-                    .arg(file.path())
-                    .arg("/bin/sh")
-                    .arg("-c")
-                    .arg(command)
-                    .current_dir(&cwd);
-                profile_file = Some(file);
-                c
-            }
-            SandboxTech::None => {
-                if !self.config.dangerously_allow_unsandboxed {
-                    // Fail closed (AK-001): the workspace directory is not a
-                    // security boundary and must never silently become one.
-                    return Err(KernelError::BackendUnavailable {
-                        backend: "local".into(),
-                        reason: "no verified OS sandbox on this host: install bubblewrap (Linux) \
-                                 or ensure /usr/bin/sandbox-exec works (macOS). Shell execution \
-                                 fails closed; route the step to a stronger backend, or opt in \
-                                 to unsandboxed execution for trusted development code only via \
-                                 LocalBackendConfig::dangerously_allow_unsandboxed."
-                            .into(),
-                    });
-                }
-                let mut c = tokio::process::Command::new("/bin/sh");
-                c.arg("-c").arg(command).current_dir(&cwd);
-                c
-            }
-        };
-
-        // Environment scrub: cleared, then a minimal safe set plus the
-        // explicitly pre-authorized action environment. TMPDIR points at a
-        // workspace-internal scratch dir the sandbox allows writes to.
-        cmd.env_clear()
-            .env("PATH", host_path)
-            .env("HOME", &ws_canon)
-            .env("TMPDIR", &scratch)
-            .env("LANG", "C.UTF-8");
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
+        let egress = self
+            .egress_grant(egress_domains, budget.network_bytes)
+            .await?;
+        let (mut cmd, profile_file) = self.build_confined_command(
+            "proc.shell",
+            &ws_canon,
+            &cwd,
+            command,
+            env,
+            readable_prefixes,
+            writable_prefixes,
+            egress.as_ref(),
+        )?;
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
 
         let child = cmd.spawn().map_err(|e| KernelError::BackendUnavailable {
             backend: "local".into(),
@@ -432,8 +543,10 @@ impl LocalBackend {
         })?;
         let pid = child.id();
 
+        let network_bytes = |g: &Option<EgressGrant>| g.as_ref().map_or(0, EgressGrant::used_bytes);
         let outcome = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => Ok(ExecResult {
+                network_bytes: network_bytes(&egress),
                 exit_code: output.status.code().unwrap_or(-1),
                 stdout: cap(output.stdout, self.config.max_capture_bytes),
                 stderr: cap(output.stderr, self.config.max_capture_bytes),
@@ -451,6 +564,7 @@ impl LocalBackend {
                         .status();
                 }
                 Ok(ExecResult {
+                    network_bytes: network_bytes(&egress),
                     exit_code: -1,
                     stdout: Vec::new(),
                     stderr: format!(
@@ -462,7 +576,252 @@ impl LocalBackend {
             }
         };
         drop(profile_file);
+        // The grant drops here: the step's proxy token is revoked the moment
+        // the step ends.
         outcome
+    }
+
+    // ------------------------------------------------- process sessions
+
+    /// Start a persistent, sandboxed process session on the branch.
+    #[allow(clippy::too_many_arguments)]
+    async fn proc_start(
+        &self,
+        workspace: &Path,
+        branch: &ak_core::ids::BranchId,
+        command: &str,
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
+        name: Option<String>,
+        budget: &ResourceBudget,
+        readable_prefixes: &[String],
+        writable_prefixes: &[String],
+        egress_domains: &[String],
+    ) -> KernelResult<ExecResult> {
+        let cwd = match cwd {
+            Some(c) => resolve_confined("proc.start", workspace, c, &[])?,
+            None => workspace.to_path_buf(),
+        };
+        if !cwd.is_dir() {
+            return Err(denial(
+                DenialCode::ConstraintViolated,
+                "proc.start",
+                "cwd does not exist in the workspace",
+            ));
+        }
+        let ws_canon = workspace.canonicalize()?;
+        // The grant lives as long as the process session: a dev server keeps
+        // its (domain-scoped, byte-capped) egress until it exits or the
+        // branch is discarded.
+        let egress = self
+            .egress_grant(egress_domains, budget.network_bytes)
+            .await?;
+        let (mut cmd, profile_file) = self.build_confined_command(
+            "proc.start",
+            &ws_canon,
+            &cwd,
+            command,
+            env,
+            readable_prefixes,
+            writable_prefixes,
+            egress.as_ref(),
+        )?;
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn().map_err(|e| KernelError::BackendUnavailable {
+            backend: "local".into(),
+            reason: format!("failed to spawn: {e}"),
+        })?;
+        let session = self.processes.adopt(
+            branch,
+            name,
+            command.to_string(),
+            child,
+            profile_file,
+            egress,
+            self.config.max_log_buffer_bytes,
+        );
+        Ok(ExecResult {
+            network_bytes: 0,
+            exit_code: 0,
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "process": session.id,
+                "pid": session.pid,
+                "name": session.name,
+            }))
+            .unwrap_or_default(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn proc_fail(msg: impl Into<String>) -> ExecResult {
+        ExecResult {
+            network_bytes: 0,
+            exit_code: 1,
+            stdout: Vec::new(),
+            stderr: msg.into().into_bytes(),
+        }
+    }
+
+    fn session(
+        &self,
+        branch: &ak_core::ids::BranchId,
+        process: &str,
+    ) -> Result<ProcessSession, ExecResult> {
+        self.processes.get(branch, process).ok_or_else(|| {
+            Self::proc_fail(format!(
+                "error: unknown process `{process}` on this branch (processes are branch-scoped \
+                 and do not survive forks; use proc.status with an empty `process` to list)"
+            ))
+        })
+    }
+
+    async fn proc_stdin(
+        &self,
+        branch: &ak_core::ids::BranchId,
+        process: &str,
+        data_b64: &str,
+        close: bool,
+    ) -> KernelResult<ExecResult> {
+        let data = b64::decode(data_b64).map_err(|e| {
+            denial(
+                DenialCode::ConstraintViolated,
+                "proc.stdin",
+                format!("invalid base64: {e}"),
+            )
+        })?;
+        let session = match self.session(branch, process) {
+            Ok(s) => s,
+            Err(fail) => return Ok(fail),
+        };
+        let mut stdin = session.stdin.lock().await;
+        let Some(handle) = stdin.as_mut() else {
+            return Ok(Self::proc_fail("error: stdin is already closed"));
+        };
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = handle.write_all(&data).await {
+            return Ok(Self::proc_fail(format!("error: stdin write failed: {e}")));
+        }
+        if let Err(e) = handle.flush().await {
+            return Ok(Self::proc_fail(format!("error: stdin flush failed: {e}")));
+        }
+        if close {
+            *stdin = None; // dropping the handle closes the pipe
+        }
+        Ok(ExecResult {
+            network_bytes: 0,
+            exit_code: 0,
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "process": process,
+                "bytes_written": data.len(),
+                "stdin_closed": close,
+            }))
+            .unwrap_or_default(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn proc_logs(
+        &self,
+        branch: &ak_core::ids::BranchId,
+        process: &str,
+        from_offset: u64,
+        max_bytes: Option<u64>,
+    ) -> ExecResult {
+        let session = match self.session(branch, process) {
+            Ok(s) => s,
+            Err(fail) => return fail,
+        };
+        let max = max_bytes
+            .unwrap_or(64 * 1024)
+            .min(self.config.max_capture_bytes as u64) as usize;
+        let (effective, data, base, total) = {
+            let logs = session.logs.lock().unwrap_or_else(|e| e.into_inner());
+            let (eff, data) = logs.read_from(from_offset, max);
+            (eff, data, logs.base_offset(), logs.total())
+        };
+        let exit_code = session.exit_code();
+        let next_offset = effective + data.len() as u64;
+        ExecResult {
+            network_bytes: 0,
+            exit_code: 0,
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "process": process,
+                "requested_offset": from_offset,
+                "effective_offset": effective,
+                "dropped_bytes": effective.saturating_sub(from_offset),
+                "next_offset": next_offset,
+                "base_offset": base,
+                "total_bytes": total,
+                "running": exit_code.is_none(),
+                "exit_code": exit_code,
+                "eof": exit_code.is_some() && next_offset >= total,
+                "data": String::from_utf8_lossy(&data),
+            }))
+            .unwrap_or_default(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn proc_signal(
+        &self,
+        branch: &ak_core::ids::BranchId,
+        process: &str,
+        signal: &str,
+    ) -> KernelResult<ExecResult> {
+        if !matches!(signal, "int" | "term" | "kill") {
+            return Err(denial(
+                DenialCode::ConstraintViolated,
+                "proc.signal",
+                format!("unknown signal `{signal}`: use int|term|kill"),
+            ));
+        }
+        let session = match self.session(branch, process) {
+            Ok(s) => s,
+            Err(fail) => return Ok(fail),
+        };
+        Ok(match session.signal(signal) {
+            Ok(()) => ExecResult {
+                network_bytes: 0,
+                exit_code: 0,
+                stdout: serde_json::to_vec(&serde_json::json!({
+                    "process": process,
+                    "signaled": signal,
+                }))
+                .unwrap_or_default(),
+                stderr: Vec::new(),
+            },
+            Err(e) => Self::proc_fail(format!("error: {e}")),
+        })
+    }
+
+    fn proc_status(&self, branch: &ak_core::ids::BranchId, process: &str) -> ExecResult {
+        if process.is_empty() {
+            let list: Vec<serde_json::Value> = self
+                .processes
+                .list(branch)
+                .iter()
+                .map(|s| s.status_json())
+                .collect();
+            return ExecResult {
+                network_bytes: 0,
+                exit_code: 0,
+                stdout: serde_json::to_vec(&serde_json::json!({ "processes": list }))
+                    .unwrap_or_default(),
+                stderr: Vec::new(),
+            };
+        }
+        match self.session(branch, process) {
+            Ok(s) => ExecResult {
+                network_bytes: 0,
+                exit_code: 0,
+                stdout: serde_json::to_vec(&s.status_json()).unwrap_or_default(),
+                stderr: Vec::new(),
+            },
+            Err(fail) => fail,
+        }
     }
 }
 
@@ -487,6 +846,10 @@ impl Backend for LocalBackend {
         let before = scan_workspace(&workspace);
         let started = Instant::now();
 
+        // Steps that only interact with a live process session cannot be
+        // re-executed later; record them honestly as audit-only.
+        let mut replay_class = ReplayClass::FilesystemOnly;
+
         let result = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.run_shell(
@@ -497,18 +860,67 @@ impl Backend for LocalBackend {
                     &req.budget,
                     &req.readable_prefixes,
                     &req.writable_prefixes,
+                    &req.egress_domains,
                 )
                 .await?
+            }
+            ActionKind::ProcessStart {
+                command,
+                cwd,
+                env,
+                name,
+            } => {
+                replay_class = ReplayClass::AuditOnly;
+                self.proc_start(
+                    &workspace,
+                    &req.branch,
+                    command,
+                    cwd.as_deref(),
+                    env,
+                    name.clone(),
+                    &req.budget,
+                    &req.readable_prefixes,
+                    &req.writable_prefixes,
+                    &req.egress_domains,
+                )
+                .await?
+            }
+            ActionKind::ProcessStdin {
+                process,
+                data_b64,
+                close,
+            } => {
+                replay_class = ReplayClass::AuditOnly;
+                self.proc_stdin(&req.branch, process, data_b64, *close)
+                    .await?
+            }
+            ActionKind::ProcessLogs {
+                process,
+                from_offset,
+                max_bytes,
+            } => {
+                replay_class = ReplayClass::AuditOnly;
+                self.proc_logs(&req.branch, process, *from_offset, *max_bytes)
+            }
+            ActionKind::ProcessSignal { process, signal } => {
+                replay_class = ReplayClass::AuditOnly;
+                self.proc_signal(&req.branch, process, signal)?
+            }
+            ActionKind::ProcessStatus { process } => {
+                replay_class = ReplayClass::AuditOnly;
+                self.proc_status(&req.branch, process)
             }
             ActionKind::ReadFile { path } => {
                 let full = resolve_confined("fs.read", &workspace, path, &req.readable_prefixes)?;
                 match std::fs::read(&full) {
                     Ok(bytes) => ExecResult {
+                        network_bytes: 0,
                         exit_code: 0,
                         stdout: cap(bytes, self.config.max_capture_bytes),
                         stderr: Vec::new(),
                     },
                     Err(e) => ExecResult {
+                        network_bytes: 0,
                         exit_code: 1,
                         stdout: Vec::new(),
                         stderr: format!("read failed: {e}").into_bytes(),
@@ -529,6 +941,7 @@ impl Backend for LocalBackend {
                 }
                 std::fs::write(&full, &contents)?;
                 ExecResult {
+                    network_bytes: 0,
                     exit_code: 0,
                     stdout: Vec::new(),
                     stderr: Vec::new(),
@@ -543,11 +956,13 @@ impl Backend for LocalBackend {
                 };
                 match outcome {
                     Ok(()) => ExecResult {
+                        network_bytes: 0,
                         exit_code: 0,
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                     },
                     Err(e) => ExecResult {
+                        network_bytes: 0,
                         exit_code: 1,
                         stdout: Vec::new(),
                         stderr: format!("delete failed: {e}").into_bytes(),
@@ -558,7 +973,9 @@ impl Backend for LocalBackend {
                 return Err(denial(
                     DenialCode::PolicyForbidden,
                     &other.required_operation().0,
-                    "the local backend only executes shell and workspace file actions",
+                    "the local backend executes shell, process-session and workspace file \
+                     actions; HTTP reads, MCP invocations and connector operations run on the \
+                     kernel's connector plane",
                 ))
             }
         };
@@ -573,18 +990,26 @@ impl Backend for LocalBackend {
             stdout: result.stdout,
             stderr: result.stderr,
             // Wall-clock elapsed as the CPU proxy; captured output bytes are
-            // charged against the memory dimension as a proxy.
+            // charged against the memory dimension as a proxy; egress bytes
+            // are real, counted at the proxy.
             usage: ResourceBudget {
                 cpu_ms: elapsed_ms,
                 memory_bytes: captured,
+                network_bytes: result.network_bytes,
                 ..ResourceBudget::zero()
             },
             paths_written,
-            replay_class: ReplayClass::FilesystemOnly,
+            replay_class,
         })
     }
 
     async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
+        // Kill the branch's process sessions before removing its workspace:
+        // a discarded branch must leave no running side channel behind.
+        let killed = self.processes.kill_branch(branch);
+        if killed > 0 {
+            tracing::info!(branch = %branch, killed, "killed process sessions on discard");
+        }
         let dir = self.config.root.join(branch.as_str());
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;

@@ -73,9 +73,15 @@ dependencies = [
 name = "ak-api"
 version = "0.7.0"
 dependencies = [
+ "ak-backend-cube",
+ "ak-backend-forkd",
+ "ak-backend-gvisor",
+ "ak-backend-kubernetes",
  "ak-backend-local",
  "ak-causal-ledger",
  "ak-connector-github",
+ "ak-connector-http",
+ "ak-connector-mcp",
  "ak-core",
  "ak-effect-broker",
  "ak-identity",
@@ -166,11 +172,13 @@ version = "0.7.0"
 dependencies = [
  "ak-core",
  "async-trait",
+ "axum",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

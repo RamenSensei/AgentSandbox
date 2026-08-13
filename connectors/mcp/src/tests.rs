@@ -210,3 +210,42 @@ fn spawn_test_server_sync() -> (tokio::io::DuplexStream, tokio::io::DuplexStream
     let (c, _d) = tokio::io::duplex(1024);
     (b, c)
 }
+
+// ------------------------------------------------------- spawn trust boundary
+
+/// The server script answers `tools/list` with a tool named after what it
+/// sees in its environment — the probe for env leakage across the spawn
+/// boundary.
+const ENV_PROBE_SERVER: &str = r#"read line; printf '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"env:%s"}]}}\n' "${AK_TEST_HOST_SECRET:-scrubbed}""#;
+
+#[tokio::test]
+async fn spawn_scrubs_the_host_environment() {
+    // A secret in the embedder's environment must never reach the server.
+    std::env::set_var("AK_TEST_HOST_SECRET", "leaked-token");
+    let gw = McpGateway::spawn("probe", "/bin/sh", &["-c", ENV_PROBE_SERVER], None).unwrap();
+    let tools = gw.list_tools().await.unwrap();
+    assert_eq!(
+        tools[0]["name"], "env:scrubbed",
+        "host env leaked into the MCP server: {tools:?}"
+    );
+    std::env::remove_var("AK_TEST_HOST_SECRET");
+}
+
+#[tokio::test]
+async fn spawn_with_grants_only_the_explicit_environment() {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("AK_TEST_HOST_SECRET".to_string(), "granted".to_string());
+    let gw = McpGateway::spawn_with(
+        "probe",
+        "/bin/sh",
+        &["-c", ENV_PROBE_SERVER],
+        None,
+        SpawnOptions {
+            env,
+            ..SpawnOptions::default()
+        },
+    )
+    .unwrap();
+    let tools = gw.list_tools().await.unwrap();
+    assert_eq!(tools[0]["name"], "env:granted");
+}

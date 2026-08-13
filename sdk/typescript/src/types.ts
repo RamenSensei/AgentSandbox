@@ -47,6 +47,17 @@ export type ActionKind =
   | { kind: "read_file"; path: string }
   | { kind: "write_file"; path: string; contents_b64: string }
   | { kind: "delete_path"; path: string }
+  | {
+      kind: "process_start";
+      command: string;
+      cwd?: string | null;
+      env?: Record<string, string>;
+      name?: string | null;
+    }
+  | { kind: "process_stdin"; process: string; data_b64: string; close?: boolean }
+  | { kind: "process_logs"; process: string; from_offset?: number; max_bytes?: number | null }
+  | { kind: "process_signal"; process: string; signal: "int" | "term" | "kill" }
+  | { kind: "process_status"; process?: string }
   | { kind: "http_read"; url: string }
   | { kind: "mcp_invoke"; server: string; tool: string; arguments: Json }
   | { kind: "connector_op"; connector: string; operation: string; params: Json }
@@ -74,6 +85,33 @@ export const WriteFile = (path: string, contents_b64: string): ActionKind => ({
   contents_b64,
 });
 export const DeletePath = (path: string): ActionKind => ({ kind: "delete_path", path });
+export const ProcessStart = (
+  command: string,
+  opts: { cwd?: string; env?: Record<string, string>; name?: string } = {},
+): ActionKind => ({ kind: "process_start", command, ...opts });
+export const ProcessStdin = (
+  process: string,
+  data_b64: string,
+  close = false,
+): ActionKind => ({ kind: "process_stdin", process, data_b64, close });
+export const ProcessLogs = (
+  process: string,
+  from_offset = 0,
+  max_bytes?: number,
+): ActionKind => ({
+  kind: "process_logs",
+  process,
+  from_offset,
+  max_bytes: max_bytes ?? null,
+});
+export const ProcessSignal = (
+  process: string,
+  signal: "int" | "term" | "kill",
+): ActionKind => ({ kind: "process_signal", process, signal });
+export const ProcessStatus = (process = ""): ActionKind => ({
+  kind: "process_status",
+  process,
+});
 export const HttpRead = (url: string): ActionKind => ({ kind: "http_read", url });
 export const McpInvoke = (server: string, tool: string, args: Json = null): ActionKind => ({
   kind: "mcp_invoke",
@@ -263,6 +301,32 @@ export interface StepResult {
   /** Branch head after the step (unchanged when the step was denied). */
   state: string; // "st-..."
   observation: Observation;
+}
+
+/** Result of steps/execute_auto: the step plus the lease the kernel
+ * selected or minted on the caller's behalf. */
+export interface AutoStepResult extends StepResult {
+  lease: string; // "lease-..."
+  lease_minted: boolean;
+}
+
+/** One page of a full recorded output blob (GET /v1/raw/{hash}). */
+export interface RawPage {
+  hash: string;
+  total_bytes: number;
+  offset: number;
+  returned_bytes: number;
+  next_offset: number | null;
+  data: string;
+}
+
+/** Line matches of a raw-blob grep (GET /v1/raw/{hash}?grep=...). */
+export interface RawGrep {
+  hash: string;
+  total_bytes: number;
+  grep: string;
+  matches: { offset: number; line: string }[];
+  matches_truncated: boolean;
 }
 
 export interface LedgerEvent {

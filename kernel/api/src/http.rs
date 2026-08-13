@@ -78,13 +78,16 @@ pub fn router_with_auth(kernel: Arc<Kernel>, auth: AuthConfig) -> Router {
         .route("/v1/episodes", post(create_episode))
         .route("/v1/episodes/:id", get(describe_episode))
         .route("/v1/steps/execute", post(execute_step))
+        .route("/v1/steps/execute_auto", post(execute_step_auto))
         .route("/v1/steps/:id/explain", get(explain_step))
         .route("/v1/steps/:id/retry", post(retry_step))
         .route("/v1/branches/:id/fork", post(fork_branch))
         .route("/v1/branches/:id/diff", post(diff_branch))
         .route("/v1/branches/:id/merge", post(merge_branch))
         .route("/v1/branches/:id/discard", post(discard_branch))
+        .route("/v1/branches/:id/explore", post(explore_branch))
         .route("/v1/branches/:id/compare/:other", get(compare_branches))
+        .route("/v1/raw/:hash", get(fetch_raw))
         .route("/v1/capabilities/request", post(request_capability))
         .route("/v1/capabilities/delegate", post(delegate_capability))
         .route("/v1/capabilities/revoke", post(revoke_capability))
@@ -185,6 +188,149 @@ async fn execute_step(
             .into_response());
     }
     Ok(Json(serde_json::to_value(&result).map_err(KernelError::from)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct ExecuteStepAutoRequest {
+    principal: PrincipalId,
+    branch: BranchId,
+    /// The action kind alone — the kernel resolves the lease and budget.
+    kind: ak_core::action::ActionKind,
+    #[serde(default)]
+    intent_hint: Option<String>,
+    #[serde(default)]
+    budget: Option<ResourceBudget>,
+}
+
+/// `steps/execute_auto`: execute with automatic lease resolution. The
+/// response carries the step result plus the lease that authorized it.
+async fn execute_step_auto(
+    State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<ExecuteStepAutoRequest>,
+) -> ApiResult<Response> {
+    let principal = auth.act_as(&req.principal)?;
+    auth.require_owner(&k.branch_owner(&req.branch)?)?;
+    let auto = k
+        .execute_step_auto(
+            &principal,
+            &req.branch,
+            req.kind,
+            req.intent_hint,
+            req.budget,
+        )
+        .await?;
+    if let ak_core::Observation::Denied { denial } = &auto.result.observation {
+        let envelope = ErrorEnvelope {
+            code: "DENIED".into(),
+            message: denial.reason.clone(),
+            denial: Some(denial.clone()),
+        };
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "step": auto.result.step,
+                "state": auto.result.state,
+                "observation": auto.result.observation,
+                "lease": auto.lease,
+                "lease_minted": auto.lease_minted,
+                "error": envelope,
+            })),
+        )
+            .into_response());
+    }
+    Ok(Json(serde_json::to_value(&auto).map_err(KernelError::from)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct ExploreRequest {
+    principal: PrincipalId,
+    #[serde(flatten)]
+    options: crate::kernel::ExploreOptions,
+}
+
+/// `branches/{id}/explore`: server-side parallel candidate exploration.
+async fn explore_branch(
+    State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+    Json(req): Json<ExploreRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let id = BranchId::parse(&id)?;
+    auth.require_owner(&k.branch_owner(&id)?)?;
+    let principal = auth.act_as(&req.principal)?;
+    let report = k.explore(&principal, &id, req.options).await?;
+    Ok(Json(
+        serde_json::to_value(&report).map_err(KernelError::from)?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct RawParams {
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
+    /// Case-sensitive substring search over the blob's lines.
+    #[serde(default)]
+    grep: Option<String>,
+}
+
+/// `GET /v1/raw/{hash}`: paginated access to a full recorded output blob.
+/// Observations reference these blobs by content hash; this route closes the
+/// loop so an agent can actually read past the distilled head/tail (compiler
+/// errors in the middle, test summaries at the end) without a human pulling
+/// files off the server. Content hashes are unguessable (SHA-256), and every
+/// caller is authenticated by the surrounding middleware.
+async fn fetch_raw(
+    State(k): State<Arc<Kernel>>,
+    Extension(_auth): Extension<AuthContext>,
+    Path(hash): Path<String>,
+    Query(p): Query<RawParams>,
+) -> ApiResult<impl IntoResponse> {
+    const MAX_SLICE: u64 = 1 << 20;
+    const MAX_GREP_MATCHES: usize = 200;
+    let bytes = k.fetch_raw(&ak_core::hash::ContentHash(hash.clone()))?;
+    let total = bytes.len() as u64;
+    if let Some(pattern) = &p.grep {
+        // Line-oriented search with byte offsets, so an agent can grep a big
+        // log and then page precisely around the hits.
+        let mut matches = Vec::new();
+        let mut truncated = false;
+        let mut offset: u64 = 0;
+        for line in String::from_utf8_lossy(&bytes).split_inclusive('\n') {
+            if line.contains(pattern.as_str()) {
+                if matches.len() >= MAX_GREP_MATCHES {
+                    truncated = true;
+                    break;
+                }
+                matches.push(serde_json::json!({
+                    "offset": offset,
+                    "line": line.trim_end_matches('\n'),
+                }));
+            }
+            offset += line.len() as u64;
+        }
+        return Ok(Json(serde_json::json!({
+            "hash": hash,
+            "total_bytes": total,
+            "grep": pattern,
+            "matches": matches,
+            "matches_truncated": truncated,
+        })));
+    }
+    let offset = p.offset.unwrap_or(0).min(total);
+    let limit = p.limit.unwrap_or(64 * 1024).min(MAX_SLICE);
+    let end = offset.saturating_add(limit).min(total);
+    let slice = &bytes[offset as usize..end as usize];
+    Ok(Json(serde_json::json!({
+        "hash": hash,
+        "total_bytes": total,
+        "offset": offset,
+        "returned_bytes": slice.len(),
+        "next_offset": if end < total { Some(end) } else { None },
+        "data": String::from_utf8_lossy(slice),
+    })))
 }
 
 async fn fork_branch(

@@ -33,12 +33,13 @@
 
 use ak_core::capability::glob_match;
 use ak_core::effect::{EffectClass, EffectContract};
+use ak_core::net::is_forbidden_ip;
 use ak_core::traits::{CommitResult, Connector, PreparedEffect};
 use ak_core::{KernelError, KernelResult};
 use async_trait::async_trait;
 use reqwest::Url;
 use serde_json::{json, Value};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 
@@ -97,38 +98,6 @@ pub type Resolver = dyn Fn(&str, u16) -> std::io::Result<Vec<IpAddr>> + Send + S
 /// Default resolver backed by the system's `ToSocketAddrs`.
 fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
     Ok((host, port).to_socket_addrs()?.map(|a| a.ip()).collect())
-}
-
-/// The cloud metadata endpoints, refused explicitly (defense in depth: both
-/// already fall in ranges [`is_forbidden_ip`] refuses).
-const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
-const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254);
-
-/// Is this address in a range that must never be reached from a guest?
-fn is_forbidden_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local() // includes 169.254.169.254 metadata
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || *v4 == METADATA_V4
-                // CGNAT 100.64.0.0/10
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // unique local fc00::/7 (includes fd00:ec2::254 metadata)
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                // link-local fe80::/10
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || *v6 == METADATA_V6
-                // v4-mapped: recurse
-                || v6.to_ipv4_mapped().map(|m| is_forbidden_ip(&IpAddr::V4(m))).unwrap_or(false)
-        }
-    }
 }
 
 impl HttpConnector {
@@ -339,6 +308,20 @@ impl Connector for HttpConnector {
     /// [`HttpConnector::classify`] for the per-target class.
     fn operations(&self) -> Vec<(String, EffectClass)> {
         vec![(OP_HTTP_GET.into(), EffectClass::OpaqueExternal)]
+    }
+
+    /// Per-invocation class: `Pure` for guard-passing, allowlisted targets;
+    /// `OpaqueExternal` otherwise (including unparseable/guard-refused URLs —
+    /// those fail later in canonicalize/commit anyway).
+    fn classify_operation(&self, operation: &str, arguments: &Value) -> EffectClass {
+        if operation != OP_HTTP_GET {
+            return EffectClass::OpaqueExternal;
+        }
+        arguments
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(|url| self.classify(url).ok())
+            .unwrap_or(EffectClass::OpaqueExternal)
     }
 
     #[instrument(skip(self, args))]

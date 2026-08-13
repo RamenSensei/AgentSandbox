@@ -10,6 +10,37 @@ use crate::replay::ReplayClass;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Path components excluded from workspace snapshots by default.
+///
+/// These are the **reusable cache / scratch tier** of workspace state
+/// (dependency trees, build caches, virtualenvs, sandbox scratch): they are
+/// reproducible from lockfiles, dominate workspace size by orders of
+/// magnitude, and would otherwise make every step pay a cost proportional to
+/// total workspace size instead of the step's change. They are *left in
+/// place* on materialization (never deleted), so a branch keeps its warm
+/// caches while its semantic history stays cache-free.
+///
+/// Deliberately **not** ignored: `.git` (repository state is a persistent
+/// artifact needed for correct rollback/merge semantics).
+pub const DEFAULT_SNAPSHOT_IGNORES: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".cache",
+    ".aktmp",
+    ".DS_Store",
+];
+
+/// Is this path component in the default snapshot-ignore set?
+pub fn is_ignored_component(name: &str) -> bool {
+    DEFAULT_SNAPSHOT_IGNORES.contains(&name)
+}
+
 /// One file-level change in the workspace adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op")]

@@ -7,6 +7,7 @@
 import { DenialError, KernelError, TransportError } from "./errors.js";
 import type {
   ActionKind,
+  AutoStepResult,
   Branch,
   BranchCompareResponse,
   CapabilityLease,
@@ -20,6 +21,8 @@ import type {
   LedgerEvent,
   OperatorResolution,
   PendingEffect,
+  RawGrep,
+  RawPage,
   Receipt,
   ReplayAuditResponse,
   ReplaySandboxReport,
@@ -208,6 +211,50 @@ export class Kernel {
   /** GET /v1/steps/{id}/explain */
   async explainStep(stepId: string): Promise<StepExplanation> {
     return this.request<StepExplanation>("GET", `/v1/steps/${stepId}/explain`);
+  }
+
+  /** POST /v1/steps/execute_auto — execute with automatic lease
+   * resolution: the kernel finds (or mints via policy) a lease for the
+   * action and clamps the budget into its envelope. The recommended call
+   * for agent loops: no lease bookkeeping. */
+  async executeStepAuto(params: {
+    principal: string;
+    branch: string;
+    kind: ActionKind;
+    intentHint?: string | undefined;
+    budget?: ResourceBudget | undefined;
+  }): Promise<AutoStepResult> {
+    const body: Record<string, unknown> = {
+      principal: params.principal,
+      branch: params.branch,
+      kind: params.kind,
+    };
+    if (params.intentHint !== undefined) body.intent_hint = params.intentHint;
+    if (params.budget !== undefined) body.budget = params.budget;
+    return this.request<AutoStepResult>("POST", "/v1/steps/execute_auto", body);
+  }
+
+  // -- raw output -------------------------------------------------------
+
+  /** GET /v1/raw/{hash} — one page of a full recorded output blob (the
+   * `full_output` hash every observation carries). */
+  async fetchRaw(
+    contentHash: string,
+    opts: { offset?: number; limit?: number } = {},
+  ): Promise<RawPage> {
+    const query = new URLSearchParams();
+    if (opts.offset !== undefined) query.set("offset", String(opts.offset));
+    if (opts.limit !== undefined) query.set("limit", String(opts.limit));
+    const qs = query.toString();
+    return this.request<RawPage>("GET", `/v1/raw/${contentHash}${qs ? `?${qs}` : ""}`);
+  }
+
+  /** GET /v1/raw/{hash}?grep=... — substring line search with byte offsets. */
+  async grepRaw(contentHash: string, pattern: string): Promise<RawGrep> {
+    return this.request<RawGrep>(
+      "GET",
+      `/v1/raw/${contentHash}?grep=${encodeURIComponent(pattern)}`,
+    );
   }
 
   /** POST /v1/steps/{id}/retry */
@@ -438,6 +485,25 @@ export class BranchHandle {
       branch: this.branch,
       action,
       lease: opts.lease,
+      intentHint: opts.intentHint,
+      budget: opts.budget,
+    });
+  }
+
+  /** Execute with automatic lease resolution — the recommended call for
+   * agent loops: no lease, no budget bookkeeping. */
+  async executeAuto(
+    kind: ActionKind,
+    opts: {
+      principal?: string;
+      intentHint?: string;
+      budget?: ResourceBudget;
+    } = {},
+  ): Promise<AutoStepResult> {
+    return this.kernel.executeStepAuto({
+      principal: opts.principal ?? this.principal,
+      branch: this.branch,
+      kind,
       intentHint: opts.intentHint,
       budget: opts.budget,
     });

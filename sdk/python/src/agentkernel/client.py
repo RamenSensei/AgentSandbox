@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from .errors import DenialError, KernelError, TransportError
 from .types import (
     ActionKind,
+    AutoStepResult,
     Branch,
     BranchComparison,
     CapabilityLease,
@@ -216,6 +217,59 @@ class Kernel:
     def explain_step(self, step_id: str) -> Dict[str, Json]:
         """GET /v1/steps/{id}/explain — the step's causal narrative."""
         return self._request("GET", f"/v1/steps/{step_id}/explain")
+
+    def execute_step_auto(
+        self,
+        principal: str,
+        branch: str,
+        action: ActionKind,
+        *,
+        intent_hint: Optional[str] = None,
+        budget: Optional[ResourceBudget] = None,
+    ) -> "AutoStepResult":
+        """POST /v1/steps/execute_auto — execute with automatic lease
+        resolution: the kernel finds (or mints via policy) a lease for the
+        action and clamps the budget into its envelope. No lease bookkeeping
+        in the agent loop."""
+        body: Dict[str, Any] = {
+            "principal": principal,
+            "branch": branch,
+            "kind": action.to_wire(),
+        }
+        if intent_hint is not None:
+            body["intent_hint"] = intent_hint
+        if budget is not None:
+            body["budget"] = budget.to_wire()
+        return AutoStepResult.from_wire(
+            self._request("POST", "/v1/steps/execute_auto", body)
+        )
+
+    # -- raw output -------------------------------------------------------
+
+    def fetch_raw(
+        self,
+        content_hash: str,
+        *,
+        offset: int = 0,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Json]:
+        """GET /v1/raw/{hash} — a page of a full recorded output blob.
+
+        Observations carry ``full_output`` content hashes; this retrieves
+        the bytes past the distilled head/tail. Returns {data, total_bytes,
+        offset, returned_bytes, next_offset}."""
+        return self._request(
+            "GET",
+            f"/v1/raw/{content_hash}",
+            query={"offset": offset, "limit": limit},
+        )
+
+    def grep_raw(self, content_hash: str, pattern: str) -> Dict[str, Json]:
+        """GET /v1/raw/{hash}?grep=... — substring line search with byte
+        offsets, for paging precisely around the hits."""
+        return self._request(
+            "GET", f"/v1/raw/{content_hash}", query={"grep": pattern}
+        )
 
     def retry_step(self, step_id: str) -> StepResult:
         """POST /v1/steps/{id}/retry (no request body)."""
@@ -441,6 +495,24 @@ class BranchHandle:
             self.branch,
             action,
             lease=lease,
+            intent_hint=intent_hint,
+            budget=budget,
+        )
+
+    def execute_auto(
+        self,
+        action: ActionKind,
+        *,
+        principal: Optional[str] = None,
+        intent_hint: Optional[str] = None,
+        budget: Optional[ResourceBudget] = None,
+    ) -> "AutoStepResult":
+        """Execute with automatic lease resolution — the recommended call
+        for agent loops: no lease, no budget bookkeeping."""
+        return self._kernel.execute_step_auto(
+            principal or self.principal,
+            self.branch,
+            action,
             intent_hint=intent_hint,
             budget=budget,
         )

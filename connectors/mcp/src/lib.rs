@@ -238,10 +238,29 @@ impl std::fmt::Debug for McpGateway {
     }
 }
 
+/// Spawn-time confinement for an MCP server process.
+///
+/// MCP servers are **low-trust tool processes**, not extensions of the
+/// control plane. By default they get a scrubbed environment (`PATH` only —
+/// no host tokens, no `HOME` secrets) and inherit nothing else; anything
+/// they need must be granted explicitly here.
+#[derive(Debug, Clone, Default)]
+pub struct SpawnOptions {
+    /// Environment variables granted to the server (on top of `PATH`).
+    pub env: BTreeMap<String, String>,
+    /// Working directory (a scratch/workspace dir, never the host repo).
+    pub cwd: Option<std::path::PathBuf>,
+    /// Sandbox wrapper argv prefix, e.g. a `bwrap`/`sandbox-exec` command
+    /// line ending right before the server command. Embedders with an OS
+    /// sandbox available should always set one.
+    pub wrapper: Vec<String>,
+}
+
 impl McpGateway {
     /// Spawn `command args…` as a child MCP server speaking newline-delimited
-    /// JSON-RPC on its stdio. If `manifest` is provided it must verify
-    /// against `manifest_public_key_hex`.
+    /// JSON-RPC on its stdio, with a **scrubbed environment** (see
+    /// [`SpawnOptions`]). If `manifest` is provided it must verify against
+    /// `manifest_public_key_hex`.
     #[instrument(skip(manifest))]
     pub fn spawn(
         server_name: &str,
@@ -249,9 +268,46 @@ impl McpGateway {
         args: &[&str],
         manifest: Option<(&SignedManifest, &str)>,
     ) -> KernelResult<Self> {
+        Self::spawn_with(
+            server_name,
+            command,
+            args,
+            manifest,
+            SpawnOptions::default(),
+        )
+    }
+
+    /// [`McpGateway::spawn`] with explicit confinement options.
+    #[instrument(skip(manifest, options))]
+    pub fn spawn_with(
+        server_name: &str,
+        command: &str,
+        args: &[&str],
+        manifest: Option<(&SignedManifest, &str)>,
+        options: SpawnOptions,
+    ) -> KernelResult<Self> {
         let manifest = Self::check_manifest(manifest)?;
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
+        let host_path =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        let mut cmd = if let Some((wrapper_bin, wrapper_args)) = options.wrapper.split_first() {
+            let mut c = tokio::process::Command::new(wrapper_bin);
+            c.args(wrapper_args).arg(command).args(args);
+            c
+        } else {
+            let mut c = tokio::process::Command::new(command);
+            c.args(args);
+            c
+        };
+        // Scrub: the server sees PATH plus exactly what was granted — never
+        // the embedder's tokens, keys or HOME.
+        cmd.env_clear().env("PATH", host_path);
+        for (k, v) in &options.env {
+            cmd.env(k, v);
+        }
+        if let Some(cwd) = &options.cwd {
+            cmd.current_dir(cwd);
+        }
+        let mut child = cmd
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -264,7 +320,10 @@ impl McpGateway {
             .stdout
             .take()
             .ok_or_else(|| conn_err("child stdout unavailable"))?;
-        info!(server = server_name, command, "spawned mcp server");
+        info!(
+            server = server_name,
+            command, "spawned mcp server (scrubbed env)"
+        );
         Ok(Self {
             server_name: server_name.to_string(),
             manifest,

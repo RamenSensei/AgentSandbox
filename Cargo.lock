@@ -175,6 +175,7 @@ dependencies = [
  "ak-core",
  "async-trait",
  "axum",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

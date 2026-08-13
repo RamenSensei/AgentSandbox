@@ -39,7 +39,14 @@
 //!   workspace-internal scratch dir) and `LANG` are provided, plus any
 //!   explicitly pre-authorized variables carried on the action itself;
 //! - a **wall-clock timeout** derived from `budget.cpu_ms`, with
-//!   kill-on-timeout via the child's process group where available;
+//!   kill-on-timeout of the child's whole **process group** (the child is
+//!   spawned as a group leader, so the sandbox wrapper's descendants die
+//!   with it);
+//! - **honest resource metering** for shell steps: the child is reaped with
+//!   `wait4`, so `usage.cpu_ms` is real user+system CPU time and
+//!   `usage.memory_bytes` the real peak RSS — not wall-clock or byte-count
+//!   proxies. (File actions and process-session operations, which reap no
+//!   child, keep the proxies.) Egress bytes are counted at the proxy;
 //! - **output capture with byte caps** (see [`LocalBackendConfig::max_capture_bytes`]);
 //! - **in-process path confinement** for structured file actions: every path
 //!   is verified to be inside the workspace (no absolute paths, no `..`,
@@ -61,6 +68,8 @@ use ak_core::replay::ReplayClass;
 use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -369,12 +378,115 @@ fn cap(mut bytes: Vec<u8>, max: usize) -> Vec<u8> {
     bytes
 }
 
+/// Honest child metering from `wait4` rusage: what the process actually
+/// consumed, not a proxy.
+#[derive(Debug, Clone, Copy)]
+struct Meter {
+    /// User + system CPU time, milliseconds.
+    cpu_ms: u64,
+    /// Peak resident set size, bytes (normalized: macOS reports bytes,
+    /// Linux kilobytes).
+    max_rss_bytes: u64,
+}
+
 struct ExecResult {
     exit_code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     /// Egress bytes transferred through the proxy during this execution.
     network_bytes: u64,
+    /// Real reaped-child usage. `None` for paths that do not reap a child
+    /// with rusage (file actions, process-session operations) — those fall
+    /// back to the wall-clock / captured-bytes approximations.
+    meter: Option<Meter>,
+}
+
+/// Result of spawning + reaping one shell child on the blocking pool.
+struct Reaped {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    meter: Option<Meter>,
+}
+
+/// Spawn `cmd`, report its pid over `pid_tx`, drain both output pipes, and
+/// reap the child with `wait4` so its rusage (real CPU time, peak RSS)
+/// becomes the step's [`Meter`].
+fn spawn_and_reap(
+    mut cmd: std::process::Command,
+    pid_tx: tokio::sync::oneshot::Sender<u32>,
+) -> std::io::Result<Reaped> {
+    use std::io::Read;
+    let mut child = cmd.spawn()?;
+    let _ = pid_tx.send(child.id());
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let mut stdout = Vec::new();
+    let _ = stdout_pipe.read_to_end(&mut stdout);
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    #[cfg(unix)]
+    {
+        let pid = child.id() as libc::pid_t;
+        let mut status: libc::c_int = 0;
+        // SAFETY: a zeroed rusage is a valid out-parameter for wait4.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: pid is our own un-reaped child; pointers are valid for
+            // the duration of the call. std's Child does not reap on drop
+            // and `child.wait()` is never called, so this is the only reap.
+            let r = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+            if r == pid {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                return Err(err);
+            }
+        }
+        let exit_code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        let cpu_us = (usage.ru_utime.tv_sec.max(0) as u64)
+            .saturating_mul(1_000_000)
+            .saturating_add(usage.ru_utime.tv_usec.max(0) as u64)
+            .saturating_add(
+                (usage.ru_stime.tv_sec.max(0) as u64)
+                    .saturating_mul(1_000_000)
+                    .saturating_add(usage.ru_stime.tv_usec.max(0) as u64),
+            );
+        // ru_maxrss unit differs: bytes on macOS, kilobytes on Linux.
+        #[cfg(target_os = "macos")]
+        let max_rss_bytes = usage.ru_maxrss.max(0) as u64;
+        #[cfg(not(target_os = "macos"))]
+        let max_rss_bytes = (usage.ru_maxrss.max(0) as u64).saturating_mul(1024);
+        Ok(Reaped {
+            exit_code,
+            stdout,
+            stderr,
+            meter: Some(Meter {
+                cpu_ms: cpu_us / 1000,
+                max_rss_bytes,
+            }),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let code = child.wait()?.code().unwrap_or(-1);
+        Ok(Reaped {
+            exit_code: code,
+            stdout,
+            stderr,
+            meter: None,
+        })
+    }
 }
 
 impl LocalBackend {
@@ -393,7 +505,7 @@ impl LocalBackend {
         readable_prefixes: &[String],
         writable_prefixes: &[String],
         egress: Option<&EgressGrant>,
-    ) -> KernelResult<(tokio::process::Command, Option<tempfile::NamedTempFile>)> {
+    ) -> KernelResult<(std::process::Command, Option<tempfile::NamedTempFile>)> {
         let host_path =
             std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
         let scratch = ws_canon.join(sandbox::SCRATCH_DIR);
@@ -405,7 +517,7 @@ impl LocalBackend {
 
         let mut cmd = match self.tech {
             SandboxTech::Bwrap => {
-                let mut c = tokio::process::Command::new("bwrap");
+                let mut c = std::process::Command::new("bwrap");
                 c.args(sandbox::bwrap_args(
                     ws_canon,
                     readable_prefixes,
@@ -431,7 +543,7 @@ impl LocalBackend {
                     .tempfile()
                     .map_err(KernelError::Io)?;
                 std::fs::write(file.path(), profile)?;
-                let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
+                let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
                 c.arg("-f")
                     .arg(file.path())
                     .arg("/bin/sh")
@@ -456,7 +568,7 @@ impl LocalBackend {
                             .into(),
                     });
                 }
-                let mut c = tokio::process::Command::new("/bin/sh");
+                let mut c = std::process::Command::new("/bin/sh");
                 c.arg("-c").arg(command).current_dir(cwd);
                 c
             }
@@ -534,44 +646,62 @@ impl LocalBackend {
         )?;
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(std::process::Stdio::piped());
 
-        let child = cmd.spawn().map_err(|e| KernelError::BackendUnavailable {
-            backend: "local".into(),
-            reason: format!("failed to spawn: {e}"),
-        })?;
-        let pid = child.id();
+        // Spawn and reap on the blocking pool: reaping with `wait4` is what
+        // yields *honest* usage (real CPU time and peak RSS from the OS)
+        // instead of wall-clock and byte-count proxies.
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+        let mut worker = tokio::task::spawn_blocking(move || spawn_and_reap(cmd, pid_tx));
+        let pid = pid_rx.await.ok();
 
         let network_bytes = |g: &Option<EgressGrant>| g.as_ref().map_or(0, EgressGrant::used_bytes);
-        let outcome = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => Ok(ExecResult {
-                network_bytes: network_bytes(&egress),
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: cap(output.stdout, self.config.max_capture_bytes),
-                stderr: cap(output.stderr, self.config.max_capture_bytes),
-            }),
-            Ok(Err(e)) => Err(KernelError::Io(e)),
+        let join_err = |e: tokio::task::JoinError| KernelError::BackendUnavailable {
+            backend: "local".into(),
+            reason: format!("shell reaper task failed: {e}"),
+        };
+        let outcome = match tokio::time::timeout(timeout, &mut worker).await {
+            Ok(joined) => match joined.map_err(join_err)? {
+                Ok(reaped) => Ok(ExecResult {
+                    meter: reaped.meter,
+                    network_bytes: network_bytes(&egress),
+                    exit_code: reaped.exit_code,
+                    stdout: cap(reaped.stdout, self.config.max_capture_bytes),
+                    stderr: cap(reaped.stderr, self.config.max_capture_bytes),
+                }),
+                Err(e) => Err(KernelError::BackendUnavailable {
+                    backend: "local".into(),
+                    reason: format!("failed to spawn: {e}"),
+                }),
+            },
             Err(_elapsed) => {
-                // The dropped future killed the direct child (kill_on_drop);
-                // also kill the whole process group where available.
+                // Kill the whole process group, then let the reaper finish:
+                // even a killed run reports its real usage and partial output.
                 #[cfg(unix)]
                 if let Some(pid) = pid {
-                    let _ = std::process::Command::new("kill")
-                        .arg("-KILL")
-                        .arg("--")
-                        .arg(format!("-{pid}"))
-                        .status();
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
                 }
-                Ok(ExecResult {
-                    network_bytes: network_bytes(&egress),
+                let reaped = worker.await.map_err(join_err)?.unwrap_or(Reaped {
                     exit_code: -1,
                     stdout: Vec::new(),
-                    stderr: format!(
-                        "process killed: wall-clock timeout of {} ms exceeded",
-                        timeout.as_millis()
-                    )
-                    .into_bytes(),
+                    stderr: Vec::new(),
+                    meter: None,
+                });
+                let mut stderr = format!(
+                    "process killed: wall-clock timeout of {} ms exceeded",
+                    timeout.as_millis()
+                )
+                .into_bytes();
+                if !reaped.stderr.is_empty() {
+                    stderr.push(b'\n');
+                    stderr.extend_from_slice(&cap(reaped.stderr, self.config.max_capture_bytes));
+                }
+                Ok(ExecResult {
+                    meter: reaped.meter,
+                    network_bytes: network_bytes(&egress),
+                    exit_code: -1,
+                    stdout: cap(reaped.stdout, self.config.max_capture_bytes),
+                    stderr,
                 })
             }
         };
@@ -616,7 +746,7 @@ impl LocalBackend {
         let egress = self
             .egress_grant(egress_domains, budget.network_bytes)
             .await?;
-        let (mut cmd, profile_file) = self.build_confined_command(
+        let (std_cmd, profile_file) = self.build_confined_command(
             "proc.start",
             &ws_canon,
             &cwd,
@@ -626,6 +756,7 @@ impl LocalBackend {
             writable_prefixes,
             egress.as_ref(),
         )?;
+        let mut cmd = tokio::process::Command::from(std_cmd);
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -644,6 +775,7 @@ impl LocalBackend {
             self.config.max_log_buffer_bytes,
         );
         Ok(ExecResult {
+            meter: None,
             network_bytes: 0,
             exit_code: 0,
             stdout: serde_json::to_vec(&serde_json::json!({
@@ -658,6 +790,7 @@ impl LocalBackend {
 
     fn proc_fail(msg: impl Into<String>) -> ExecResult {
         ExecResult {
+            meter: None,
             network_bytes: 0,
             exit_code: 1,
             stdout: Vec::new(),
@@ -711,6 +844,7 @@ impl LocalBackend {
             *stdin = None; // dropping the handle closes the pipe
         }
         Ok(ExecResult {
+            meter: None,
             network_bytes: 0,
             exit_code: 0,
             stdout: serde_json::to_vec(&serde_json::json!({
@@ -745,6 +879,7 @@ impl LocalBackend {
         let exit_code = session.exit_code();
         let next_offset = effective + data.len() as u64;
         ExecResult {
+            meter: None,
             network_bytes: 0,
             exit_code: 0,
             stdout: serde_json::to_vec(&serde_json::json!({
@@ -784,6 +919,7 @@ impl LocalBackend {
         };
         Ok(match session.signal(signal) {
             Ok(()) => ExecResult {
+                meter: None,
                 network_bytes: 0,
                 exit_code: 0,
                 stdout: serde_json::to_vec(&serde_json::json!({
@@ -806,6 +942,7 @@ impl LocalBackend {
                 .map(|s| s.status_json())
                 .collect();
             return ExecResult {
+                meter: None,
                 network_bytes: 0,
                 exit_code: 0,
                 stdout: serde_json::to_vec(&serde_json::json!({ "processes": list }))
@@ -815,6 +952,7 @@ impl LocalBackend {
         }
         match self.session(branch, process) {
             Ok(s) => ExecResult {
+                meter: None,
                 network_bytes: 0,
                 exit_code: 0,
                 stdout: serde_json::to_vec(&s.status_json()).unwrap_or_default(),
@@ -914,12 +1052,14 @@ impl Backend for LocalBackend {
                 let full = resolve_confined("fs.read", &workspace, path, &req.readable_prefixes)?;
                 match std::fs::read(&full) {
                     Ok(bytes) => ExecResult {
+                        meter: None,
                         network_bytes: 0,
                         exit_code: 0,
                         stdout: cap(bytes, self.config.max_capture_bytes),
                         stderr: Vec::new(),
                     },
                     Err(e) => ExecResult {
+                        meter: None,
                         network_bytes: 0,
                         exit_code: 1,
                         stdout: Vec::new(),
@@ -941,6 +1081,7 @@ impl Backend for LocalBackend {
                 }
                 std::fs::write(&full, &contents)?;
                 ExecResult {
+                    meter: None,
                     network_bytes: 0,
                     exit_code: 0,
                     stdout: Vec::new(),
@@ -956,12 +1097,14 @@ impl Backend for LocalBackend {
                 };
                 match outcome {
                     Ok(()) => ExecResult {
+                        meter: None,
                         network_bytes: 0,
                         exit_code: 0,
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                     },
                     Err(e) => ExecResult {
+                        meter: None,
                         network_bytes: 0,
                         exit_code: 1,
                         stdout: Vec::new(),
@@ -989,12 +1132,14 @@ impl Backend for LocalBackend {
             exit_code: result.exit_code,
             stdout: result.stdout,
             stderr: result.stderr,
-            // Wall-clock elapsed as the CPU proxy; captured output bytes are
-            // charged against the memory dimension as a proxy; egress bytes
-            // are real, counted at the proxy.
+            // Shell steps carry *honest* metering: real CPU time (user+sys)
+            // and peak RSS from reaping the child with wait4. Paths without
+            // a reaped child (file actions, process-session ops) fall back
+            // to wall-clock and captured-bytes proxies. Egress bytes are
+            // always real, counted at the proxy.
             usage: ResourceBudget {
-                cpu_ms: elapsed_ms,
-                memory_bytes: captured,
+                cpu_ms: result.meter.map_or(elapsed_ms, |m| m.cpu_ms),
+                memory_bytes: result.meter.map_or(captured, |m| m.max_rss_bytes),
                 network_bytes: result.network_bytes,
                 ..ResourceBudget::zero()
             },

@@ -428,3 +428,64 @@ async fn fail_closed_without_sandbox() {
         .unwrap();
     assert_eq!(out.exit_code, 0);
 }
+
+#[tokio::test]
+async fn shell_usage_is_real_cpu_and_peak_rss_not_proxies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+
+    // A CPU-burning loop: real CPU time must register, and peak RSS must be
+    // a believable process footprint (far above the few bytes of output the
+    // old captured-bytes proxy would have reported).
+    let out = b
+        .execute(req(shell(
+            "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done; echo done",
+        )))
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.usage.cpu_ms > 0,
+        "a busy loop must be charged real CPU time"
+    );
+    assert!(
+        out.usage.memory_bytes > 64 * 1024,
+        "memory must be peak RSS in bytes, got {}",
+        out.usage.memory_bytes
+    );
+
+    // A sleeping process consumes wall-clock but almost no CPU: the charge
+    // must follow the CPU, not the clock.
+    let started = Instant::now();
+    let out = b.execute(req(shell("sleep 0.5; echo woke"))).await.unwrap();
+    let wall_ms = started.elapsed().as_millis() as u64;
+    assert_eq!(out.exit_code, 0);
+    assert!(wall_ms >= 500, "the sleep really elapsed");
+    assert!(
+        out.usage.cpu_ms < wall_ms / 2,
+        "sleeping must not be billed as CPU: cpu={}ms wall={}ms",
+        out.usage.cpu_ms,
+        wall_ms
+    );
+}
+
+#[tokio::test]
+async fn timeout_kill_reaps_the_whole_process_group() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = backend(tmp.path());
+    // The child spawns a grandchild that would outlive a naive direct kill;
+    // marker output written by the survivor would land in the workspace.
+    let mut r = req(shell("(sleep 5; echo survived > leak.txt) & sleep 30"));
+    r.budget.cpu_ms = 400;
+    let out = b.execute(r).await.unwrap();
+    assert_eq!(out.exit_code, -1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("timeout"));
+    // Give a hypothetical survivor time to write, then check it did not.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let branch = BranchId("br-test".into());
+    let ws = b.workspace_for(&branch).unwrap();
+    assert!(
+        !ws.join("leak.txt").exists(),
+        "the process group kill must take the grandchild down too"
+    );
+}

@@ -87,6 +87,17 @@ environment** — the runtime a strong agent actually wants to work in.
   bench with an uploaded JSON report.
 
 ### Changed
+- **Shell steps are metered honestly.** The local backend reaps every shell
+  child with `wait4`: `usage.cpu_ms` is now real user+system CPU time and
+  `usage.memory_bytes` the real peak RSS (platform-normalized), replacing
+  the wall-clock and captured-output-bytes proxies — a sleeping process no
+  longer bills CPU, and memory reflects the actual footprint. Timeout kills
+  now take down the child's whole **process group** (the child spawns as a
+  group leader), so a sandbox wrapper's descendants can no longer outlive
+  the step; killed runs still report their real usage and partial output.
+  Budgets an operator can trust are what make long unattended autonomy
+  grantable. (File and process-session operations, which reap no child,
+  keep the previous approximations.)
 - **Observations distill head + tail** (2 KiB + 1 KiB): test summaries and
   final errors no longer vanish. Failures scan the whole stream for the
   causal line (`error[…]`, `panic`, `Traceback`, …) instead of taking

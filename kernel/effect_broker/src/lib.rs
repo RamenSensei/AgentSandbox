@@ -27,5 +27,5 @@
 pub mod broker;
 pub mod secrets;
 
-pub use broker::{EffectBroker, ReceiptSigner};
+pub use broker::{EffectBroker, InDoubtResolution, OperatorResolution, ReceiptSigner};
 pub use secrets::{ScopedToken, SecretVault};

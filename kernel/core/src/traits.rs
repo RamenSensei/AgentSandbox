@@ -92,6 +92,19 @@ pub struct CommitResult {
     pub response: serde_json::Value,
 }
 
+/// A connector's answer to "did a commit for this contract's idempotency key
+/// already happen externally?" — the recovery half of exactly-once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CommitProbe {
+    /// The external system confirms the operation executed; here is its
+    /// (re-fetched) response.
+    Committed(CommitResult),
+    /// The external system confirms the operation never executed.
+    NotCommitted,
+    /// The connector cannot tell. The effect stays in doubt.
+    Unknown,
+}
+
 /// A typed connector to an external system. Connectors are the ONLY code that
 /// touches real credentials; guests never see them. A connector declares the
 /// semantic contract of each operation — the kernel does not trust HTTP verbs.
@@ -110,8 +123,20 @@ pub trait Connector: Send + Sync {
     /// cause any external side effect.
     async fn prepare(&self, contract: &EffectContract) -> KernelResult<PreparedEffect>;
 
-    /// Perform the effect. Called only after commit-time revalidation.
+    /// Perform the effect. Called only after commit-time revalidation, and
+    /// only by the single claim-holder for the contract's idempotency key.
+    /// Implementations SHOULD forward the idempotency key to the external
+    /// system where it supports one.
     async fn commit(&self, contract: &EffectContract) -> KernelResult<CommitResult>;
+
+    /// Report whether a commit for this contract's idempotency key already
+    /// executed externally. Used when a commit attempt failed indeterminately
+    /// (crash, timeout) to resolve the in-doubt effect. Connectors that keep
+    /// no queryable execution record return [`CommitProbe::Unknown`].
+    async fn probe_commit(&self, contract: &EffectContract) -> KernelResult<CommitProbe> {
+        let _ = contract;
+        Ok(CommitProbe::Unknown)
+    }
 
     /// Best-effort compensation for a committed effect (e.g. close the PR).
     async fn compensate(&self, contract: &EffectContract) -> KernelResult<CommitResult> {

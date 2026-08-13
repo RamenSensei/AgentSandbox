@@ -477,9 +477,17 @@ async fn effect_phase_machine(_params: &Value) -> Result<(), String> {
         EffectPhase::Committed { receipt: r } if r == receipt.id => {}
         other => return Err(format!("expected Committed phase, got {other:?}")),
     }
-    // commit twice → refused (already committed).
-    if f.kernel.commit_effect(&effect).await.is_ok() {
-        return Err("double commit must be refused".into());
+    // Committing again is IDEMPOTENT: the caller gets the same receipt back
+    // and the external system is not contacted a second time.
+    match f.kernel.commit_effect(&effect).await {
+        Ok(again) if again.id == receipt.id => {}
+        Ok(other) => {
+            return Err(format!(
+                "second commit must return the original receipt {}, got {}",
+                receipt.id, other.id
+            ))
+        }
+        Err(e) => return Err(format!("second commit must be idempotent, got error: {e}")),
     }
     Ok(())
 }

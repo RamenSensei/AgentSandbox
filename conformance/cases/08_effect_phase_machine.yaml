@@ -1,6 +1,7 @@
 name: effect phase machine
 description: >
   Effects move proposed -> prepared -> approved -> committed. Out-of-order
-  transitions (approve before prepare, double prepare, double commit) are
-  refused with WRONG_EFFECT_PHASE.
+  transitions (approve before prepare, double prepare) are refused with
+  WRONG_EFFECT_PHASE. Re-committing a committed effect is idempotent: it
+  returns the original receipt and never re-contacts the external system.
 kind: effect_phase_machine

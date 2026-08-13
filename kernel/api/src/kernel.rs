@@ -940,8 +940,12 @@ impl Kernel {
     }
 
     /// Commit an effect after full revalidation (contract hash, policy
-    /// epoch, live lease, re-observed preconditions, exactly-once key).
+    /// epoch, live lease, re-observed preconditions, exactly-once key claim).
     /// Receipts are Ed25519-signed with the kernel keypair.
+    ///
+    /// The receipt in the broker store is the durable record of the external
+    /// effect. Ledger and DAG bookkeeping happen after it and are repairable:
+    /// their failure is logged loudly but never invents a second commit.
     pub async fn commit_effect(&self, effect: &EffectId) -> KernelResult<Receipt> {
         let epoch = self.policy_epoch()?;
         let leases = self.leases();
@@ -959,7 +963,14 @@ impl Kernel {
         let writer = self.effect_writer(&e)?;
         match result {
             Ok(receipt) => {
-                self.ledger.store_receipt(&receipt, &e.contract.idempotency_key)?;
+                if let Err(err) = self.ledger.store_receipt(&receipt, &e.contract.idempotency_key)
+                {
+                    tracing::error!(
+                        effect = %effect, receipt = %receipt.id, error = %err,
+                        "receipt committed but ledger receipt store failed; \
+                         the broker store remains authoritative"
+                    );
+                }
                 writer.record(
                     EventKind::EffectCommitted,
                     serde_json::json!({
@@ -970,7 +981,7 @@ impl Kernel {
                 // Record the committed effect in the state DAG.
                 let head = self.dag.head(&e.branch)?;
                 let commit_step = StepId::generate();
-                let _ = self.dag.append_step(
+                if let Err(err) = self.dag.append_step(
                     &e.branch,
                     &commit_step,
                     &e.proposer,
@@ -981,8 +992,25 @@ impl Kernel {
                     },
                     head.workspace_root.clone(),
                     head.replay_class,
-                );
+                ) {
+                    tracing::error!(
+                        effect = %effect, receipt = %receipt.id, error = %err,
+                        "receipt committed but DAG bookkeeping failed; \
+                         the ledger and broker store remain authoritative"
+                    );
+                }
                 Ok(receipt)
+            }
+            Err(err @ KernelError::CommitInDoubt { .. }) => {
+                // Not aborted: the external outcome is unknown. Record the
+                // in-doubt marker so the trace shows why nothing may retry.
+                writer.record(
+                    EventKind::EffectAborted,
+                    serde_json::json!({
+                        "effect_id": effect, "in_doubt": true, "reason": err.to_string(),
+                    }),
+                )?;
+                Err(err)
             }
             Err(err) => {
                 writer.record(
@@ -992,6 +1020,45 @@ impl Kernel {
                 Err(err)
             }
         }
+    }
+
+    /// Resolve effects left in doubt by a crash or indeterminate connector
+    /// failure. Run at server startup and available on demand.
+    pub async fn recover_in_doubt_effects(
+        &self,
+    ) -> KernelResult<Vec<(EffectId, ak_effect_broker::InDoubtResolution)>> {
+        let resolutions = self.broker.recover_in_doubt().await?;
+        for (effect, resolution) in &resolutions {
+            if let Ok(e) = self.broker.effect(effect) {
+                if let Ok(writer) = self.effect_writer(&e) {
+                    let _ = writer.record(
+                        EventKind::EffectCommitted,
+                        serde_json::json!({
+                            "effect_id": effect,
+                            "recovery": true,
+                            "resolution": resolution,
+                        }),
+                    );
+                }
+            }
+            tracing::info!(effect = %effect, resolution = ?resolution, "in-doubt effect recovery");
+        }
+        Ok(resolutions)
+    }
+
+    /// Operator override for an in-doubt effect (out-of-band verified).
+    pub fn resolve_in_doubt_effect(
+        &self,
+        effect: &EffectId,
+        outcome: ak_effect_broker::OperatorResolution,
+    ) -> KernelResult<Option<Receipt>> {
+        let receipt = self.broker.resolve_in_doubt(effect, outcome)?;
+        if let Some(r) = &receipt {
+            if let Err(err) = self.ledger.store_receipt(r, &r.body.operation) {
+                tracing::error!(receipt = %r.id, error = %err, "ledger receipt store failed");
+            }
+        }
+        Ok(receipt)
     }
 
     /// Run the compensating action for a committed effect.

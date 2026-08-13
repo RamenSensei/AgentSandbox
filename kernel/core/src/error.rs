@@ -25,6 +25,13 @@ pub enum KernelError {
     #[error("idempotency key `{key}` was already committed as receipt `{receipt}`")]
     DuplicateCommit { key: String, receipt: String },
 
+    #[error(
+        "effect `{effect}` is in doubt: a commit attempt failed indeterminately ({reason}); \
+         the connector could not confirm whether the external effect happened. \
+         Resolve via recovery or operator decision — do NOT blindly retry."
+    )]
+    CommitInDoubt { effect: String, reason: String },
+
     #[error("backend `{backend}` unavailable: {reason}")]
     BackendUnavailable { backend: String, reason: String },
 
@@ -60,6 +67,7 @@ impl KernelError {
             KernelError::WrongEffectPhase { .. } => "WRONG_EFFECT_PHASE",
             KernelError::StaleAuthorization { .. } => "STALE_AUTHORIZATION",
             KernelError::DuplicateCommit { .. } => "DUPLICATE_COMMIT",
+            KernelError::CommitInDoubt { .. } => "COMMIT_IN_DOUBT",
             KernelError::BackendUnavailable { .. } => "BACKEND_UNAVAILABLE",
             KernelError::BranchDiscarded { .. } => "BRANCH_DISCARDED",
             KernelError::MergeConflict { .. } => "MERGE_CONFLICT",

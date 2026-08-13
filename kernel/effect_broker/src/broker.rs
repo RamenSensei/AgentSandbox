@@ -4,10 +4,11 @@
 use ak_core::effect::{EffectContract, EffectPhase, PendingEffect, Receipt, ReceiptBody};
 use ak_core::hash::{canonical_json, hash_canonical, ContentHash};
 use ak_core::ids::{BranchId, EffectId, LeaseId, PrincipalId, ReceiptId, StepId};
-use ak_core::traits::{CommitResult, Connector, PreparedEffect};
+use ak_core::traits::{CommitProbe, CommitResult, Connector, PreparedEffect};
 use ak_core::{EffectClass, KernelError, KernelResult};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{info, instrument, warn};
@@ -41,6 +42,30 @@ struct ApprovalRecord {
     contract_hash: ContentHash,
 }
 
+/// How an in-doubt effect was resolved by [`EffectBroker::recover_in_doubt`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "resolution")]
+pub enum InDoubtResolution {
+    /// The connector confirmed execution; a receipt now exists.
+    Committed { receipt: ReceiptId },
+    /// The connector confirmed nothing executed; the effect was aborted and
+    /// its idempotency key freed for a fresh proposal.
+    Aborted,
+    /// The connector cannot tell; operator action is required.
+    StillInDoubt,
+}
+
+/// An operator's out-of-band verdict on an in-doubt effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum OperatorResolution {
+    /// The operator verified the external effect happened; `response` is the
+    /// externally observed result to digest into the receipt.
+    Committed { response: serde_json::Value },
+    /// The operator verified nothing happened externally.
+    Aborted { reason: String },
+}
+
 /// The transactional effect broker. See the crate-level docs for the
 /// lifecycle it enforces.
 pub struct EffectBroker {
@@ -63,11 +88,13 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS effects (
     id TEXT PRIMARY KEY,
     idempotency_key TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'proposed',
     json TEXT NOT NULL,
     observed_preconditions TEXT,
     approval TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_effects_idem ON effects(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_effects_phase ON effects(phase);
 CREATE TABLE IF NOT EXISTS receipts (
     id TEXT PRIMARY KEY,
     effect_id TEXT NOT NULL,
@@ -76,6 +103,18 @@ CREATE TABLE IF NOT EXISTS receipts (
     json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_receipts_idem ON receipts(idempotency_key);
+CREATE TABLE IF NOT EXISTS commit_claims (
+    idempotency_key TEXT PRIMARY KEY,
+    effect_id TEXT NOT NULL,
+    claimed_at TEXT NOT NULL
+);
+";
+
+/// Enforced separately so a legacy store that already contains duplicate
+/// committed receipts fails loudly instead of silently continuing.
+const UNIQUE_RECEIPT_INDEX: &str = "
+CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_one_committed_per_key
+ON receipts(idempotency_key) WHERE compensating = 0;
 ";
 
 impl EffectBroker {
@@ -93,6 +132,14 @@ impl EffectBroker {
 
     fn with_connection(conn: Connection, signer: Box<dyn ReceiptSigner>) -> KernelResult<Self> {
         conn.execute_batch(SCHEMA).map_err(storage_err)?;
+        migrate(&conn)?;
+        conn.execute_batch(UNIQUE_RECEIPT_INDEX).map_err(|e| {
+            KernelError::Storage(format!(
+                "effect store integrity violation: cannot enforce one committed receipt per \
+                 idempotency key ({e}). The store contains duplicate committed receipts from a \
+                 pre-0.7 kernel; reconcile them manually before reopening."
+            ))
+        })?;
         Ok(Self {
             connectors: Mutex::new(HashMap::new()),
             store: Mutex::new(conn),
@@ -131,6 +178,17 @@ impl EffectBroker {
         f(&conn)
     }
 
+    fn with_store_mut<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> KernelResult<T>,
+    ) -> KernelResult<T> {
+        let mut conn = self
+            .store
+            .lock()
+            .map_err(|_| KernelError::Storage("effect store poisoned".into()))?;
+        f(&mut conn)
+    }
+
     fn load_effect(&self, id: &EffectId) -> KernelResult<PendingEffect> {
         self.with_store(|conn| {
             let json: Option<String> = conn
@@ -151,8 +209,8 @@ impl EffectBroker {
         let json = serde_json::to_string(effect)?;
         self.with_store(|conn| {
             conn.execute(
-                "UPDATE effects SET json = ?2 WHERE id = ?1",
-                params![effect.id.as_str(), json],
+                "UPDATE effects SET json = ?2, phase = ?3 WHERE id = ?1",
+                params![effect.id.as_str(), json, phase_name(&effect.phase)],
             )
             .map_err(storage_err)?;
             Ok(())
@@ -267,8 +325,13 @@ impl EffectBroker {
         let json = serde_json::to_string(&effect)?;
         self.with_store(|conn| {
             conn.execute(
-                "INSERT INTO effects (id, idempotency_key, json) VALUES (?1, ?2, ?3)",
-                params![effect.id.as_str(), effect.contract.idempotency_key, json],
+                "INSERT INTO effects (id, idempotency_key, phase, json) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    effect.id.as_str(),
+                    effect.contract.idempotency_key,
+                    phase_name(&effect.phase),
+                    json
+                ],
             )
             .map_err(storage_err)?;
             Ok(())
@@ -338,7 +401,16 @@ impl EffectBroker {
     /// 3. the capability lease is still valid (`lease_check`);
     /// 4. the connector's `prepare` is re-run and every declared precondition
     ///    plus every prepare-time observation still holds;
-    /// 5. the idempotency key has not been committed elsewhere.
+    /// 5. the commit **claims** the idempotency key and the effect row in one
+    ///    atomic transaction — of any number of racing committers (same or
+    ///    different effects sharing a key), exactly one reaches the external
+    ///    system (AK-003).
+    ///
+    /// Retrying a commit on an already-committed effect idempotently returns
+    /// its receipt. If the external call fails indeterminately, the effect
+    /// parks in phase `committing` ("in doubt") and is resolved through the
+    /// connector's [`Connector::probe_commit`] protocol (AK-007) — never by
+    /// blind re-execution.
     #[instrument(skip(self, lease_check))]
     pub async fn commit(
         &self,
@@ -347,6 +419,17 @@ impl EffectBroker {
         lease_check: impl Fn(&LeaseId) -> bool,
     ) -> KernelResult<Receipt> {
         let effect = self.load_effect(effect_id)?;
+
+        // Idempotent retry: a committed effect returns its original receipt.
+        if let EffectPhase::Committed { receipt } = &effect.phase {
+            return self.receipt(receipt);
+        }
+        if let EffectPhase::Committing { .. } = &effect.phase {
+            return Err(KernelError::CommitInDoubt {
+                effect: effect.id.to_string(),
+                reason: "a previous commit attempt is in flight or unresolved".into(),
+            });
+        }
 
         // Irreversible / opaque effects can only be committed from an
         // explicit approval; reversible ones may commit straight from
@@ -418,17 +501,124 @@ impl EffectBroker {
             }
         }
 
-        // 5. Exactly-once.
-        if let Some(receipt) = self.committed_receipt_for_key(&effect.contract.idempotency_key)? {
-            return Err(KernelError::DuplicateCommit {
-                key: effect.contract.idempotency_key.clone(),
-                receipt,
-            });
-        }
+        // 5. Atomically claim the idempotency key + flip the effect row to
+        //    `committing`. Losers never reach the connector.
+        let prior_phase = effect.phase.clone();
+        self.claim_commit(&effect)?;
 
-        // All checks passed: perform the effect.
-        let result = connector.commit(&effect.contract).await?;
-        let witness_source = match &approval {
+        // All checks passed and we hold the claim: perform the effect.
+        // The external call runs outside every lock — the claim is what
+        // protects exactly-once, not lock tenure.
+        match connector.commit(&effect.contract).await {
+            Ok(result) => {
+                let receipt =
+                    self.finalize_commit(&effect, &approval, current_policy_epoch, &result)?;
+                info!(effect = %effect_id, receipt = %receipt.id, "effect committed");
+                Ok(receipt)
+            }
+            Err(err) => {
+                self.resolve_failed_commit(
+                    &effect,
+                    connector.as_ref(),
+                    &approval,
+                    current_policy_epoch,
+                    prior_phase,
+                    err,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Atomically claim the right to commit: insert (or verify ownership of)
+    /// the idempotency-key claim and CAS the effect row `approved|prepared →
+    /// committing`, all in one immediate transaction.
+    fn claim_commit(&self, effect: &PendingEffect) -> KernelResult<()> {
+        let claimed_at = Utc::now();
+        let phase = EffectPhase::Committing { claimed_at };
+        let phase_json = serde_json::to_string(&phase)?;
+        self.with_store_mut(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO commit_claims (idempotency_key, effect_id, claimed_at)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    effect.contract.idempotency_key,
+                    effect.id.as_str(),
+                    claimed_at.to_rfc3339()
+                ],
+            )
+            .map_err(storage_err)?;
+            let owner: String = tx
+                .query_row(
+                    "SELECT effect_id FROM commit_claims WHERE idempotency_key = ?1",
+                    params![effect.contract.idempotency_key],
+                    |r| r.get(0),
+                )
+                .map_err(storage_err)?;
+            if owner != effect.id.as_str() {
+                // Another effect holds (or finished under) this key.
+                let receipt: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM receipts WHERE idempotency_key = ?1 AND compensating = 0",
+                        params![effect.contract.idempotency_key],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(storage_err)?;
+                return Err(match receipt {
+                    Some(receipt) => KernelError::DuplicateCommit {
+                        key: effect.contract.idempotency_key.clone(),
+                        receipt,
+                    },
+                    None => KernelError::WrongEffectPhase {
+                        effect: effect.id.to_string(),
+                        phase: format!("blocked: effect `{owner}` holds the commit claim"),
+                        expected: "approved",
+                    },
+                });
+            }
+            // CAS this effect row into `committing`; only one caller can win.
+            let n = tx
+                .execute(
+                    "UPDATE effects SET phase = 'committing', json = json_set(json, '$.phase', json(?2))
+                     WHERE id = ?1 AND phase IN ('approved', 'prepared')",
+                    params![effect.id.as_str(), phase_json],
+                )
+                .map_err(storage_err)?;
+            if n == 0 {
+                let phase: String = tx
+                    .query_row(
+                        "SELECT phase FROM effects WHERE id = ?1",
+                        params![effect.id.as_str()],
+                        |r| r.get(0),
+                    )
+                    .map_err(storage_err)?;
+                // We inserted the claim in this transaction; not committing
+                // the transaction releases it for whoever owns the phase.
+                return Err(KernelError::WrongEffectPhase {
+                    effect: effect.id.to_string(),
+                    phase,
+                    expected: "approved",
+                });
+            }
+            tx.commit().map_err(storage_err)?;
+            Ok(())
+        })
+    }
+
+    /// Durably record a successful external commit: receipt insert, phase
+    /// flip and claim release happen in one transaction.
+    fn finalize_commit(
+        &self,
+        effect: &PendingEffect,
+        approval: &Option<ApprovalRecord>,
+        policy_epoch: u64,
+        result: &CommitResult,
+    ) -> KernelResult<Receipt> {
+        let witness_source = match approval {
             Some(a) => serde_json::to_value(a)?,
             None => serde_json::json!({
                 "auto_commit": true,
@@ -443,18 +633,191 @@ impl EffectBroker {
             contract_hash: effect.contract_hash.clone(),
             branch: effect.branch.clone(),
             step: effect.step.clone(),
-            policy_epoch: current_policy_epoch,
+            policy_epoch,
             authorization_witness: hash_canonical(&witness_source),
             external_response_digest: hash_canonical(&result.response),
             committed_at: Utc::now(),
         };
-        let receipt = self.sign_and_store(&effect, body, false)?;
-
-        let mut effect = effect;
-        effect.phase = EffectPhase::Committed { receipt: receipt.id.clone() };
-        self.save_effect(&effect)?;
-        info!(effect = %effect_id, receipt = %receipt.id, "effect committed");
+        let (signature, key_id) = self.signer.sign(canonical_json(&body).as_bytes());
+        let receipt = Receipt { id: ReceiptId::generate(), body, signature, key_id };
+        let receipt_json = serde_json::to_string(&receipt)?;
+        let phase = EffectPhase::Committed { receipt: receipt.id.clone() };
+        let phase_json = serde_json::to_string(&phase)?;
+        self.with_store_mut(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            tx.execute(
+                "INSERT INTO receipts (id, effect_id, idempotency_key, compensating, json)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                params![
+                    receipt.id.as_str(),
+                    effect.id.as_str(),
+                    effect.contract.idempotency_key,
+                    receipt_json
+                ],
+            )
+            .map_err(storage_err)?;
+            tx.execute(
+                "UPDATE effects SET phase = 'committed', json = json_set(json, '$.phase', json(?2))
+                 WHERE id = ?1",
+                params![effect.id.as_str(), phase_json],
+            )
+            .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM commit_claims WHERE idempotency_key = ?1",
+                params![effect.contract.idempotency_key],
+            )
+            .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
+            Ok(())
+        })?;
         Ok(receipt)
+    }
+
+    /// A commit attempt returned an error after we claimed the key. Use the
+    /// connector's idempotency protocol to find out what really happened.
+    async fn resolve_failed_commit(
+        &self,
+        effect: &PendingEffect,
+        connector: &dyn Connector,
+        approval: &Option<ApprovalRecord>,
+        policy_epoch: u64,
+        prior_phase: EffectPhase,
+        err: KernelError,
+    ) -> KernelResult<Receipt> {
+        match connector.probe_commit(&effect.contract).await {
+            Ok(CommitProbe::Committed(result)) => {
+                // The external effect DID happen (e.g. response lost in
+                // flight). Record it truthfully.
+                warn!(effect = %effect.id, "commit errored but probe confirms execution; recording receipt");
+                self.finalize_commit(effect, approval, policy_epoch, &result)
+            }
+            Ok(CommitProbe::NotCommitted) => {
+                // Definitively nothing happened: release the claim and put
+                // the effect back so the caller may retry.
+                self.release_claim(effect, &prior_phase)?;
+                Err(err)
+            }
+            Ok(CommitProbe::Unknown) | Err(_) => {
+                // In doubt: keep the claim and the `committing` phase. Blind
+                // retries are exactly how double sends happen.
+                warn!(effect = %effect.id, error = %err, "commit outcome unknown; effect is in doubt");
+                Err(KernelError::CommitInDoubt {
+                    effect: effect.id.to_string(),
+                    reason: err.to_string(),
+                })
+            }
+        }
+    }
+
+    /// Release the commit claim and restore a pre-commit phase.
+    fn release_claim(&self, effect: &PendingEffect, restore: &EffectPhase) -> KernelResult<()> {
+        let phase_json = serde_json::to_string(restore)?;
+        self.with_store_mut(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            tx.execute(
+                "UPDATE effects SET phase = ?2, json = json_set(json, '$.phase', json(?3))
+                 WHERE id = ?1 AND phase = 'committing'",
+                params![effect.id.as_str(), phase_name(restore), phase_json],
+            )
+            .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM commit_claims WHERE idempotency_key = ?1 AND effect_id = ?2",
+                params![effect.contract.idempotency_key, effect.id.as_str()],
+            )
+            .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
+            Ok(())
+        })
+    }
+
+    /// Effects parked in phase `committing` (crash or indeterminate failure).
+    pub fn in_doubt_effects(&self) -> KernelResult<Vec<PendingEffect>> {
+        self.list_effects(Some("committing"))
+    }
+
+    /// Startup / periodic recovery: resolve every in-doubt effect through the
+    /// connector's [`Connector::probe_commit`]. Effects whose connector
+    /// confirms execution get their receipt; confirmed non-executions are
+    /// aborted (retryable by re-proposing); unknowns stay in doubt for the
+    /// operator. Returns `(effect id, resolution)` pairs.
+    pub async fn recover_in_doubt(&self) -> KernelResult<Vec<(EffectId, InDoubtResolution)>> {
+        let mut out = Vec::new();
+        for effect in self.in_doubt_effects()? {
+            let resolution = self.recover_one(&effect).await;
+            out.push((effect.id.clone(), resolution));
+        }
+        Ok(out)
+    }
+
+    async fn recover_one(&self, effect: &PendingEffect) -> InDoubtResolution {
+        let connector = match self.connector_for(&effect.contract.operation) {
+            Ok(c) => c,
+            Err(_) => return InDoubtResolution::StillInDoubt,
+        };
+        let approval: Option<ApprovalRecord> = self
+            .load_column(&effect.id, "approval")
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        let epoch = approval.as_ref().map(|a| a.policy_epoch).unwrap_or(0);
+        match connector.probe_commit(&effect.contract).await {
+            Ok(CommitProbe::Committed(result)) => {
+                match self.finalize_commit(effect, &approval, epoch, &result) {
+                    Ok(receipt) => InDoubtResolution::Committed { receipt: receipt.id },
+                    Err(e) => {
+                        warn!(effect = %effect.id, error = %e, "in-doubt finalize failed");
+                        InDoubtResolution::StillInDoubt
+                    }
+                }
+            }
+            Ok(CommitProbe::NotCommitted) => {
+                let aborted = EffectPhase::Aborted {
+                    reason: "crash recovery: connector confirmed the external effect never executed"
+                        .into(),
+                };
+                match self.release_claim(effect, &aborted) {
+                    Ok(()) => InDoubtResolution::Aborted,
+                    Err(e) => {
+                        warn!(effect = %effect.id, error = %e, "in-doubt release failed");
+                        InDoubtResolution::StillInDoubt
+                    }
+                }
+            }
+            Ok(CommitProbe::Unknown) | Err(_) => InDoubtResolution::StillInDoubt,
+        }
+    }
+
+    /// Operator override for an in-doubt effect the connector cannot resolve:
+    /// declare it committed (with the externally observed response) or
+    /// aborted (after out-of-band verification that nothing happened).
+    pub fn resolve_in_doubt(
+        &self,
+        effect_id: &EffectId,
+        outcome: OperatorResolution,
+    ) -> KernelResult<Option<Receipt>> {
+        let effect = self.load_effect(effect_id)?;
+        if !matches!(effect.phase, EffectPhase::Committing { .. }) {
+            return Err(wrong_phase(&effect, "committing"));
+        }
+        let approval: Option<ApprovalRecord> = self
+            .load_column(effect_id, "approval")?
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        match outcome {
+            OperatorResolution::Committed { response } => {
+                let epoch = approval.as_ref().map(|a| a.policy_epoch).unwrap_or(0);
+                let receipt =
+                    self.finalize_commit(&effect, &approval, epoch, &CommitResult { response })?;
+                Ok(Some(receipt))
+            }
+            OperatorResolution::Aborted { reason } => {
+                self.release_claim(&effect, &EffectPhase::Aborted { reason })?;
+                Ok(None)
+            }
+        }
     }
 
     fn sign_and_store(
@@ -491,11 +854,16 @@ impl EffectBroker {
     }
 
     /// Abort a not-yet-committed effect with a human-readable reason.
+    /// In-doubt effects (phase `committing`) cannot be aborted blindly —
+    /// resolve them via [`EffectBroker::recover_in_doubt`] or
+    /// [`EffectBroker::resolve_in_doubt`] instead.
     #[instrument(skip(self))]
     pub fn abort(&self, effect_id: &EffectId, reason: &str) -> KernelResult<()> {
         let mut effect = self.load_effect(effect_id)?;
         match effect.phase {
-            EffectPhase::Committed { .. } | EffectPhase::Compensated { .. } => {
+            EffectPhase::Committed { .. }
+            | EffectPhase::Compensated { .. }
+            | EffectPhase::Committing { .. } => {
                 return Err(wrong_phase(&effect, "proposed|prepared|approved"));
             }
             _ => {}
@@ -544,10 +912,30 @@ fn phase_name(phase: &EffectPhase) -> &'static str {
         EffectPhase::Proposed => "proposed",
         EffectPhase::Prepared { .. } => "prepared",
         EffectPhase::Approved { .. } => "approved",
+        EffectPhase::Committing { .. } => "committing",
         EffectPhase::Committed { .. } => "committed",
         EffectPhase::Aborted { .. } => "aborted",
         EffectPhase::Compensated { .. } => "compensated",
     }
+}
+
+/// Bring stores created by earlier schema versions up to date (idempotent).
+fn migrate(conn: &Connection) -> KernelResult<()> {
+    // v0.7: `phase` became an authoritative column so commit claiming can be
+    // a conditional UPDATE. Backfill from the JSON's internally-tagged enum.
+    let has_phase = conn
+        .prepare("SELECT 1 FROM pragma_table_info('effects') WHERE name = 'phase'")
+        .map_err(storage_err)?
+        .exists([])
+        .map_err(storage_err)?;
+    if !has_phase {
+        conn.execute_batch(
+            "ALTER TABLE effects ADD COLUMN phase TEXT NOT NULL DEFAULT 'proposed';
+             UPDATE effects SET phase = COALESCE(json_extract(json, '$.phase.phase'), 'proposed');",
+        )
+        .map_err(storage_err)?;
+    }
+    Ok(())
 }
 
 fn wrong_phase(effect: &PendingEffect, expected: &'static str) -> KernelError {
@@ -589,12 +977,28 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// How the mock connector answers `probe_commit`.
+    #[derive(Clone, Copy)]
+    enum ProbeMode {
+        Unknown,
+        NotCommitted,
+        /// Answer truthfully from the connector's own execution record.
+        FromRecord,
+    }
+
     /// A connector over a fake external world whose observable state (a
     /// "head sha") can be mutated between broker calls.
     struct MockConnector {
         world_sha: Mutex<String>,
         commits: AtomicU64,
         compensations: AtomicU64,
+        /// Upcoming `commit` calls to fail *without* executing (simulates a
+        /// network error before the external system acted).
+        fail_commits_before_effect: AtomicU64,
+        /// Upcoming `commit` calls to fail *after* executing (simulates a
+        /// lost response: the effect happened, the caller never learned).
+        fail_commits_after_effect: AtomicU64,
+        probe_mode: Mutex<ProbeMode>,
         /// A secret only the connector may see, used to prove no secret
         /// bytes leak into serialized broker artifacts.
         vault: Arc<crate::secrets::SecretVault>,
@@ -606,8 +1010,15 @@ mod tests {
                 world_sha: Mutex::new("sha-1".into()),
                 commits: AtomicU64::new(0),
                 compensations: AtomicU64::new(0),
+                fail_commits_before_effect: AtomicU64::new(0),
+                fail_commits_after_effect: AtomicU64::new(0),
+                probe_mode: Mutex::new(ProbeMode::Unknown),
                 vault,
             }
+        }
+
+        fn set_probe_mode(&self, mode: ProbeMode) {
+            *self.probe_mode.lock().expect("probe mode") = mode;
         }
     }
 
@@ -641,12 +1052,44 @@ mod tests {
             })
         }
         async fn commit(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
+            if self
+                .fail_commits_before_effect
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(KernelError::Connector("simulated network error (pre-effect)".into()));
+            }
             // Prove the connector-only credential path works; the secret must
             // never appear in any broker artifact.
             let auth = self.vault.with_secret("api_token", |s| format!("Bearer {s}"))?;
             assert!(auth.contains("s3cr3t"));
+            // Widen the race window: a real external call takes time.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             self.commits.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_commits_after_effect
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(KernelError::Connector("simulated lost response (post-effect)".into()));
+            }
             Ok(CommitResult { response: json!({"status": "ok", "id": 42}) })
+        }
+        async fn probe_commit(&self, _contract: &EffectContract) -> KernelResult<CommitProbe> {
+            let mode = *self.probe_mode.lock().map_err(|_| KernelError::Other("poisoned".into()))?;
+            Ok(match mode {
+                ProbeMode::Unknown => CommitProbe::Unknown,
+                ProbeMode::NotCommitted => CommitProbe::NotCommitted,
+                ProbeMode::FromRecord => {
+                    if self.commits.load(Ordering::SeqCst) > 0 {
+                        CommitProbe::Committed(CommitResult {
+                            response: json!({"status": "ok", "id": 42, "via": "probe"}),
+                        })
+                    } else {
+                        CommitProbe::NotCommitted
+                    }
+                }
+            })
         }
         async fn compensate(&self, _contract: &EffectContract) -> KernelResult<CommitResult> {
             self.compensations.fetch_add(1, Ordering::SeqCst);
@@ -870,5 +1313,201 @@ mod tests {
         r.broker.prepare(&fx2.id).await.expect("prepare");
         r.broker.commit(&fx2.id, 1, |_| true).await.expect("commit");
         assert!(r.broker.abort(&fx2.id, "nope").is_err());
+    }
+
+    /// AK-003 regression: the review committed one approved, irreversible
+    /// effect twice concurrently and observed `external_commit_calls=2` with
+    /// two receipts. The atomic claim must let exactly one committer reach
+    /// the connector, and every successful caller must see the same receipt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_commits_reach_the_connector_exactly_once() {
+        let vault = Arc::new(crate::secrets::SecretVault::in_memory());
+        vault.insert("api_token", "s3cr3t-hunter2").expect("insert");
+        let broker = Arc::new(EffectBroker::in_memory(test_signer()).expect("broker"));
+        let connector = Arc::new(MockConnector::new(vault));
+        broker.register_connector(connector.clone());
+
+        let mut c = contract(EffectClass::Irreversible, "k-race");
+        c.operation = "mock.email".into();
+        let fx = broker
+            .propose(c, PrincipalId::generate(), BranchId::generate(), StepId::generate(), LeaseId::generate())
+            .expect("propose");
+        broker.prepare(&fx.id).await.expect("prepare");
+        broker.approve(&fx.id, PrincipalId::generate(), 1).expect("approve");
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let b = Arc::clone(&broker);
+            let id = fx.id.clone();
+            handles.push(tokio::spawn(async move { b.commit(&id, 1, |_| true).await }));
+        }
+        let mut receipts = std::collections::BTreeSet::new();
+        let mut conflicts = 0;
+        for h in handles {
+            match h.await.expect("join") {
+                Ok(receipt) => {
+                    receipts.insert(receipt.id.to_string());
+                }
+                Err(
+                    KernelError::WrongEffectPhase { .. }
+                    | KernelError::CommitInDoubt { .. }
+                    | KernelError::DuplicateCommit { .. },
+                ) => conflicts += 1,
+                Err(other) => panic!("unexpected commit error: {other:?}"),
+            }
+        }
+        assert_eq!(
+            connector.commits.load(Ordering::SeqCst),
+            1,
+            "the external system must be reached exactly once"
+        );
+        assert_eq!(receipts.len(), 1, "all successful callers see one receipt: {receipts:?}");
+        assert!(conflicts <= 7);
+        // And a later sequential retry idempotently returns that receipt.
+        let again = broker.commit(&fx.id, 1, |_| true).await.expect("idempotent retry");
+        assert_eq!(again.id.to_string(), *receipts.iter().next().expect("one"));
+        assert_eq!(connector.commits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Two *different* effects sharing one idempotency key: the key claim
+    /// (not just the per-effect phase) is what serializes them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_effects_sharing_a_key_commit_exactly_once() {
+        let vault = Arc::new(crate::secrets::SecretVault::in_memory());
+        vault.insert("api_token", "s3cr3t-hunter2").expect("insert");
+        let broker = Arc::new(EffectBroker::in_memory(test_signer()).expect("broker"));
+        let connector = Arc::new(MockConnector::new(vault));
+        broker.register_connector(connector.clone());
+
+        let propose_one = || {
+            broker
+                .propose(
+                    contract(EffectClass::Compensatable, "k-shared"),
+                    PrincipalId::generate(),
+                    BranchId::generate(),
+                    StepId::generate(),
+                    LeaseId::generate(),
+                )
+                .expect("propose")
+        };
+        let a = propose_one();
+        let b = propose_one();
+        broker.prepare(&a.id).await.expect("prepare a");
+        broker.prepare(&b.id).await.expect("prepare b");
+
+        let (ra, rb) = tokio::join!(
+            {
+                let broker = Arc::clone(&broker);
+                let id = a.id.clone();
+                async move { broker.commit(&id, 1, |_| true).await }
+            },
+            {
+                let broker = Arc::clone(&broker);
+                let id = b.id.clone();
+                async move { broker.commit(&id, 1, |_| true).await }
+            }
+        );
+        let ok = [&ra, &rb].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok, 1, "exactly one effect may commit under a shared key");
+        assert_eq!(connector.commits.load(Ordering::SeqCst), 1);
+        let err = if ra.is_err() { ra.unwrap_err() } else { rb.unwrap_err() };
+        assert!(
+            matches!(err, KernelError::DuplicateCommit { .. } | KernelError::WrongEffectPhase { .. }),
+            "loser gets a conflict, got {err:?}"
+        );
+    }
+
+    /// Lost-response protocol (AK-007): the external effect happened but the
+    /// commit call errored. `probe_commit` confirms execution, so the broker
+    /// records a truthful receipt instead of double-sending or lying.
+    #[tokio::test]
+    async fn lost_response_resolves_via_probe_without_reexecution() {
+        let r = rig();
+        r.connector.set_probe_mode(ProbeMode::FromRecord);
+        r.connector.fail_commits_after_effect.store(1, Ordering::SeqCst);
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-lost"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        let receipt = r.broker.commit(&fx.id, 1, |_| true).await.expect("probe recovers the receipt");
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 1, "no re-execution");
+        assert!(matches!(
+            r.broker.effect(&fx.id).expect("fx").phase,
+            EffectPhase::Committed { .. }
+        ));
+        // The receipt digests the probed response.
+        assert_eq!(r.broker.receipt(&receipt.id).expect("receipt").body, receipt.body);
+    }
+
+    /// Pre-effect failure with a definitive "nothing happened" probe: the
+    /// claim is released and a retry succeeds (exactly one execution total).
+    #[tokio::test]
+    async fn definitive_failure_releases_the_claim_for_retry() {
+        let r = rig();
+        r.connector.set_probe_mode(ProbeMode::FromRecord);
+        r.connector.fail_commits_before_effect.store(1, Ordering::SeqCst);
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-retry"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        let err = r.broker.commit(&fx.id, 1, |_| true).await.expect_err("first attempt fails");
+        assert!(matches!(err, KernelError::Connector(_)), "{err:?}");
+        // Phase restored; claim released; retry executes for real.
+        assert!(matches!(r.broker.effect(&fx.id).expect("fx").phase, EffectPhase::Prepared { .. }));
+        r.broker.commit(&fx.id, 1, |_| true).await.expect("retry commits");
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Indeterminate failure parks the effect in doubt: blind retries are
+    /// refused, `recover_in_doubt` resolves it once the connector can answer,
+    /// and the receipt appears without re-execution.
+    #[tokio::test]
+    async fn indeterminate_failure_parks_in_doubt_until_recovery() {
+        let r = rig();
+        r.connector.set_probe_mode(ProbeMode::Unknown);
+        r.connector.fail_commits_after_effect.store(1, Ordering::SeqCst);
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-doubt"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        let err = r.broker.commit(&fx.id, 1, |_| true).await.expect_err("in doubt");
+        assert!(matches!(err, KernelError::CommitInDoubt { .. }), "{err:?}");
+        assert_eq!(r.broker.in_doubt_effects().expect("list").len(), 1);
+        // A blind retry must NOT reach the connector again.
+        let err = r.broker.commit(&fx.id, 1, |_| true).await.expect_err("still in doubt");
+        assert!(matches!(err, KernelError::CommitInDoubt { .. }), "{err:?}");
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 1);
+        // Recovery with a now-answerable connector finalizes truthfully.
+        r.connector.set_probe_mode(ProbeMode::FromRecord);
+        let resolutions = r.broker.recover_in_doubt().await.expect("recover");
+        assert_eq!(resolutions.len(), 1);
+        assert!(matches!(resolutions[0].1, InDoubtResolution::Committed { .. }));
+        assert!(matches!(
+            r.broker.effect(&fx.id).expect("fx").phase,
+            EffectPhase::Committed { .. }
+        ));
+        assert_eq!(r.connector.commits.load(Ordering::SeqCst), 1, "recovery never re-executes");
+    }
+
+    /// Operator resolution for effects the connector can never answer.
+    #[tokio::test]
+    async fn operator_resolution_settles_unanswerable_in_doubt_effects() {
+        let r = rig();
+        r.connector.set_probe_mode(ProbeMode::Unknown);
+        r.connector.fail_commits_after_effect.store(1, Ordering::SeqCst);
+        let fx = propose(&r, contract(EffectClass::Compensatable, "k-op"));
+        r.broker.prepare(&fx.id).await.expect("prepare");
+        let _ = r.broker.commit(&fx.id, 1, |_| true).await;
+        // Recovery cannot help while the probe answers Unknown.
+        let resolutions = r.broker.recover_in_doubt().await.expect("recover");
+        assert!(matches!(resolutions[0].1, InDoubtResolution::StillInDoubt));
+        // The operator verified out-of-band that the effect DID happen.
+        let receipt = r
+            .broker
+            .resolve_in_doubt(
+                &fx.id,
+                OperatorResolution::Committed { response: json!({"status": "ok", "verified": "manually"}) },
+            )
+            .expect("resolve")
+            .expect("receipt");
+        assert!(matches!(
+            r.broker.effect(&fx.id).expect("fx").phase,
+            EffectPhase::Committed { .. }
+        ));
+        assert_eq!(r.broker.receipt(&receipt.id).expect("stored").body, receipt.body);
     }
 }

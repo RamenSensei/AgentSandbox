@@ -37,6 +37,7 @@ impl IntoResponse for ApiError {
             KernelError::InvalidId { .. } | KernelError::Serde(_) => StatusCode::BAD_REQUEST,
             KernelError::StaleAuthorization { .. }
             | KernelError::DuplicateCommit { .. }
+            | KernelError::CommitInDoubt { .. }
             | KernelError::WrongEffectPhase { .. }
             | KernelError::BranchDiscarded { .. }
             | KernelError::MergeConflict { .. } => StatusCode::CONFLICT,
@@ -68,11 +69,13 @@ pub fn router(kernel: Arc<Kernel>) -> Router {
         .route("/v1/capabilities/revoke", post(revoke_capability))
         .route("/v1/capabilities/:principal", get(list_capabilities))
         .route("/v1/effects", get(list_effects))
+        .route("/v1/effects/recover", post(recover_effects))
         .route("/v1/effects/:id", get(get_effect))
         .route("/v1/effects/:id/prepare", post(prepare_effect))
         .route("/v1/effects/:id/approve", post(approve_effect))
         .route("/v1/effects/:id/commit", post(commit_effect))
         .route("/v1/effects/:id/compensate", post(compensate_effect))
+        .route("/v1/effects/:id/resolve", post(resolve_effect))
         .route("/v1/replay/:mode", post(replay))
         .route("/v1/trace/query", get(trace_query))
         .route("/v1/receipts/:id", get(get_receipt))
@@ -327,6 +330,31 @@ async fn compensate_effect(
 ) -> ApiResult<impl IntoResponse> {
     let receipt = k.compensate_effect(&EffectId::parse(&id)?).await?;
     Ok(Json(serde_json::to_value(&receipt).map_err(KernelError::from)?))
+}
+
+/// Run in-doubt recovery: resolve effects parked in phase `committing`
+/// through each connector's idempotency probe.
+async fn recover_effects(State(k): State<Arc<Kernel>>) -> ApiResult<impl IntoResponse> {
+    let resolutions = k.recover_in_doubt_effects().await?;
+    Ok(Json(serde_json::json!({
+        "resolutions": resolutions
+            .into_iter()
+            .map(|(effect, resolution)| serde_json::json!({
+                "effect": effect, "resolution": resolution,
+            }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// Operator verdict on an in-doubt effect: `{"outcome": "committed",
+/// "response": {...}}` or `{"outcome": "aborted", "reason": "..."}`.
+async fn resolve_effect(
+    State(k): State<Arc<Kernel>>,
+    Path(id): Path<String>,
+    Json(req): Json<ak_effect_broker::OperatorResolution>,
+) -> ApiResult<impl IntoResponse> {
+    let receipt = k.resolve_in_doubt_effect(&EffectId::parse(&id)?, req)?;
+    Ok(Json(serde_json::json!({ "resolved": id, "receipt": receipt })))
 }
 
 #[derive(Deserialize, Default)]

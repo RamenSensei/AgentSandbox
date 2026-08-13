@@ -1,20 +1,31 @@
 //! Step scheduling: budget enforcement at step boundaries, branch fan-out
 //! limits, idle-pause bookkeeping, intent-aware prewarming and the per-step
 //! accounting record consumed by the causal ledger.
+//!
+//! ## Budget model (AK-005)
+//!
+//! Budgets are **per-episode accounts**, not one scheduler-global pool. A
+//! step's requested budget is **reserved atomically before execution** (the
+//! admission decision and the debit happen under one lock), and **settled to
+//! the actual usage afterwards**: unspent reservation is refunded, overruns
+//! beyond the reservation are charged and reported. Two concurrent steps can
+//! therefore never both pass an admission check the account can only cover
+//! once.
 
 use crate::router::{BackendRouter, Needs, RiskTier};
 use ak_core::budget::ResourceBudget;
 use ak_core::capability::Operation;
 use ak_core::denial::{Denial, DenialCode};
 use ak_core::error::{KernelError, KernelResult};
-use ak_core::ids::{BranchId, StepId};
+use ak_core::ids::{BranchId, EpisodeId, StepId};
 use ak_core::traits::{ExecutionOutcome, ExecutionRequest};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -57,7 +68,8 @@ pub struct SchedulerConfig {
     /// Maximum number of steps executing concurrently across branches
     /// (the branch fan-out budget).
     pub max_concurrent_branches: usize,
-    /// Total budget for the episode; every step's usage is charged here.
+    /// Budget installed for each episode's account when it is registered
+    /// without an explicit envelope.
     pub episode_budget: ResourceBudget,
 }
 
@@ -65,6 +77,16 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self { max_concurrent_branches: 8, episode_budget: ResourceBudget::step_default() }
     }
+}
+
+/// One episode's budget account: what is still spendable and what has been
+/// settled as actually consumed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct BudgetAccount {
+    /// Remaining spendable envelope (reservations already subtracted).
+    pub remaining: ResourceBudget,
+    /// Cumulative settled usage.
+    pub spent: ResourceBudget,
 }
 
 /// A simple warm pool of pre-created idle local workspace directories.
@@ -118,12 +140,16 @@ fn budget_denial(op: &str, reason: String) -> KernelError {
 }
 
 /// The step scheduler: routes each step through the [`BackendRouter`],
-/// enforces the episode budget at step boundaries, bounds concurrent branch
-/// fan-out with a semaphore, and records accounting for the ledger.
+/// enforces per-episode budgets with reserve-then-settle semantics, bounds
+/// concurrent branch fan-out with a semaphore, and records accounting for
+/// the ledger.
 pub struct StepScheduler {
     router: BackendRouter,
     fanout: Arc<Semaphore>,
-    remaining: Mutex<ResourceBudget>,
+    /// Per-episode budget accounts. A `std` mutex: critical sections are
+    /// short and never held across an await point.
+    accounts: StdMutex<HashMap<EpisodeId, BudgetAccount>>,
+    default_episode_budget: ResourceBudget,
     records: Mutex<Vec<StepRecord>>,
     paused: Mutex<HashSet<BranchId>>,
     warm_pool: Option<WarmPool>,
@@ -134,7 +160,8 @@ impl StepScheduler {
         Self {
             router,
             fanout: Arc::new(Semaphore::new(config.max_concurrent_branches.max(1))),
-            remaining: Mutex::new(config.episode_budget),
+            accounts: StdMutex::new(HashMap::new()),
+            default_episode_budget: config.episode_budget,
             records: Mutex::new(Vec::new()),
             paused: Mutex::new(HashSet::new()),
             warm_pool: None,
@@ -152,9 +179,89 @@ impl StepScheduler {
         &self.router
     }
 
-    /// Remaining episode budget.
-    pub async fn remaining_budget(&self) -> ResourceBudget {
-        *self.remaining.lock().await
+    fn accounts(&self) -> std::sync::MutexGuard<'_, HashMap<EpisodeId, BudgetAccount>> {
+        match self.accounts.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    // ---- per-episode budget accounts ---------------------------------------
+
+    /// Open (or overwrite) an episode's budget account with `remaining`
+    /// spendable and `spent` already settled. Called at episode creation and
+    /// again at restart-recovery time with the persisted totals.
+    pub fn register_episode(
+        &self,
+        episode: &EpisodeId,
+        remaining: ResourceBudget,
+        spent: ResourceBudget,
+    ) {
+        self.accounts().insert(episode.clone(), BudgetAccount { remaining, spent });
+    }
+
+    /// Open an episode account with the configured default envelope.
+    pub fn register_episode_default(&self, episode: &EpisodeId) {
+        self.register_episode(episode, self.default_episode_budget, ResourceBudget::zero());
+    }
+
+    /// The configured default per-episode budget envelope.
+    pub fn default_episode_budget(&self) -> ResourceBudget {
+        self.default_episode_budget
+    }
+
+    /// Remaining budget of one episode's account.
+    pub fn remaining_budget(&self, episode: &EpisodeId) -> Option<ResourceBudget> {
+        self.accounts().get(episode).map(|a| a.remaining)
+    }
+
+    /// The full account (remaining + settled spend) of one episode.
+    pub fn budget_account(&self, episode: &EpisodeId) -> Option<BudgetAccount> {
+        self.accounts().get(episode).copied()
+    }
+
+    /// Drop an episode's account (episode ended).
+    pub fn close_episode(&self, episode: &EpisodeId) {
+        self.accounts().remove(episode);
+    }
+
+    /// Atomically reserve `amount` against an episode account. Admission and
+    /// debit happen under one lock: concurrent reservations can never jointly
+    /// exceed the remaining envelope. Returns the insufficient dimensions on
+    /// refusal.
+    fn reserve(&self, episode: &EpisodeId, amount: &ResourceBudget) -> Result<(), Vec<&'static str>> {
+        let mut accounts = self.accounts();
+        let account = accounts.get_mut(episode).ok_or_else(|| vec!["unknown_episode"])?;
+        if !amount.fits_within(&account.remaining) {
+            return Err(amount.exceeding_dimensions(&account.remaining));
+        }
+        account.remaining = account.remaining.saturating_sub(amount);
+        Ok(())
+    }
+
+    /// Settle a reservation to the actual usage: refund the unspent part,
+    /// charge any overrun beyond the reservation, and add to the settled
+    /// spend. Returns the overrun dimensions (empty when usage fit).
+    fn settle(
+        &self,
+        episode: &EpisodeId,
+        reserved: &ResourceBudget,
+        usage: &ResourceBudget,
+    ) -> Vec<&'static str> {
+        let mut accounts = self.accounts();
+        let Some(account) = accounts.get_mut(episode) else { return Vec::new() };
+        let refund = reserved.saturating_sub(usage);
+        let overrun_amount = usage.saturating_sub(reserved);
+        account.remaining = account.remaining.saturating_add(&refund).saturating_sub(&overrun_amount);
+        account.spent = account.spent.saturating_add(usage);
+        usage.exceeding_dimensions(reserved)
+    }
+
+    /// Return an unused reservation in full (execution failed before usage).
+    fn refund(&self, episode: &EpisodeId, reserved: &ResourceBudget) {
+        if let Some(account) = self.accounts().get_mut(episode) {
+            account.remaining = account.remaining.saturating_add(reserved);
+        }
     }
 
     // ---- idle-pause bookkeeping -------------------------------------------
@@ -222,11 +329,13 @@ impl StepScheduler {
 
     // ---- step execution ---------------------------------------------------
 
-    /// Execute one step: enforce the budget, wait for a fan-out permit, route
-    /// to the cheapest satisfying backend, execute, charge usage and record
-    /// the step-boundary accounting entry.
+    /// Execute one step: atomically reserve the requested budget against the
+    /// episode account, wait for a fan-out permit, route to the cheapest
+    /// satisfying backend, execute, settle the reservation to actual usage
+    /// and record the step-boundary accounting entry.
     pub async fn execute_step(
         &self,
+        episode: &EpisodeId,
         step: StepId,
         req: ExecutionRequest,
         risk: RiskTier,
@@ -244,42 +353,62 @@ impl StepScheduler {
             })));
         }
 
-        // Refuse before spending anything if the step cannot fit.
-        {
-            let remaining = self.remaining.lock().await;
-            if !req.budget.fits_within(&remaining) {
-                return Err(budget_denial(
-                    &op,
-                    "episode budget cannot cover this step's requested budget".into(),
-                ));
-            }
+        // Reserve before spending anything: admission + debit are atomic, so
+        // racing steps cannot jointly overdraw the account (AK-005).
+        if let Err(short) = self.reserve(episode, &req.budget) {
+            return Err(budget_denial(
+                &op,
+                format!(
+                    "episode `{episode}` budget cannot cover this step's requested budget \
+                     (insufficient: {})",
+                    short.join(", ")
+                ),
+            ));
         }
+        let reserved = req.budget;
 
         // Branch fan-out budget: wait for a permit, measuring queue time.
         let queued = Instant::now();
-        let _permit = self
-            .fanout
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| KernelError::Other(format!("scheduler shut down: {e}")))?;
+        let permit = match self.fanout.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                self.refund(episode, &reserved);
+                return Err(KernelError::Other(format!("scheduler shut down: {e}")));
+            }
+        };
+        let _permit = permit;
         let queue_ms = queued.elapsed().as_millis() as u64;
 
-        let backend = self.router.route(risk, needs)?;
+        let backend = match self.router.route(risk, needs) {
+            Ok(b) => b,
+            Err(e) => {
+                self.refund(episode, &reserved);
+                return Err(e);
+            }
+        };
         let backend_name = backend.profile().name;
         let branch = req.branch.clone();
 
         let started = Instant::now();
-        let outcome = backend.execute(req).await?;
+        let outcome = match backend.execute(req).await {
+            Ok(o) => o,
+            Err(e) => {
+                // Nothing was measurably consumed on backend refusal; return
+                // the reservation so a denied step does not leak budget.
+                self.refund(episode, &reserved);
+                return Err(e);
+            }
+        };
         let exec_ms = started.elapsed().as_millis() as u64;
 
-        // Charge usage at the step boundary; report exhaustion honestly.
-        {
-            let mut remaining = self.remaining.lock().await;
-            let exhausted = remaining.charge(&outcome.usage);
-            if !exhausted.is_empty() {
-                tracing::warn!(dimensions = ?exhausted, "episode budget dimension(s) exhausted");
-            }
+        // Settle the reservation to actual usage; report overruns honestly.
+        let overrun = self.settle(episode, &reserved, &outcome.usage);
+        if !overrun.is_empty() {
+            tracing::warn!(
+                episode = %episode,
+                dimensions = ?overrun,
+                "step usage exceeded its reservation; overrun charged to the episode account"
+            );
         }
 
         self.records.lock().await.push(StepRecord {

@@ -22,4 +22,4 @@ pub mod router;
 pub mod step;
 
 pub use router::{BackendRouter, Needs, RiskTier};
-pub use step::{PrewarmPlan, SchedulerConfig, StepRecord, StepScheduler, WarmPool};
+pub use step::{BudgetAccount, PrewarmPlan, SchedulerConfig, StepRecord, StepScheduler, WarmPool};

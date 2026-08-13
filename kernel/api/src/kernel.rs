@@ -350,6 +350,9 @@ impl Kernel {
         // Materialize the root workspace for the initial branch.
         let dir = self.backend.workspace_for(&handle.branch)?;
         self.dag.materialize(&handle.root.id, &dir)?;
+        // Open the episode's own budget account (budgets are per-episode,
+        // not scheduler-global).
+        self.scheduler.register_episode_default(&handle.episode);
         lock(&self.episodes)?.insert(
             handle.episode.clone(),
             EpisodeInfo {
@@ -382,7 +385,10 @@ impl Kernel {
             root_state: info.root_state,
             branches,
             created_by: info.created_by,
-            remaining_budget: self.scheduler.remaining_budget().await,
+            remaining_budget: self
+                .scheduler
+                .remaining_budget(episode)
+                .unwrap_or_else(ResourceBudget::zero),
         })
     }
 
@@ -560,6 +566,24 @@ impl Kernel {
             return self.deny_step(&writer, &b, step, &who, denial);
         }
 
+        // ---- the action budget must fit inside the lease's envelope -------
+        // (AK-005: a client must not out-spend the budget its lease grants.)
+        if !action.budget.fits_within(&lease.budget) {
+            let over = action.budget.exceeding_dimensions(&lease.budget);
+            let denial = Denial {
+                code: DenialCode::BudgetExhausted,
+                attempted_operation: operation.clone(),
+                reason: format!(
+                    "the action budget exceeds the lease budget envelope in: {}",
+                    over.join(", ")
+                ),
+                safe_alternatives: Vec::new(),
+                requestable_scopes: Vec::new(),
+                escalation_allowed: true,
+            };
+            return self.deny_step(&writer, &b, step, &who, denial);
+        }
+
         // ---- deterministic policy evaluation ---------------------------
         let confinement = {
             let decision =
@@ -584,7 +608,13 @@ impl Kernel {
         };
 
         // ---- consume the lease use --------------------------------------
-        self.leases().consume_use(&action.lease, now).map_err(KernelError::from)?;
+        // Atomic conditional decrement: when steps race for the last use,
+        // exactly one wins and the rest get a machine-readable denial here
+        // (AK-004).
+        if let Err(e) = self.leases().consume_use(&action.lease, now) {
+            let denial = denial_from_consume_failure(&operation, &e);
+            return self.deny_step(&writer, &b, step, &who, denial);
+        }
 
         match &action.kind {
             ActionKind::ConnectorOp { connector, operation: op, params: op_params } => {
@@ -808,7 +838,7 @@ impl Kernel {
         )?;
         let outcome = match self
             .scheduler
-            .execute_step(step.clone(), req, RiskTier::Low, &Needs::default())
+            .execute_step(&b.episode, step.clone(), req, RiskTier::Low, &Needs::default())
             .await
         {
             Ok(o) => o,
@@ -1208,9 +1238,39 @@ fn lock<'a, T>(m: &'a Mutex<T>) -> KernelResult<std::sync::MutexGuard<'a, T>> {
     m.lock().map_err(|_| KernelError::Storage("kernel mutex poisoned".into()))
 }
 
+/// Map an atomic consume-use refusal (lost race, revoked, expired,
+/// exhausted) to a machine-readable denial.
+fn denial_from_consume_failure(operation: &Operation, err: &ak_identity::IdentityError) -> Denial {
+    let (code, reason) = match err {
+        ak_identity::IdentityError::LeaseUnusable { reason, .. } => match reason.as_str() {
+            "expired" => (
+                DenialCode::CapabilityExpired,
+                "the presented lease expired before the use could be consumed".to_string(),
+            ),
+            "revoked" => (
+                DenialCode::CapabilityDenied,
+                "the presented lease was revoked before the use could be consumed".to_string(),
+            ),
+            _ => (
+                DenialCode::CapabilityExhausted,
+                "the presented lease has no remaining uses (a concurrent step may have consumed the last one)"
+                    .to_string(),
+            ),
+        },
+        other => (DenialCode::CapabilityDenied, format!("lease could not be consumed: {other}")),
+    };
+    Denial {
+        code,
+        attempted_operation: operation.clone(),
+        reason,
+        safe_alternatives: Vec::new(),
+        requestable_scopes: Vec::new(),
+        escalation_allowed: true,
+    }
+}
+
 /// Map a deterministic lease-check failure to a machine-readable denial.
-fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure) -> Denial {
-    let (code, reason) = match failure {
+fn denial_from_lease_failure(operation: &Operation, failure: &LeaseCheckFailure) -> Denial {    let (code, reason) = match failure {
         LeaseCheckFailure::Revoked => {
             (DenialCode::CapabilityDenied, "the presented lease has been revoked".to_string())
         }

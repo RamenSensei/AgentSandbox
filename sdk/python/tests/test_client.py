@@ -47,6 +47,15 @@ class ClientTest(unittest.TestCase):
     def test_healthz(self) -> None:
         self.assertEqual(self.kernel.healthz()["status"], "ok")
 
+    def test_register_principal(self) -> None:
+        principal = {
+            "id": "pr-bootstrap",
+            "kind": "agent",
+            "display_name": "bootstrap",
+            "trust": "standard",
+        }
+        self.assertEqual(self.kernel.register_principal(principal), principal)
+
     def test_create_and_describe_episode(self) -> None:
         ep = self._episode()
         self.assertTrue(ep.episode.startswith("ep-"))

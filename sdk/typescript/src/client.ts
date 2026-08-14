@@ -23,6 +23,7 @@ import type {
   LedgerEvent,
   OperatorResolution,
   PendingEffect,
+  Principal,
   RawGrep,
   RawPage,
   Receipt,
@@ -156,6 +157,14 @@ export class Kernel {
 
   async healthz(): Promise<{ status: string; version: string }> {
     return this.request("GET", "/healthz");
+  }
+
+  // -- principals ------------------------------------------------------
+
+  /** POST /v1/principals — bootstrap a durable identity. Admin-only when
+   * server authentication is enabled. */
+  async registerPrincipal(principal: Principal): Promise<Principal> {
+    return this.request("POST", "/v1/principals", principal);
   }
 
   // -- episodes ---------------------------------------------------------

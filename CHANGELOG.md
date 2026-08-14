@@ -10,6 +10,11 @@ and on-disk formats.
 ## [Unreleased]
 
 ### Added
+- **HTTP principal bootstrap.** The standalone control plane now exposes an
+  admin-only `POST /v1/principals` route (with Python and TypeScript SDK
+  methods) so a fresh server can register durable agent identities before
+  creating episodes or minting leases. Episode creation now rejects unknown
+  owners before writing DAG or ledger state.
 - **Authenticated SOCKS5 on the transparent egress path.** The same proxy
   listener now accepts RFC 1928 CONNECT with mandatory per-step RFC 1929
   credentials and injects `ALL_PROXY=socks5h://…`, so SOCKS-aware SSH,
@@ -48,6 +53,11 @@ and on-disk formats.
   rather than skip.
 
 ### Fixed
+- **Transparent HTTP proxy auth for Python-native tools.** HTTP proxy URLs now
+  use the same `ak:<per-step-token>` username/password shape as SOCKS5. This
+  keeps token auth, revocation and all egress guards intact while making
+  stdlib `urllib` (and tools built on it) emit `Proxy-Authorization` instead
+  of receiving a 407 because the old URL had an empty password.
 - **Linux build of the rlimit backstops.** The `setrlimit` resource
   argument is `__rlimit_resource_t` under glibc (not `c_int` as on
   macOS); the rlimit backstop code now compiles on Linux-gnu targets.

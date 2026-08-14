@@ -32,6 +32,16 @@ test("healthz", async () => {
   assert.equal(h.status, "ok");
 });
 
+test("register principal", async () => {
+  const principal = {
+    id: "pr-bootstrap",
+    kind: "agent" as const,
+    display_name: "bootstrap",
+    trust: "standard" as const,
+  };
+  assert.deepEqual(await kernel.registerPrincipal(principal), principal);
+});
+
 test("create episode (principal/objective) and execute a successful step", async () => {
   const ep = await kernel.createEpisode({
     principal: "pr-agent",

@@ -1120,6 +1120,10 @@ impl Kernel {
         workspace: Option<&Path>,
         objective: &str,
     ) -> KernelResult<EpisodeHandle> {
+        // An episode owner is an authorization identity, not an arbitrary
+        // label. Refuse before writing any DAG or ledger state so a missing
+        // bootstrap step cannot leave behind an unusable episode.
+        self.registry().get(actor).map_err(KernelError::from)?;
         let ws = workspace.or(self.config.workspace_root.as_deref());
         let handle = self
             .dag

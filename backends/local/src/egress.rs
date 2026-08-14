@@ -10,7 +10,7 @@
 //!
 //! Per connection the proxy enforces:
 //!
-//! - **token auth** (`Proxy-Authorization: Basic <token:>`): a connection
+//! - **token auth** (`Proxy-Authorization: Basic <ak:token>`): a connection
 //!   without a valid session token gets `407` and reaches nothing;
 //! - **domain allowlist** (`*`-globs) from the step's confinement;
 //! - **SSRF guards**: literal-IP targets refused, names resolved and every
@@ -141,8 +141,10 @@ pub struct EgressGrant {
 }
 
 impl EgressGrant {
-    /// `http://<token>@127.0.0.1:<port>` — standard proxy-URL shape every
-    /// mainstream tool turns into `Proxy-Authorization: Basic`.
+    /// `http://ak:<token>@127.0.0.1:<port>` — standard proxy-URL shape every
+    /// mainstream tool turns into `Proxy-Authorization: Basic`. The token is
+    /// the non-empty password (matching SOCKS5), because Python's stdlib
+    /// deliberately omits proxy auth when a URL carries an empty password.
     pub fn proxy_url(&self) -> String {
         self.proxy_url_via(self.port)
     }
@@ -151,7 +153,7 @@ impl EgressGrant {
     /// where the sandbox reaches the proxy via the in-namespace forwarder
     /// port instead of the host listener. Same token, same session.
     pub fn proxy_url_via(&self, port: u16) -> String {
-        format!("http://{}:@127.0.0.1:{}", self.token, port)
+        format!("http://ak:{}@127.0.0.1:{}", self.token, port)
     }
 
     /// `socks5h://ak:<token>@127.0.0.1:<port>` — the `h` keeps DNS at the
@@ -422,7 +424,8 @@ fn bearer_token(req: &RequestHead) -> Option<String> {
         .or(value.strip_prefix("basic "))?;
     let decoded = base64_decode(b64.trim())?;
     let creds = String::from_utf8(decoded).ok()?;
-    Some(creds.split(':').next().unwrap_or("").to_string())
+    let (username, token) = creds.split_once(':')?;
+    (username == "ak" && !token.is_empty()).then(|| token.to_string())
 }
 
 /// Minimal standard-alphabet base64 decoder (no dependency juggling).
@@ -1023,16 +1026,7 @@ mod tests {
         let grant = proxy.grant(vec!["127.0.0.1".into()], 1 << 20);
 
         let mut conn = tokio::net::UnixStream::connect(&sock).await.unwrap();
-        let token = grant
-            .proxy_url()
-            .split("//")
-            .nth(1)
-            .unwrap()
-            .split(':')
-            .next()
-            .unwrap()
-            .to_string();
-        let auth = ak_core::b64::encode(format!("{token}:").as_bytes());
+        let auth = ak_core::b64::encode(format!("ak:{}", grant.token).as_bytes());
         conn.write_all(
             format!(
                 "CONNECT 127.0.0.1:{} HTTP/1.1\r\nproxy-authorization: Basic {auth}\r\n\r\n",
@@ -1192,9 +1186,9 @@ mod tests {
     }
 
     fn basic_auth(token: &str) -> String {
-        // Standard alphabet encode of "token:".
+        // Standard alphabet encode of "ak:token".
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let input = format!("{token}:");
+        let input = format!("ak:{token}");
         let bytes = input.as_bytes();
         let mut out = String::new();
         for chunk in bytes.chunks(3) {

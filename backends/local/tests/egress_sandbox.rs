@@ -140,7 +140,34 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
         "egress bytes must be metered at the proxy"
     );
 
-    // 2. The same route also speaks authenticated SOCKS5. This is the
+    // 2. Python's stdlib requires both proxy URL userinfo fields to be
+    //    non-empty before it emits Proxy-Authorization. This is a high-value
+    //    agent path (pip and many bootstrap scripts build on urllib).
+    let outcome = backend
+        .execute(shell_request(
+            &branch,
+            &format!(
+                "python3 -c 'import urllib.request; print(urllib.request.urlopen(\"http://127.0.0.1:{}/hello\", timeout=5).read().decode())'",
+                target.port()
+            ),
+            vec!["127.0.0.1".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.exit_code,
+        0,
+        "urllib stderr: {}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&outcome.stdout).contains("hello-through-egress-proxy"),
+        "urllib route failed: {}",
+        String::from_utf8_lossy(&outcome.stdout)
+    );
+    assert!(outcome.usage.network_bytes > 0);
+
+    // 3. The same route also speaks authenticated SOCKS5. This is the
     //    non-HTTP path used by SSH/database clients via ALL_PROXY; DNS stays
     //    at the policy-enforcing proxy (`socks5h`).
     let outcome = backend
@@ -167,7 +194,7 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
     );
     assert!(outcome.usage.network_bytes > 0);
 
-    // 3. Bypassing the proxy from inside the sandbox: denied by Seatbelt.
+    // 4. Bypassing the proxy from inside the sandbox: denied by Seatbelt.
     let outcome = backend
         .execute(shell_request(
             &branch,
@@ -184,7 +211,7 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
         "direct network must stay denied; only the proxy port is open"
     );
 
-    // 4. A domain outside the step's egress grant: refused at the proxy
+    // 5. A domain outside the step's egress grant: refused at the proxy
     //    (403 → `curl -f` fails, and the content never crosses).
     let outcome = backend
         .execute(shell_request(
@@ -203,7 +230,7 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
         "proxy must refuse hosts outside the granted domains, got: {stdout}"
     );
 
-    // 5. No egress domains at all: no proxy env of either protocol, fully
+    // 6. No egress domains at all: no proxy env of either protocol, fully
     //    offline.
     let outcome = backend
         .execute(shell_request(

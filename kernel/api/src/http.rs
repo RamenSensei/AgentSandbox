@@ -12,6 +12,7 @@ use ak_core::budget::ResourceBudget;
 use ak_core::capability::{Constraint, Operation};
 use ak_core::error::{ErrorEnvelope, KernelError};
 use ak_core::ids::{BranchId, EffectId, EpisodeId, LeaseId, PrincipalId, ReceiptId, StateId};
+use ak_core::Principal;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -75,6 +76,7 @@ pub fn router(kernel: Arc<Kernel>) -> Router {
 pub fn router_with_auth(kernel: Arc<Kernel>, auth: AuthConfig) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/principals", post(register_principal))
         .route("/v1/episodes", post(create_episode))
         .route("/v1/episodes/:id", get(describe_episode))
         .route("/v1/steps/execute", post(execute_step))
@@ -113,6 +115,19 @@ pub fn router_with_auth(kernel: Arc<Kernel>, auth: AuthConfig) -> Router {
 
 async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// Bootstrap a durable identity before it creates episodes or requests
+/// capabilities. Identity creation is an administrative control-plane action:
+/// authenticated agents may never choose their own kind, parent or trust.
+async fn register_principal(
+    State(k): State<Arc<Kernel>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(principal): Json<Principal>,
+) -> ApiResult<impl IntoResponse> {
+    auth.require_role(Role::Admin)?;
+    k.register_principal(&principal)?;
+    Ok((StatusCode::CREATED, Json(principal)))
 }
 
 #[derive(Deserialize)]

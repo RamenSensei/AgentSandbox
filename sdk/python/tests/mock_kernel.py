@@ -144,6 +144,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"status": "ok", "version": "1.0.0-mock"})
             return True
 
+        if method == "POST" and path == "/v1/principals":
+            self._send(201, self._body())
+            return True
+
         if method == "POST" and path == "/v1/episodes":
             body = self._body()
             ep_id = st.next_id("ep")

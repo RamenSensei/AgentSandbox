@@ -107,6 +107,11 @@ cargo run -p ak-agent-utility-bench -- --report target/utility-report.json
 cargo run -p ak-api --bin agent-kernel-server -- --insecure-no-auth \
     --http-read-safe docs.rs --http-read-safe '*.wikipedia.org' \
     --mcp-server 'notes=python3 notes_server.py'
+
+# Bootstrap each durable identity once (admin-only with authentication).
+curl -X POST http://127.0.0.1:7466/v1/principals \
+  -H 'content-type: application/json' \
+  -d '{"id":"pr-00000000-0000-4000-8000-000000000001","kind":"agent","display_name":"coding-agent","trust":"standard"}'
 ```
 
 ### The agent loop, without bookkeeping

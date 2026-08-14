@@ -158,6 +158,17 @@ class Kernel:
     def healthz(self) -> Dict[str, Json]:
         return self._request("GET", "/healthz")
 
+    # -- principals ------------------------------------------------------
+
+    def register_principal(self, principal: Mapping[str, Json]) -> Dict[str, Json]:
+        """POST /v1/principals — bootstrap a durable identity.
+
+        This is an admin-only operation when server authentication is enabled.
+        ``principal`` uses the canonical wire fields: ``id``, ``kind``,
+        ``display_name``, optional ``parent`` and ``trust``.
+        """
+        return self._request("POST", "/v1/principals", dict(principal))
+
     # -- episodes ---------------------------------------------------------
 
     def create_episode(

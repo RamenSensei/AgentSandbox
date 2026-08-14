@@ -570,6 +570,31 @@ async fn authenticated_router_enforces_tokens_principals_and_ownership() {
     ]);
     let app = ak_api::http::router_with_auth(kernel.clone(), auth);
 
+    // Identity bootstrap is administrative: an agent token cannot choose its
+    // own trust or lineage, while an admin can register a fresh principal.
+    let newcomer = Principal::new_agent("newcomer");
+    let (status, body) = req_auth(
+        &app,
+        "POST",
+        "/v1/principals",
+        Some("alice-token"),
+        Some(serde_json::to_value(&newcomer).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "MISSING_ROLE");
+    let (status, body) = req_auth(
+        &app,
+        "POST",
+        "/v1/principals",
+        Some("admin-token"),
+        Some(serde_json::to_value(&newcomer).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], newcomer.id.as_str());
+    assert_eq!(kernel.registry().get(&newcomer.id).unwrap(), newcomer);
+
     // No token → 401; healthz stays open.
     let (status, _) = req_auth(&app, "GET", "/healthz", None, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -670,6 +695,71 @@ async fn authenticated_router_enforces_tokens_principals_and_ownership() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["code"], "MISSING_ROLE");
+}
+
+#[tokio::test]
+async fn fresh_http_server_can_register_an_agent_then_execute_auto() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_in(&tmp);
+    let app = http::router(kernel.clone());
+    let who = Principal::new_agent("http-bootstrap");
+
+    // Creation fails before it can write an orphan episode whose owner has
+    // no identity and therefore can never obtain a capability.
+    let (status, missing) = req_auth(
+        &app,
+        "POST",
+        "/v1/episodes",
+        None,
+        Some(json!({ "principal": who.id, "objective": "too early" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["code"], "NOT_FOUND");
+    assert!(kernel.registry().get(&who.id).is_err());
+
+    let (status, registered) = req_auth(
+        &app,
+        "POST",
+        "/v1/principals",
+        None,
+        Some(serde_json::to_value(&who).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(registered["id"], who.id.as_str());
+
+    let (status, episode) = req_auth(
+        &app,
+        "POST",
+        "/v1/episodes",
+        None,
+        Some(json!({ "principal": who.id, "objective": "first real step" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, step) = req_auth(
+        &app,
+        "POST",
+        "/v1/steps/execute_auto",
+        None,
+        Some(json!({
+            "principal": who.id,
+            "branch": episode["branch"],
+            "kind": {
+                "kind": "shell",
+                "command": "printf 42",
+                "cwd": null,
+                "env": {}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{step}");
+    assert_eq!(step["observation"]["kind"], "success");
+    assert_eq!(step["observation"]["stdout_head"], "42");
+    assert_eq!(step["lease_minted"], true);
 }
 
 // ------------------------------------------------------- restart recovery

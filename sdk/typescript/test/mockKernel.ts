@@ -124,6 +124,11 @@ export async function makeServer(): Promise<{
         return;
       }
 
+      if (method === "POST" && path === "/v1/principals") {
+        send(201, body);
+        return;
+      }
+
       if (method === "POST" && path === "/v1/episodes") {
         const ep = nextId("ep");
         const br = nextId("br");

@@ -23,6 +23,7 @@ servers:
   - url: /
 tags:
   - name: health
+  - name: principals
   - name: episodes
   - name: steps
   - name: branches
@@ -51,11 +52,32 @@ paths:
                   status: { const: ok }
                   version: { type: string }
 
+  /v1/principals:
+    post:
+      tags: [principals]
+      operationId: principal.register
+      summary: Register a durable principal before it requests capabilities.
+      description: Requires the admin role when authentication is enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Principal" }
+      responses:
+        "201":
+          description: Principal registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Principal" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
   /v1/episodes:
     post:
       tags: [episodes]
       operationId: episode.create
       summary: Create an episode with its root state and main branch.
+      description: The principal must already be registered.
       requestBody:
         required: true
         content:
@@ -67,6 +89,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EpisodeCreateResponse" }
+        "404":
+          description: The principal is not registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         default: { $ref: "#/components/responses/Error" }
 
   /v1/episodes/{id}:
@@ -811,6 +838,20 @@ components:
         tokens: { type: integer, minimum: 0 }
         cost_micro_usd: { type: integer, minimum: 0 }
         risk_units: { type: integer, minimum: 0 }
+
+    Principal:
+      type: object
+      required: [id, kind, display_name, trust]
+      properties:
+        id: { type: string, pattern: "^pr-" }
+        kind:
+          type: string
+          enum: [agent, sub_agent, tool, human, kernel]
+        display_name: { type: string }
+        parent: { type: string, pattern: "^pr-" }
+        trust:
+          type: string
+          enum: [quarantined, untrusted, limited, standard, elevated]
 
     Constraint:
       description: Internally tagged by "kind" (ak-core Constraint).

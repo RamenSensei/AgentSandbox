@@ -16,6 +16,17 @@ export type Json =
   | Json[]
   | { [key: string]: Json };
 
+export type PrincipalKind = "agent" | "sub_agent" | "tool" | "human" | "kernel";
+export type TrustLevel = "quarantined" | "untrusted" | "limited" | "standard" | "elevated";
+
+export interface Principal {
+  id: string;
+  kind: PrincipalKind;
+  display_name: string;
+  parent?: string;
+  trust: TrustLevel;
+}
+
 // ---------------------------------------------------------------------------
 // Budget
 // ---------------------------------------------------------------------------

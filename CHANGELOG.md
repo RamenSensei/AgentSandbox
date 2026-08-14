@@ -10,6 +10,27 @@ and on-disk formats.
 ## [Unreleased]
 
 ### Added
+- **Linux netns egress forwarder: bwrap gets real, confined egress.** The
+  bubblewrap sandbox keeps its fully unshared network namespace and still
+  reaches the egress proxy: a new `ak-egress-fwd` binary runs inside the
+  sandbox, brings the namespace loopback up, listens on a fixed
+  in-namespace port (the workload's `http_proxy`) and bridges each
+  connection into the proxy's new **Unix-socket listener**, bind-mounted
+  into the sandbox. The namespace has no other interface and the socket
+  leads only to the proxy, so token auth, domain allowlists, SSRF guards
+  and byte metering remain the sole route out. The route is
+  **probe-verified at backend construction** (the forwarder's `--probe`
+  mode round-trips through a scratch sandbox, trying capability variants
+  including `--cap-add CAP_NET_ADMIN`); hosts where the probe fails keep
+  bwrap egress off exactly as before — fail closed, never a silent
+  bypass. Ships as a `[[bin]]` of `ak-backend-local`; discovery order:
+  `LocalBackendConfig::egress_forwarder`, `AK_EGRESS_FWD`, alongside the
+  current executable, `PATH`.
+
+### Fixed
+- **Linux build of the rlimit backstops.** The `setrlimit` resource
+  argument is `__rlimit_resource_t` under glibc (not `c_int` as on
+  macOS); the rlimit backstop code now compiles on Linux-gnu targets.
 - **Remote-backend state sync: excursions become real state transitions.**
   The forkd and Cube adapters now accept a `StateProvider` (wired
   automatically for `KernelConfig.backends`) and materialize kernel state

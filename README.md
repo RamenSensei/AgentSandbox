@@ -135,7 +135,11 @@ control-plane ceremony:
   `pip install` / `cargo fetch` / `git fetch` / `curl` work unmodified:
   the sandbox stays offline except a token-authenticated loopback proxy
   that enforces the domain globs, SSRF guards, a port allowlist and byte
-  metering at the one hop where they can actually be enforced.
+  metering at the one hop where they can actually be enforced. On Linux
+  the bwrap sandbox keeps its unshared network namespace: the
+  `ak-egress-fwd` forwarder (probe-verified at startup) bridges an
+  in-namespace listener to the proxy's Unix socket, so the proxy stays
+  the *only* route out — hosts where the probe fails keep egress off.
 - **`POST /v1/branches/{id}/explore`** — server-side parallel candidate
   search: fork N branches, run candidates + an evaluator concurrently,
   merge the winner, discard the losers, one call.

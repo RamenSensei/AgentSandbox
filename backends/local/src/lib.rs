@@ -28,9 +28,16 @@
 //! trusted-code development only.
 //!
 //! Because the local sandbox denies all direct network access, egress
-//! happens exclusively through typed connectors ([`ActionKind::HttpRead`]
-//! and effect proposals), where `egress_domains` are enforced on resolved
-//! addresses. A shell step can therefore never bypass the domain policy.
+//! happens exclusively through the transparent egress proxy (steps whose
+//! confinement grants `egress_domains`) and typed connectors
+//! ([`ActionKind::HttpRead`], effect proposals) — both enforce the domain
+//! allowlist on resolved addresses, so a shell step can never bypass the
+//! domain policy. Proxy reachability is sandbox-verified per platform: the
+//! Seatbelt profile opens exactly the proxy's loopback port; bwrap keeps
+//! its unshared netns and reaches the proxy only through the
+//! probe-verified `ak-egress-fwd` forwarder bridging an in-namespace
+//! listener to the proxy's bind-mounted Unix socket. Hosts where the
+//! probe fails keep egress off (fail closed).
 //!
 //! Additional confinement (all platforms):
 //!
@@ -116,6 +123,10 @@ pub struct LocalBackendConfig {
     /// `true` lets shell commands run as plain confined host processes and
     /// is **only** safe for fully trusted code on a development machine.
     pub dangerously_allow_unsandboxed: bool,
+    /// Explicit path of the `ak-egress-fwd` forwarder binary used for
+    /// bwrap egress. `None` = auto-discover (`AK_EGRESS_FWD`, a sibling of
+    /// the current executable, `PATH`). Only consulted on Linux.
+    pub egress_forwarder: Option<PathBuf>,
 }
 
 impl LocalBackendConfig {
@@ -128,6 +139,7 @@ impl LocalBackendConfig {
             egress: EgressConfig::default(),
             max_file_bytes: 4 << 30,
             dangerously_allow_unsandboxed: false,
+            egress_forwarder: None,
         }
     }
 
@@ -149,6 +161,20 @@ pub struct LocalBackend {
     processes: ProcessRegistry,
     /// Lazily started egress proxy (needs a tokio runtime).
     egress_proxy: tokio::sync::OnceCell<EgressProxy>,
+    /// Verified bwrap egress route (Linux): forwarder binary + the
+    /// capability-flag variant that passed [`sandbox::probe_netns_egress`],
+    /// plus the host path of the proxy's Unix socket. `None` = bwrap
+    /// egress stays off (fail closed).
+    netns_egress: Option<NetnsEgress>,
+    /// One-time start of the proxy's Unix listener (bwrap route).
+    unix_listener: tokio::sync::OnceCell<()>,
+}
+
+/// The probe-verified bwrap egress route.
+struct NetnsEgress {
+    forwarder: PathBuf,
+    variant: Vec<String>,
+    sock_path: PathBuf,
 }
 
 impl LocalBackend {
@@ -158,12 +184,42 @@ impl LocalBackend {
         std::fs::create_dir_all(&config.root)?;
         let tech = sandbox::probe();
         tracing::info!(?tech, "local backend sandbox probe");
+        // bwrap + egress enabled: verify the in-namespace forwarder route
+        // end-to-end before ever advertising it (capability is verified,
+        // never declared). Failure is loud but non-fatal: egress stays off.
+        let netns_egress = if tech == SandboxTech::Bwrap && config.egress.enabled {
+            match sandbox::find_egress_forwarder(config.egress_forwarder.as_deref()) {
+                Some(forwarder) => {
+                    sandbox::probe_netns_egress(&forwarder).map(|variant| NetnsEgress {
+                        forwarder,
+                        variant,
+                        sock_path: config.root.join(".egress.sock"),
+                    })
+                }
+                None => {
+                    tracing::warn!(
+                        "no ak-egress-fwd forwarder binary found (config, AK_EGRESS_FWD, \
+                         alongside the executable, PATH); bwrap egress stays off"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             config,
             tech,
             processes: ProcessRegistry::default(),
             egress_proxy: tokio::sync::OnceCell::new(),
+            netns_egress,
+            unix_listener: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Whether the bwrap netns egress route passed its construction probe.
+    pub fn netns_egress_verified(&self) -> bool {
+        self.netns_egress.is_some()
     }
 
     /// The process-session registry (tests and embedders).
@@ -176,11 +232,14 @@ impl LocalBackend {
     ///
     /// - Seatbelt: the generated profile opens **only** the proxy's loopback
     ///   port — the proxy is the sole route out.
+    /// - bwrap: only with the **probe-verified** in-namespace forwarder
+    ///   route (`ak-egress-fwd` bridging a netns loopback listener to the
+    ///   proxy's bind-mounted Unix socket) — the namespace has no other
+    ///   interface, so the proxy stays the sole route out. Without a
+    ///   verified forwarder, egress stays **off** (fail closed, never a
+    ///   silent bypass).
     /// - No sandbox (explicit dev opt-out): the proxy env is still set so
     ///   tools work and the domain policy is enforced at the proxy.
-    /// - bwrap: the unshared network namespace cannot reach host loopback;
-    ///   egress stays **off** (fail closed, never a silent bypass) until an
-    ///   in-namespace forwarder lands.
     async fn egress_grant(
         &self,
         domains: &[String],
@@ -189,13 +248,17 @@ impl LocalBackend {
         if !self.config.egress.enabled || domains.is_empty() || budget_network_bytes == 0 {
             return Ok(None);
         }
-        if self.tech == SandboxTech::Bwrap {
-            tracing::warn!(
-                "egress domains granted but bwrap cannot reach the loopback proxy \
-                 from an unshared netns; step runs without network (fail closed)"
-            );
-            return Ok(None);
-        }
+        let netns = match (&self.tech, &self.netns_egress) {
+            (SandboxTech::Bwrap, Some(netns)) => Some(netns),
+            (SandboxTech::Bwrap, None) => {
+                tracing::warn!(
+                    "egress domains granted but the netns forwarder probe did not verify \
+                     (is ak-egress-fwd installed?); step runs without network (fail closed)"
+                );
+                return Ok(None);
+            }
+            _ => None,
+        };
         let proxy = self
             .egress_proxy
             .get_or_try_init(|| EgressProxy::start(self.config.egress.clone()))
@@ -204,6 +267,24 @@ impl LocalBackend {
                 backend: "local".into(),
                 reason: format!("egress proxy failed to start: {e}"),
             })?;
+        // bwrap route: the proxy additionally serves the Unix socket the
+        // sandbox's forwarder bridges to (started once per backend).
+        #[cfg(unix)]
+        if let Some(netns) = netns {
+            self.unix_listener
+                .get_or_try_init(|| async {
+                    proxy
+                        .serve_unix(&netns.sock_path, self.config.egress.clone())
+                        .await
+                })
+                .await
+                .map_err(|e| KernelError::BackendUnavailable {
+                    backend: "local".into(),
+                    reason: format!("egress unix listener failed to start: {e}"),
+                })?;
+        }
+        #[cfg(not(unix))]
+        let _ = netns;
         Ok(Some(proxy.grant(domains.to_vec(), budget_network_bytes)))
     }
 
@@ -504,11 +585,19 @@ impl LocalBackend {
                     readable_prefixes,
                     writable_prefixes,
                 ));
-                c.arg("--chdir")
-                    .arg(cwd)
-                    .arg("/bin/sh")
-                    .arg("-c")
-                    .arg(command);
+                c.arg("--chdir").arg(cwd);
+                // Egress route: mount the forwarder + the proxy's Unix
+                // socket and wrap the command so the netns loopback
+                // listener exists before it runs. Probe-verified only.
+                if let (Some(_), Some(netns)) = (egress, &self.netns_egress) {
+                    c.args(sandbox::bwrap_egress_args(
+                        &netns.forwarder,
+                        &netns.sock_path,
+                        &netns.variant,
+                    ));
+                    c.args(sandbox::netns_forwarder_argv());
+                }
+                c.arg("/bin/sh").arg("-c").arg(command);
                 c
             }
             SandboxTech::SandboxExec => {
@@ -564,9 +653,15 @@ impl LocalBackend {
             .env("TMPDIR", &scratch)
             .env("LANG", "C.UTF-8");
         // Standard proxy environment: pip/cargo/npm/git/curl all speak it.
-        // The token-bearing URL is the workload's only route out.
+        // The token-bearing URL is the workload's only route out. Under
+        // bwrap the sandbox reaches the proxy via the in-namespace
+        // forwarder port; elsewhere via the host loopback listener.
         if let Some(grant) = egress {
-            let url = grant.proxy_url();
+            let url = if self.tech == SandboxTech::Bwrap {
+                grant.proxy_url_via(sandbox::NETNS_PROXY_PORT)
+            } else {
+                grant.proxy_url()
+            };
             cmd.env("HTTP_PROXY", &url)
                 .env("HTTPS_PROXY", &url)
                 .env("http_proxy", &url)
@@ -593,9 +688,16 @@ impl LocalBackend {
         // not accounting.
         #[cfg(unix)]
         {
+            // glibc types the resource argument as `__rlimit_resource_t`
+            // (u32); macOS and musl use `c_int`. Alias per platform so the
+            // same code compiles everywhere.
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            type RlimResource = libc::__rlimit_resource_t;
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+            type RlimResource = libc::c_int;
             let cpu_secs = budget.cpu_ms.div_ceil(1000).saturating_add(1);
             let file_bytes = self.config.max_file_bytes;
-            let set = move |resource: libc::c_int, value: u64| -> std::io::Result<()> {
+            let set = move |resource: RlimResource, value: u64| -> std::io::Result<()> {
                 let lim = libc::rlimit {
                     rlim_cur: value as libc::rlim_t,
                     rlim_max: value as libc::rlim_t,

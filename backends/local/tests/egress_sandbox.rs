@@ -2,10 +2,11 @@
 //! `curl` reaches an allowlisted target **only** via the token-bearing
 //! proxy, direct network stays denied, and egress bytes are metered.
 //!
-//! The full flow needs a sandbox that can scope network to the proxy's
-//! loopback port (macOS Seatbelt). Under bwrap the backend keeps egress off
-//! (fail closed) — asserted separately; on hosts with no sandbox the tests
-//! skip.
+//! The full flow needs a sandbox that can scope network to the proxy:
+//! macOS Seatbelt (loopback-port pinhole) or Linux bwrap with the
+//! probe-verified `ak-egress-fwd` netns forwarder. Where the bwrap probe
+//! does not verify, the backend keeps egress off (fail closed) — asserted
+//! separately; on hosts with no sandbox the tests skip.
 
 use ak_backend_local::{EgressConfig, LocalBackend, LocalBackendConfig, SandboxTech};
 use ak_core::action::ActionKind;
@@ -34,6 +35,11 @@ fn backend(tmp: &tempfile::TempDir) -> LocalBackend {
         allowed_ports: Vec::new(),
         danger_allow_loopback: true,
     };
+    // The forwarder built alongside these tests: on Linux+bwrap hosts the
+    // construction probe verifies the full netns route end-to-end.
+    config.egress_forwarder = Some(std::path::PathBuf::from(env!(
+        "CARGO_BIN_EXE_ak-egress-fwd"
+    )));
     LocalBackend::new(config).unwrap()
 }
 
@@ -64,10 +70,14 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
     let backend = backend(&tmp);
     match backend.sandbox_tech() {
         SandboxTech::SandboxExec => {}
+        SandboxTech::Bwrap if backend.netns_egress_verified() => {
+            // Probe-verified netns forwarder: the full proxy flow below
+            // must work under bwrap exactly as under Seatbelt.
+        }
         SandboxTech::Bwrap => {
-            // bwrap: unshared netns cannot reach host loopback; the backend
-            // must keep egress OFF rather than pretend. The step runs, curl
-            // fails to connect, and no proxy env leaks in.
+            // No verified forwarder route: the backend must keep egress
+            // OFF rather than pretend. The step runs, curl fails to
+            // connect, and no proxy env leaks in.
             let branch = BranchId::generate();
             backend.workspace_for(&branch).unwrap();
             let outcome = backend

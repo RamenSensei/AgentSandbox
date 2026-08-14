@@ -132,6 +132,138 @@ fn probe_sandbox_exec() -> bool {
 /// writable inside the sandbox; excluded from `paths_written`.
 pub const SCRATCH_DIR: &str = ".aktmp";
 
+/// Fixed in-namespace TCP port the egress forwarder listens on under
+/// bwrap. The netns is fresh — nothing else can hold the port — so a
+/// well-known value keeps the proxy URL computable before spawn.
+pub const NETNS_PROXY_PORT: u16 = 18789;
+
+/// In-sandbox mount point of the forwarder binary.
+pub const NETNS_FWD_PATH: &str = "/ak-egress-fwd";
+
+/// In-sandbox mount point of the proxy's Unix socket.
+pub const NETNS_SOCK_PATH: &str = "/ak-egress.sock";
+
+/// Locate the `ak-egress-fwd` forwarder binary: explicit config, the
+/// `AK_EGRESS_FWD` environment variable, a sibling of the current
+/// executable, then `PATH`. Returns a canonical path (it gets bind-mounted
+/// into sandboxes) or `None` — the caller keeps egress off then.
+pub fn find_egress_forwarder(configured: Option<&Path>) -> Option<PathBuf> {
+    let candidates = configured
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::env::var_os("AK_EGRESS_FWD").map(PathBuf::from))
+        .chain(
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| Some(exe.parent()?.join("ak-egress-fwd"))),
+        )
+        .chain(
+            std::env::var_os("PATH")
+                .map(|path| {
+                    std::env::split_paths(&path)
+                        .map(|dir| dir.join("ak-egress-fwd"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
+    for candidate in candidates {
+        if candidate.is_file() {
+            if let Ok(canon) = candidate.canonicalize() {
+                return Some(canon);
+            }
+        }
+    }
+    None
+}
+
+/// The extra bwrap arguments (mounts + capability flags) that route a
+/// sandboxed workload's egress through the in-namespace forwarder.
+/// `variant` is the probe-verified capability flag set.
+pub fn bwrap_egress_args(forwarder: &Path, sock: &Path, variant: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = variant.to_vec();
+    args.extend([
+        "--ro-bind".into(),
+        forwarder.display().to_string(),
+        NETNS_FWD_PATH.into(),
+        "--bind".into(),
+        sock.display().to_string(),
+        NETNS_SOCK_PATH.into(),
+    ]);
+    args
+}
+
+/// The in-sandbox argv prefix that wraps a confined command with the
+/// forwarder: `/ak-egress-fwd --listen … --unix … -- <command…>`.
+pub fn netns_forwarder_argv() -> Vec<String> {
+    vec![
+        NETNS_FWD_PATH.into(),
+        "--listen".into(),
+        format!("127.0.0.1:{NETNS_PROXY_PORT}"),
+        "--unix".into(),
+        NETNS_SOCK_PATH.into(),
+        "--".into(),
+    ]
+}
+
+/// Capability-flag variants tried by [`probe_netns_egress`], in order:
+/// modern bwrap grants the userns full caps to its child only with an
+/// explicit `--cap-add`; some configurations work with none.
+const NETNS_CAP_VARIANTS: &[&[&str]] = &[&[], &["--unshare-user", "--cap-add", "CAP_NET_ADMIN"]];
+
+/// Probe whether egress-through-forwarder actually works under bwrap on
+/// this host: inside a scratch sandbox, the forwarder must bring loopback
+/// up, accept a TCP connection and round-trip one line through the
+/// bind-mounted Unix socket to a host listener (its `--probe` mode does
+/// exactly this). Returns the first working capability variant — the
+/// verified flags [`bwrap_egress_args`] must use — or `None`; the caller
+/// keeps egress off then. Like every probe in this module: capability is
+/// **verified, never declared**.
+pub fn probe_netns_egress(forwarder: &Path) -> Option<Vec<String>> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let dir = tempfile::tempdir().ok()?;
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).ok()?;
+    let sock = dir.path().join("probe.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).ok()?;
+    listener.set_nonblocking(false).ok()?;
+    // Host side of the probe: echo the expected pong for each connection.
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        for conn in listener.incoming().flatten() {
+            let mut reader = BufReader::new(conn);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() && line.trim() == "AK_EGRESS_PROBE" {
+                let mut conn = reader.into_inner();
+                let _ = conn.write_all(b"AK_EGRESS_PONG\n");
+            }
+        }
+    });
+    for variant in NETNS_CAP_VARIANTS {
+        let variant: Vec<String> = variant.iter().map(|s| s.to_string()).collect();
+        let mut cmd = std::process::Command::new("bwrap");
+        cmd.args(bwrap_args(&ws, &[], &[]).iter())
+            .args(bwrap_egress_args(forwarder, &sock, &variant).iter())
+            .arg(NETNS_FWD_PATH)
+            .args(["--listen", &format!("127.0.0.1:{NETNS_PROXY_PORT}")])
+            .args(["--unix", NETNS_SOCK_PATH, "--probe"]);
+        let ok = cmd
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("probe-ok"))
+            .unwrap_or(false);
+        if ok {
+            tracing::info!(?variant, "netns egress forwarder probe verified");
+            return Some(variant);
+        }
+    }
+    tracing::warn!(
+        "netns egress forwarder probe failed under every capability variant; \
+         bwrap egress stays off (fail closed)"
+    );
+    None
+}
+
 /// System path prefixes a process needs readable in order to execute at all
 /// (dynamic linker, shared caches, standard binaries). Deliberately excludes
 /// every user-data location (`/Users`, `/home`, `/root`, `/tmp`, `/var`

@@ -24,11 +24,17 @@
 //! terminates TLS) and absolute-URI plain HTTP are supported.
 //!
 //! Sandbox reachability: on macOS the generated Seatbelt profile opens
-//! **only** `localhost:<proxy port>` outbound; everything else stays denied,
-//! so the proxy is the sole route out. On Linux bubblewrap unshares the
-//! network namespace entirely — host loopback is unreachable from inside,
-//! so egress stays off there until an in-namespace forwarder lands (honest
-//! fail-closed, not silent bypass).
+//! **only** `localhost:<proxy port>` outbound; everything else stays
+//! denied, so the proxy is the sole route out. On Linux bubblewrap
+//! unshares the network namespace entirely — host loopback is unreachable
+//! from inside, so the proxy also serves a **Unix socket**
+//! ([`EgressProxy::serve_unix`]) that is bind-mounted into the sandbox,
+//! where the `ak-egress-fwd` forwarder (probe-verified at backend
+//! construction, see [`crate::sandbox::probe_netns_egress`]) bridges an
+//! in-namespace loopback listener to it. The namespace has no other
+//! interface and the socket leads only to this proxy, so the token +
+//! allowlist + SSRF guards below stay the sole route out. Hosts where the
+//! probe fails keep egress off (honest fail-closed, not silent bypass).
 
 use ak_core::capability::glob_match;
 use ak_core::net::is_forbidden_ip;
@@ -88,12 +94,48 @@ impl EgressGrant {
     /// `http://<token>@127.0.0.1:<port>` — standard proxy-URL shape every
     /// mainstream tool turns into `Proxy-Authorization: Basic`.
     pub fn proxy_url(&self) -> String {
-        format!("http://{}:@127.0.0.1:{}", self.token, self.port)
+        self.proxy_url_via(self.port)
+    }
+
+    /// The proxy URL through a different local port — used under bwrap,
+    /// where the sandbox reaches the proxy via the in-namespace forwarder
+    /// port instead of the host listener. Same token, same session.
+    pub fn proxy_url_via(&self, port: u16) -> String {
+        format!("http://{}:@127.0.0.1:{}", self.token, port)
     }
 
     /// Loopback port the sandbox must open.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Additionally serve the proxy on a Unix socket at `path` (replacing
+    /// any stale socket file). This is the bwrap route: the socket is
+    /// bind-mounted into the sandbox and the in-namespace forwarder
+    /// bridges to it; sessions, auth and guards are identical to TCP.
+    #[cfg(unix)]
+    pub async fn serve_unix(
+        &self,
+        path: &std::path::Path,
+        config: EgressConfig,
+    ) -> std::io::Result<()> {
+        let _ = std::fs::remove_file(path);
+        let listener = tokio::net::UnixListener::bind(path)?;
+        let sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            loop {
+                let Ok((conn, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let sessions = Arc::clone(&sessions);
+                let config = config.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(conn, sessions, config).await;
+                });
+            }
+        });
+        tracing::info!(path = %path.display(), "egress proxy listening on unix socket");
+        Ok(())
     }
 
     /// Bytes transferred so far (both directions, all connections).
@@ -144,6 +186,35 @@ impl EgressProxy {
         self.port
     }
 
+    /// Additionally serve the proxy on a Unix socket at `path` (replacing
+    /// any stale socket file). This is the bwrap route: the socket is
+    /// bind-mounted into the sandbox and the in-namespace forwarder
+    /// bridges to it; sessions, auth and guards are identical to TCP.
+    #[cfg(unix)]
+    pub async fn serve_unix(
+        &self,
+        path: &std::path::Path,
+        config: EgressConfig,
+    ) -> std::io::Result<()> {
+        let _ = std::fs::remove_file(path);
+        let listener = tokio::net::UnixListener::bind(path)?;
+        let sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            loop {
+                let Ok((conn, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let sessions = Arc::clone(&sessions);
+                let config = config.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(conn, sessions, config).await;
+                });
+            }
+        });
+        tracing::info!(path = %path.display(), "egress proxy listening on unix socket");
+        Ok(())
+    }
+
     /// Register a session: `domains` are `*`-glob patterns, `cap` the byte
     /// budget across both directions.
     pub fn grant(&self, domains: Vec<String>, cap: u64) -> EgressGrant {
@@ -171,14 +242,19 @@ impl EgressProxy {
 
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
-async fn respond(conn: &mut TcpStream, status: &str, extra: &str) {
+/// Client-side stream the proxy serves: TCP on loopback (Seatbelt route)
+/// or a Unix socket (bwrap netns-forwarder route).
+pub trait ClientStream: AsyncReadExt + AsyncWriteExt + Unpin + Send {}
+impl<S: AsyncReadExt + AsyncWriteExt + Unpin + Send> ClientStream for S {}
+
+async fn respond(conn: &mut impl ClientStream, status: &str, extra: &str) {
     let body =
         format!("HTTP/1.1 {status}\r\n{extra}content-length: 0\r\nconnection: close\r\n\r\n");
     let _ = conn.write_all(body.as_bytes()).await;
 }
 
 /// Read the request head (up to the blank line), bounded.
-async fn read_head(conn: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+async fn read_head(conn: &mut impl ClientStream) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::with_capacity(1024);
     let mut byte = [0u8; 1];
     while head.len() < MAX_HEAD_BYTES {
@@ -334,8 +410,13 @@ async fn validate_target(
 
 /// Copy both directions with a shared byte counter; stop when the session
 /// cap is exhausted.
-async fn tunnel(mut client: TcpStream, mut upstream: TcpStream, used: Arc<AtomicU64>, cap: u64) {
-    let (mut client_read, mut client_write) = client.split();
+async fn tunnel(
+    client: impl ClientStream,
+    mut upstream: TcpStream,
+    used: Arc<AtomicU64>,
+    cap: u64,
+) {
+    let (mut client_read, mut client_write) = tokio::io::split(client);
     let (mut upstream_read, mut upstream_write) = upstream.split();
     let up = copy_counted(&mut client_read, &mut upstream_write, &used, cap);
     let down = copy_counted(&mut upstream_read, &mut client_write, &used, cap);
@@ -370,7 +451,7 @@ where
 }
 
 async fn handle_connection(
-    mut conn: TcpStream,
+    mut conn: impl ClientStream,
     sessions: Sessions,
     config: EgressConfig,
 ) -> std::io::Result<()> {
@@ -483,6 +564,65 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Unix-socket listener (the bwrap forwarder route) serves the
+    /// same sessions with the same auth: a tokened CONNECT tunnels, a
+    /// tokenless one gets 407. Cross-platform — no sandbox involved.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_serves_tokened_connect_and_rejects_tokenless() {
+        let echo = echo_server().await;
+        let config = EgressConfig {
+            enabled: true,
+            allowed_ports: Vec::new(),
+            danger_allow_loopback: true,
+        };
+        let proxy = EgressProxy::start(config.clone()).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("egress.sock");
+        proxy.serve_unix(&sock, config).await.unwrap();
+        let grant = proxy.grant(vec!["127.0.0.1".into()], 1 << 20);
+
+        let mut conn = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let token = grant
+            .proxy_url()
+            .split("//")
+            .nth(1)
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .to_string();
+        let auth = ak_core::b64::encode(format!("{token}:").as_bytes());
+        conn.write_all(
+            format!(
+                "CONNECT 127.0.0.1:{} HTTP/1.1\r\nproxy-authorization: Basic {auth}\r\n\r\n",
+                echo.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut buf = vec![0u8; 256];
+        let n = conn.read(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("200 Connection Established"),
+            "got: {}",
+            String::from_utf8_lossy(&buf[..n])
+        );
+        conn.write_all(b"ping-through-unix").await.unwrap();
+        let n = conn.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping-through-unix");
+        assert!(grant.used_bytes() > 0, "unix route must meter bytes");
+
+        // Tokenless: 407, reaches nothing.
+        let mut conn = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        conn.write_all(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let n = conn.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("407"));
+    }
 
     async fn echo_server() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -7,8 +7,16 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 const FWD: &str = env!("CARGO_BIN_EXE_ak-egress-fwd");
+static FORWARDER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn serial_forwarder_test() -> MutexGuard<'static, ()> {
+    FORWARDER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Host side of the probe hand-shake: echo the pong for each connection.
 fn spawn_unix_pong(path: &std::path::Path) {
@@ -27,6 +35,7 @@ fn spawn_unix_pong(path: &std::path::Path) {
 
 #[test]
 fn probe_mode_round_trips_through_the_unix_socket() {
+    let _serial = serial_forwarder_test();
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("probe.sock");
     spawn_unix_pong(&sock);
@@ -47,6 +56,7 @@ fn probe_mode_round_trips_through_the_unix_socket() {
 
 #[test]
 fn probe_fails_loudly_when_the_socket_answers_wrong() {
+    let _serial = serial_forwarder_test();
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("mute.sock");
     // A listener that accepts and closes without answering.
@@ -65,6 +75,7 @@ fn probe_fails_loudly_when_the_socket_answers_wrong() {
 
 #[test]
 fn wrapped_command_exit_code_is_propagated() {
+    let _serial = serial_forwarder_test();
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("x.sock");
     spawn_unix_pong(&sock);
@@ -84,6 +95,9 @@ fn wrapped_command_exit_code_is_propagated() {
 /// but its fresh namespace guarantees exclusivity).
 #[test]
 fn bridges_raw_bytes_between_tcp_and_unix() {
+    // This test must not race the `:0` probe processes above between
+    // releasing its reserved port and the child binding that same port.
+    let _serial = serial_forwarder_test();
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("bridge.sock");
     let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();

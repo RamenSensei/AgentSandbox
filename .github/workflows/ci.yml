@@ -43,6 +43,8 @@ jobs:
             fi
           done
           sudo mkdir /sys/fs/cgroup/agent-kernel-ci
+          sudo sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/agent-kernel-ci/cgroup.subtree_control'
+          sudo mkdir /sys/fs/cgroup/agent-kernel-ci/runner
           sudo chown "$(id -u):$(id -g)" \
             /sys/fs/cgroup/agent-kernel-ci \
             /sys/fs/cgroup/agent-kernel-ci/cgroup.procs \
@@ -54,12 +56,32 @@ jobs:
           AK_REQUIRE_CGROUP: "1"
           AK_REQUIRE_NETNS_EGRESS: "1"
         run: |
-          cargo test -p ak-backend-local --test cgroup_enforce --test egress_sandbox -- --nocapture
-          cargo test -p ak-backend-local cgroup::tests::lifecycle_on_delegated_hosts -- --nocapture
+          set -euo pipefail
+          sudo env \
+            AK_CGROUP_PARENT="$AK_CGROUP_PARENT" \
+            AK_REQUIRE_CGROUP="$AK_REQUIRE_CGROUP" \
+            AK_REQUIRE_NETNS_EGRESS="$AK_REQUIRE_NETNS_EGRESS" \
+            TEST_UID="$(id -u)" \
+            TEST_GID="$(id -g)" \
+            HOME="$HOME" \
+            PATH="$PATH" \
+            bash -c '
+              echo $$ > "$AK_CGROUP_PARENT/runner/cgroup.procs"
+              exec setpriv --reuid="$TEST_UID" --regid="$TEST_GID" --clear-groups \
+                env HOME="$HOME" PATH="$PATH" \
+                  AK_CGROUP_PARENT="$AK_CGROUP_PARENT" \
+                  AK_REQUIRE_CGROUP="$AK_REQUIRE_CGROUP" \
+                  AK_REQUIRE_NETNS_EGRESS="$AK_REQUIRE_NETNS_EGRESS" \
+                  /bin/bash -c "
+                    cargo test -p ak-backend-local --test cgroup_enforce --test egress_sandbox -- --nocapture
+                    cargo test -p ak-backend-local cgroup::tests::lifecycle_on_delegated_hosts -- --nocapture
+                  "
+            '
       - name: Remove delegated cgroup v2 parent
         if: always()
         run: |
           if test -d /sys/fs/cgroup/agent-kernel-ci; then
+            sudo rmdir /sys/fs/cgroup/agent-kernel-ci/runner
             sudo rmdir /sys/fs/cgroup/agent-kernel-ci
           fi
 

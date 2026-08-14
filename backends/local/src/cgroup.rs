@@ -130,6 +130,77 @@ fn ensure_controllers(parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Prove that a child can enter the delegated subtree, not merely that its
+/// control files are writable. cgroup v2 migration also checks write access
+/// to the source/destination common ancestor, so limit-only probes can
+/// otherwise produce a false positive for a process outside the delegation.
+#[cfg(target_os = "linux")]
+fn verify_process_attachment(group: &Path) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let procs = group.join("cgroup.procs");
+    let procs_c = std::ffi::CString::new(procs.as_os_str().as_encoded_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cgroup path contains a NUL byte",
+        )
+    })?;
+    let mut cmd = std::process::Command::new("/bin/sh");
+    // `kill` is a shell builtin: the child stops itself without depending on
+    // another executable and remains a stable cgroup member until killed.
+    cmd.args(["-c", "kill -STOP $$"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: only async-signal-safe raw syscalls run between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            let fd = libc::open(procs_c.as_ptr(), libc::O_WRONLY);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let wrote = libc::write(fd, b"0\n".as_ptr().cast(), 2);
+            libc::close(fd);
+            if wrote < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let mut child = cmd.spawn()?;
+    let result = (|| {
+        let members = read_control(&procs)?;
+        if !members
+            .lines()
+            .any(|line| line.trim() == child.id().to_string())
+        {
+            return Err(io::Error::other(
+                "probe child did not enter the delegated cgroup",
+            ));
+        }
+        std::fs::write(group.join("cgroup.kill"), "1")?;
+        let status = child.wait()?;
+        if status.success() {
+            return Err(io::Error::other("cgroup.kill did not kill the probe child"));
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_process_attachment(_group: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "cgroup process attachment is Linux-only",
+    ))
+}
+
 impl CgroupSupervisor {
     /// Probe for a usable cgroup v2 parent (see the module docs for the
     /// candidate order). Returns `None` — with a log line naming the
@@ -170,8 +241,8 @@ impl CgroupSupervisor {
 
     /// Full end-to-end verification of one candidate: controllers
     /// delegated, a scratch child group creatable, both limit files
-    /// writable, CPU accounting readable, and atomic full-tree kill
-    /// available.
+    /// writable, CPU accounting readable, a child process attachable, and
+    /// atomic full-tree kill available.
     fn verify(parent: &Path) -> io::Result<()> {
         require_cgroup2fs(parent)?;
         ensure_controllers(parent)?;
@@ -182,10 +253,10 @@ impl CgroupSupervisor {
             std::fs::write(probe.join("memory.swap.max"), "0")?;
             std::fs::write(probe.join("pids.max"), "64")?;
             let _ = read_control(&probe.join("cpu.stat"))?;
-            // Full-tree teardown is part of the guarantee. Requiring the
-            // kernel's atomic cgroup.kill avoids a PID-reuse race inherent in
-            // userspace `cgroup.procs` enumeration fallbacks.
-            std::fs::write(probe.join("cgroup.kill"), "1")?;
+            // Attachment and full-tree teardown are part of the guarantee.
+            // Requiring the kernel's atomic cgroup.kill avoids the PID-reuse
+            // race inherent in userspace cgroup.procs enumeration fallbacks.
+            verify_process_attachment(&probe)?;
             Ok(())
         })();
         let _ = std::fs::remove_dir(&probe);

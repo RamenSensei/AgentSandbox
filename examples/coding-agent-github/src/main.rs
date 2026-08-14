@@ -259,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     section("4. fork a candidate branch and diverge");
-    let fork = kernel.fork_branch(&ep.branch)?;
+    let fork = kernel.fork_branch(&ep.branch).await?;
     println!("forked {} from {}", fork.id, ep.branch);
     agent
         .write_file(
@@ -283,7 +283,9 @@ async fn main() -> anyhow::Result<()> {
     for c in &cmp.changed_in_b {
         println!("  fork changed: {}", c.path());
     }
-    let merged = kernel.merge_branch(&ep.branch, &fork.id, &agent.who.id)?;
+    let merged = kernel
+        .merge_branch(&ep.branch, &fork.id, &agent.who.id)
+        .await?;
     println!(
         "merged {} into {} -> state {} (merge parent: {:?})",
         fork.id, ep.branch, merged.id, merged.merge_parent

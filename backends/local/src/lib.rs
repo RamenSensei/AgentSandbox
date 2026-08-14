@@ -45,22 +45,27 @@
 //!   only `PATH` (host value), `HOME` (set to the workspace), `TMPDIR` (a
 //!   workspace-internal scratch dir) and `LANG` are provided, plus any
 //!   explicitly pre-authorized variables carried on the action itself;
-//! - a **wall-clock timeout** derived from `budget.cpu_ms`, with
-//!   kill-on-timeout of the child's whole **process group** (the child is
-//!   spawned as a group leader, so the sandbox wrapper's descendants die
-//!   with it);
+//! - a **wall-clock timeout** with kill-on-timeout of the child's whole
+//!   **process group** (the child is spawned as a group leader, so the
+//!   sandbox wrapper's descendants die with it). Once cgroup CPU
+//!   enforcement verifies, this is the independent operator ceiling;
+//!   otherwise `cpu_ms` also supplies the portable wall-time fallback;
 //! - **honest resource metering** for shell steps: the child is reaped with
 //!   `wait4`, so `usage.cpu_ms` is real user+system CPU time and
 //!   `usage.memory_bytes` the real peak RSS — not wall-clock or byte-count
 //!   proxies. (File actions and process-session operations, which reap no
 //!   child, keep the proxies.) Egress bytes are counted at the proxy;
+//! - **Linux cgroup v2 tree enforcement**, when a delegated parent passes
+//!   the construction probe: aggregate `cpu_ms`, `memory.max` and
+//!   `pids.max` apply to the complete step/session tree; `cgroup.kill`
+//!   reaches daemonized descendants; CPU, peak memory, OOM kills and PID
+//!   denials are surfaced from kernel counters;
 //! - **inherited rlimit backstops**: `RLIMIT_CPU` from the step's `cpu_ms`
 //!   budget (+1s grace) and `RLIMIT_FSIZE` from
 //!   [`LocalBackendConfig::max_file_bytes`] are set before exec and
 //!   inherited by every descendant — a process that escapes the group kill
 //!   via `setsid` still dies on its own CPU clock, and no single file can
-//!   fill the host disk. Per-process backstops, not per-tree ceilings;
-//!   cgroup enforcement stays on the roadmap;
+//!   fill the host disk. These remain portable per-process backstops;
 //! - **output capture with byte caps** (see [`LocalBackendConfig::max_capture_bytes`]);
 //! - **in-process path confinement** for structured file actions: every path
 //!   is verified to be inside the workspace (no absolute paths, no `..`,
@@ -88,10 +93,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod b64;
+pub mod cgroup;
 pub mod egress;
 pub mod process;
 pub mod sandbox;
 
+pub use cgroup::{CgroupSupervisor, StepCgroup};
 pub use egress::{EgressConfig, EgressGrant, EgressProxy};
 pub use process::{ProcessRegistry, ProcessSession};
 pub use sandbox::SandboxTech;
@@ -127,6 +134,13 @@ pub struct LocalBackendConfig {
     /// bwrap egress. `None` = auto-discover (`AK_EGRESS_FWD`, a sibling of
     /// the current executable, `PATH`). Only consulted on Linux.
     pub egress_forwarder: Option<PathBuf>,
+    /// Explicit cgroup v2 parent for group-level enforcement. `None` =
+    /// auto-discover (`AK_CGROUP_PARENT`, then the process's own cgroup).
+    /// Only consulted on Linux; see [`cgroup`].
+    pub cgroup_parent: Option<PathBuf>,
+    /// `pids.max` for each step's / session's cgroup: the whole process
+    /// tree cannot exceed this many concurrent tasks (fork-bomb ceiling).
+    pub max_pids: u64,
 }
 
 impl LocalBackendConfig {
@@ -140,6 +154,8 @@ impl LocalBackendConfig {
             max_file_bytes: 4 << 30,
             dangerously_allow_unsandboxed: false,
             egress_forwarder: None,
+            cgroup_parent: None,
+            max_pids: 512,
         }
     }
 
@@ -168,6 +184,9 @@ pub struct LocalBackend {
     netns_egress: Option<NetnsEgress>,
     /// One-time start of the proxy's Unix listener (bwrap route).
     unix_listener: tokio::sync::OnceCell<()>,
+    /// Probe-verified cgroup v2 group enforcement (Linux). `None` = the
+    /// per-process rlimit backstops are the only resource ceilings.
+    cgroups: Option<CgroupSupervisor>,
 }
 
 /// The probe-verified bwrap egress route.
@@ -181,6 +200,11 @@ impl LocalBackend {
     /// Create the backend, ensuring the workspace root exists and probing the
     /// host's sandbox capability (see [`sandbox::probe`]).
     pub fn new(config: LocalBackendConfig) -> KernelResult<Self> {
+        if config.max_pids == 0 {
+            return Err(KernelError::Other(
+                "LocalBackendConfig.max_pids must be at least 1".into(),
+            ));
+        }
         std::fs::create_dir_all(&config.root)?;
         let tech = sandbox::probe();
         tracing::info!(?tech, "local backend sandbox probe");
@@ -193,7 +217,9 @@ impl LocalBackend {
                     sandbox::probe_netns_egress(&forwarder).map(|variant| NetnsEgress {
                         forwarder,
                         variant,
-                        sock_path: config.root.join(".egress.sock"),
+                        sock_path: config
+                            .root
+                            .join(format!(".egress-{}.sock", uuid::Uuid::new_v4().simple())),
                     })
                 }
                 None => {
@@ -207,6 +233,8 @@ impl LocalBackend {
         } else {
             None
         };
+        // Group-level resource enforcement: probed like everything else.
+        let cgroups = CgroupSupervisor::probe(config.cgroup_parent.as_deref());
         Ok(Self {
             config,
             tech,
@@ -214,7 +242,13 @@ impl LocalBackend {
             egress_proxy: tokio::sync::OnceCell::new(),
             netns_egress,
             unix_listener: tokio::sync::OnceCell::new(),
+            cgroups,
         })
+    }
+
+    /// Whether group-level (cgroup v2) enforcement passed its probe.
+    pub fn cgroups_verified(&self) -> bool {
+        self.cgroups.is_some()
     }
 
     /// Whether the bwrap netns egress route passed its construction probe.
@@ -439,6 +473,13 @@ fn cap(mut bytes: Vec<u8>, max: usize) -> Vec<u8> {
     bytes
 }
 
+fn append_diagnostic(stderr: &mut Vec<u8>, message: &str) {
+    if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+        stderr.push(b'\n');
+    }
+    stderr.extend_from_slice(message.as_bytes());
+}
+
 /// Honest child metering from `wait4` rusage: what the process actually
 /// consumed, not a proxy.
 #[derive(Debug, Clone, Copy)]
@@ -567,6 +608,7 @@ impl LocalBackend {
         readable_prefixes: &[String],
         writable_prefixes: &[String],
         egress: Option<&EgressGrant>,
+        step_cgroup: Option<&StepCgroup>,
     ) -> KernelResult<(std::process::Command, Option<tempfile::NamedTempFile>)> {
         let host_path =
             std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
@@ -652,20 +694,26 @@ impl LocalBackend {
             .env("HOME", ws_canon)
             .env("TMPDIR", &scratch)
             .env("LANG", "C.UTF-8");
-        // Standard proxy environment: pip/cargo/npm/git/curl all speak it.
-        // The token-bearing URL is the workload's only route out. Under
-        // bwrap the sandbox reaches the proxy via the in-namespace
-        // forwarder port; elsewhere via the host loopback listener.
+        // Standard proxy environment: HTTP-native tools use HTTP(S)_PROXY;
+        // arbitrary SOCKS-aware TCP clients use ALL_PROXY. Both URLs carry
+        // the same per-step authority and land on the same listener/policy.
+        // Under bwrap the sandbox reaches it via the in-namespace forwarder
+        // port; elsewhere via the host loopback listener.
         if let Some(grant) = egress {
-            let url = if self.tech == SandboxTech::Bwrap {
-                grant.proxy_url_via(sandbox::NETNS_PROXY_PORT)
+            let (http_url, socks_url) = if self.tech == SandboxTech::Bwrap {
+                (
+                    grant.proxy_url_via(sandbox::NETNS_PROXY_PORT),
+                    grant.socks_proxy_url_via(sandbox::NETNS_PROXY_PORT),
+                )
             } else {
-                grant.proxy_url()
+                (grant.proxy_url(), grant.socks_proxy_url())
             };
-            cmd.env("HTTP_PROXY", &url)
-                .env("HTTPS_PROXY", &url)
-                .env("http_proxy", &url)
-                .env("https_proxy", &url);
+            cmd.env("HTTP_PROXY", &http_url)
+                .env("HTTPS_PROXY", &http_url)
+                .env("http_proxy", &http_url)
+                .env("https_proxy", &http_url)
+                .env("ALL_PROXY", &socks_url)
+                .env("all_proxy", &socks_url);
         }
         for (k, v) in env {
             cmd.env(k, v);
@@ -683,9 +731,9 @@ impl LocalBackend {
         // - `RLIMIT_FSIZE` from [`LocalBackendConfig::max_file_bytes`]: no
         //   single file can fill the host disk.
         //
-        // Per-process, not per-tree — a true group ceiling needs cgroups
-        // (Linux) and stays on the roadmap; these are honest backstops,
-        // not accounting.
+        // These rlimits remain per-process portable backstops. On a Linux
+        // host where cgroup v2 verified, the same command also has hard
+        // aggregate tree ceilings and accounting.
         #[cfg(unix)]
         {
             // glibc types the resource argument as `__rlimit_resource_t`
@@ -708,10 +756,27 @@ impl LocalBackend {
                 }
                 Ok(())
             };
+            // Entering the step cgroup happens FIRST, between fork and
+            // exec: no workload instruction ever runs outside the group
+            // ceilings. The path C-string is prepared before the fork.
+            let cgroup_procs = step_cgroup.and_then(|g| {
+                std::ffi::CString::new(g.procs_file().into_os_string().into_encoded_bytes()).ok()
+            });
             // SAFETY: the pre-exec closure only calls async-signal-safe
-            // setrlimit and allocates nothing.
+            // open/write/close and setrlimit, and allocates nothing.
             unsafe {
                 cmd.pre_exec(move || {
+                    if let Some(procs) = &cgroup_procs {
+                        let fd = libc::open(procs.as_ptr(), libc::O_WRONLY);
+                        if fd < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        let wrote = libc::write(fd, b"0\n".as_ptr().cast(), 2);
+                        libc::close(fd);
+                        if wrote < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
                     set(libc::RLIMIT_CPU, cpu_secs)?;
                     set(libc::RLIMIT_FSIZE, file_bytes)?;
                     Ok(())
@@ -719,8 +784,32 @@ impl LocalBackend {
             }
         }
         #[cfg(not(unix))]
-        let _ = budget;
+        {
+            let _ = budget;
+            let _ = step_cgroup;
+        }
         Ok((cmd, profile_file))
+    }
+
+    /// Create the per-step/per-session cgroup when group enforcement is
+    /// verified. Probe said it works, so a runtime failure here is a real
+    /// error (fail closed), never a silent downgrade.
+    fn step_cgroup(
+        &self,
+        budget: &ResourceBudget,
+    ) -> KernelResult<Option<std::sync::Arc<StepCgroup>>> {
+        let Some(sup) = &self.cgroups else {
+            return Ok(None);
+        };
+        let label = uuid::Uuid::new_v4().simple().to_string();
+        let memory = (budget.memory_bytes > 0).then_some(budget.memory_bytes);
+        sup.create_group(&label, memory, self.config.max_pids)
+            .map(std::sync::Arc::new)
+            .map(Some)
+            .map_err(|e| KernelError::BackendUnavailable {
+                backend: "local".into(),
+                reason: format!("verified cgroup enforcement failed to create a step group: {e}"),
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -742,7 +831,15 @@ impl LocalBackend {
                 "cpu_ms budget is zero; refusing to start the process",
             ));
         }
-        let timeout = Duration::from_millis(budget.cpu_ms).min(self.config.max_wall_clock);
+        // With verified aggregate CPU enforcement, CPU and wall time are
+        // separate dimensions: parallel compilers may spend the CPU budget
+        // faster, while an I/O-bound agent process may legitimately wait.
+        // Without cgroups, retain the portable wall-time fallback.
+        let timeout = if self.cgroups.is_some() {
+            self.config.max_wall_clock
+        } else {
+            Duration::from_millis(budget.cpu_ms).min(self.config.max_wall_clock)
+        };
         let cwd = match cwd {
             Some(c) => resolve_confined("proc.shell", workspace, c, &[])?,
             None => workspace.to_path_buf(),
@@ -758,6 +855,10 @@ impl LocalBackend {
         let egress = self
             .egress_grant(egress_domains, budget.network_bytes)
             .await?;
+        // Group-level ceilings (memory.max / pids.max over the whole tree)
+        // when cgroup enforcement verified; the child enters the group in
+        // pre_exec, before its first instruction.
+        let step_cgroup = self.step_cgroup(budget)?;
         let (mut cmd, profile_file) = self.build_confined_command(
             "proc.shell",
             &ws_canon,
@@ -768,6 +869,7 @@ impl LocalBackend {
             readable_prefixes,
             writable_prefixes,
             egress.as_ref(),
+            step_cgroup.as_deref(),
         )?;
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -779,6 +881,11 @@ impl LocalBackend {
         let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
         let mut worker = tokio::task::spawn_blocking(move || spawn_and_reap(cmd, pid_tx));
         let pid = pid_rx.await.ok();
+        if pid.is_some() {
+            if let Some(group) = &step_cgroup {
+                group.enforce_cpu_budget(budget.cpu_ms);
+            }
+        }
 
         let network_bytes = |g: &Option<EgressGrant>| g.as_ref().map_or(0, EgressGrant::used_bytes);
         let join_err = |e: tokio::task::JoinError| KernelError::BackendUnavailable {
@@ -800,8 +907,16 @@ impl LocalBackend {
                 }),
             },
             Err(_elapsed) => {
-                // Kill the whole process group, then let the reaper finish:
-                // even a killed run reports its real usage and partial output.
+                // Kill the whole tree. The cgroup kill (when verified)
+                // reaches even setsid escapees the process-group kill
+                // cannot; then let the reaper finish:
+                // even a killed run reports its real usage and partial
+                // output.
+                if let Some(group) = &step_cgroup {
+                    if let Err(e) = group.kill_tree() {
+                        tracing::error!(error = %e, "cgroup tree kill failed on timeout");
+                    }
+                }
                 #[cfg(unix)]
                 if let Some(pid) = pid {
                     unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
@@ -831,8 +946,69 @@ impl LocalBackend {
             }
         };
         drop(profile_file);
-        // The grant drops here: the step's proxy token is revoked the moment
-        // the step ends.
+        // Group-level honest metering: cgroup counters supersede wait4's
+        // direct-child-only values. Kernel-enforced CPU, memory and PID
+        // events are made explicit instead of leaving unexplained signals
+        // or failed forks in an agent's observation.
+        let outcome = match (&step_cgroup, outcome) {
+            (Some(group), Ok(mut result)) => {
+                let cpu_ms = group.cpu_usage_ms();
+                let memory_peak = group.peak_memory();
+                if let Some(meter) = result.meter.as_mut() {
+                    if let Some(cpu_ms) = cpu_ms {
+                        meter.cpu_ms = cpu_ms;
+                    }
+                    if let Some(peak) = memory_peak {
+                        meter.max_rss_bytes = peak;
+                    }
+                }
+                if let Some(oom) = group.oom_kills().filter(|n| *n > 0) {
+                    append_diagnostic(
+                        &mut result.stderr,
+                        &format!(
+                            "process(es) oom-killed: the step's memory ceiling of {} bytes \
+                             was exceeded {oom} time(s)",
+                            budget.memory_bytes
+                        ),
+                    );
+                    if result.exit_code == 0 {
+                        result.exit_code = -1;
+                    }
+                }
+                if let Some(hits) = group.pid_limit_hits().filter(|n| *n > 0) {
+                    append_diagnostic(
+                        &mut result.stderr,
+                        &format!(
+                            "process creation denied {hits} time(s): the step's pids.max \
+                             ceiling is {}",
+                            self.config.max_pids
+                        ),
+                    );
+                }
+                let cpu_exhausted =
+                    group.cpu_exhausted() || cpu_ms.is_some_and(|used| used >= budget.cpu_ms);
+                if cpu_exhausted {
+                    append_diagnostic(
+                        &mut result.stderr,
+                        &format!(
+                            "process tree killed: aggregate CPU budget of {} ms exhausted \
+                             (used {} ms)",
+                            budget.cpu_ms,
+                            cpu_ms.unwrap_or(budget.cpu_ms)
+                        ),
+                    );
+                    if result.exit_code == 0 {
+                        result.exit_code = -1;
+                    }
+                }
+                Ok(result)
+            }
+            (_, outcome) => outcome,
+        };
+        // Dropping the step cgroup kills any survivors and removes the
+        // group; the grant drops here too, revoking the proxy token the
+        // moment the step ends.
+        drop(step_cgroup);
         outcome
     }
 
@@ -853,6 +1029,13 @@ impl LocalBackend {
         writable_prefixes: &[String],
         egress_domains: &[String],
     ) -> KernelResult<ExecResult> {
+        if budget.cpu_ms == 0 {
+            return Err(denial(
+                DenialCode::BudgetExhausted,
+                "proc.start",
+                "cpu_ms budget is zero; refusing to start the process",
+            ));
+        }
         let cwd = match cwd {
             Some(c) => resolve_confined("proc.start", workspace, c, &[])?,
             None => workspace.to_path_buf(),
@@ -871,6 +1054,9 @@ impl LocalBackend {
         let egress = self
             .egress_grant(egress_domains, budget.network_bytes)
             .await?;
+        // Sessions get their own group: a daemonized tree stays under the
+        // same ceilings for its whole life and is fully reaped on stop.
+        let step_cgroup = self.step_cgroup(budget)?;
         let (std_cmd, profile_file) = self.build_confined_command(
             "proc.start",
             &ws_canon,
@@ -881,6 +1067,7 @@ impl LocalBackend {
             readable_prefixes,
             writable_prefixes,
             egress.as_ref(),
+            step_cgroup.as_deref(),
         )?;
         let mut cmd = tokio::process::Command::from(std_cmd);
         cmd.stdin(std::process::Stdio::piped())
@@ -891,6 +1078,9 @@ impl LocalBackend {
             backend: "local".into(),
             reason: format!("failed to spawn: {e}"),
         })?;
+        if let Some(group) = &step_cgroup {
+            group.enforce_cpu_budget(budget.cpu_ms);
+        }
         let session = self.processes.adopt(
             branch,
             name,
@@ -898,6 +1088,7 @@ impl LocalBackend {
             child,
             profile_file,
             egress,
+            step_cgroup,
             self.config.max_log_buffer_bytes,
         );
         Ok(ExecResult {
@@ -1003,6 +1194,7 @@ impl LocalBackend {
             (eff, data, logs.base_offset(), logs.total())
         };
         let exit_code = session.exit_code();
+        let running = session.running();
         let next_offset = effective + data.len() as u64;
         ExecResult {
             meter: None,
@@ -1016,9 +1208,9 @@ impl LocalBackend {
                 "next_offset": next_offset,
                 "base_offset": base,
                 "total_bytes": total,
-                "running": exit_code.is_none(),
+                "running": running,
                 "exit_code": exit_code,
-                "eof": exit_code.is_some() && next_offset >= total,
+                "eof": !running && next_offset >= total,
                 "data": String::from_utf8_lossy(&data),
             }))
             .unwrap_or_default(),

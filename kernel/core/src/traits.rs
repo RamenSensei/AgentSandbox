@@ -124,8 +124,9 @@ pub trait Backend: Send + Sync {
     async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome>;
 
     /// Fork the backend-side state of a branch (CoW where supported).
-    /// Backends without native fork return `Ok(false)`; the kernel then
-    /// falls back to workspace re-materialization from the CAS.
+    /// Implementations must clone only a quiescent remote tree proven to
+    /// match `from` exactly. Backends without such a source return
+    /// `Ok(false)`; the next step then materializes from the CAS.
     async fn fork(&self, _from: &StateId, _to_branch: &BranchId) -> KernelResult<bool> {
         Ok(false)
     }

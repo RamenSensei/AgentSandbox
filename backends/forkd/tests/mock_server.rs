@@ -12,7 +12,7 @@ use axum::extract::Path;
 use axum::routing::post;
 use axum::{Json, Router};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 static CHILD_SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -98,7 +98,7 @@ async fn exec_forks_a_child_from_the_warm_parent() {
 }
 
 #[tokio::test]
-async fn fork_fans_out_a_live_child() {
+async fn fork_without_a_state_provider_falls_back() {
     let backend = ForkdBackend::new(ForkdConfig::new(spawn_mock().await)).unwrap();
     assert!(!backend
         .fork(&StateId("st-nope".into()), &BranchId("br-b".into()))
@@ -108,15 +108,11 @@ async fn fork_fans_out_a_live_child() {
         .execute(shell_req("br-a", "st-9", "true"))
         .await
         .unwrap();
-    assert!(backend
+    assert!(!backend
         .fork(&StateId("st-9".into()), &BranchId("br-b".into()))
         .await
         .unwrap());
-    let out = backend
-        .execute(shell_req("br-b", "st-10", "hostname"))
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("cow-of-c-"));
+    assert!(!backend.profile().supports_fork);
 }
 
 #[tokio::test]
@@ -218,7 +214,7 @@ fn non_loopback_http_endpoint_is_rejected() {
 // ---- State-sync tests against a stateful mock ------------------------------
 //
 // forkd syncs over the shell transport, so this mock interprets exactly the
-// command shapes the adapter generates (`mkdir … | base64 -d`, `rm -f`,
+// command shapes the adapter generates (`mkdir … | base64 -d`, `rm -rf`,
 // `find … | sha256sum`, `stat -c`, `base64 --`) against an in-memory FS —
 // the honest wire-level contract, without needing a GNU userland on the
 // test host.
@@ -230,6 +226,13 @@ struct ShellMockState {
     /// child → tree
     fs: Mutex<HashMap<String, Tree>>,
     push_writes: AtomicUsize,
+    fail_ambiguous_exec: std::sync::atomic::AtomicBool,
+    corrupt_next_read: AtomicBool,
+    mutate_after_next_read: AtomicBool,
+    mutate_next_clone: AtomicBool,
+    block_next_exec: AtomicBool,
+    exec_started: tokio::sync::Notify,
+    release_exec: tokio::sync::Notify,
 }
 
 /// Strip one layer of POSIX single quoting (`'…'` with `'\''` escapes).
@@ -254,8 +257,16 @@ fn interpret(state: &ShellMockState, tree: &mut Tree, cmd: &str) -> (i32, String
         tree.remove(path);
         return (0, String::new());
     }
-    if cmd.starts_with("mkdir -p") && cmd.contains("| base64 -d > ") {
-        // mkdir -p "$(dirname 'P')" && printf %s 'B64' | base64 -d > 'P' && chmod M 'P'
+    if let Some(rest) = cmd.strip_prefix("chmod ") {
+        let (path, mode) = rest.split_once(' ').unwrap();
+        if let Some((_, current_mode)) = tree.get_mut(path) {
+            *current_mode = u32::from_str_radix(mode, 8).unwrap();
+        }
+        return (0, String::new());
+    }
+    if cmd.contains("| base64 -d > ") {
+        // rm -rf 'P' && mkdir -p "$(dirname 'P')" && printf %s 'B64'
+        // | base64 -d > 'P' && chmod M 'P'
         let (left, right) = cmd.split_once(" | base64 -d > ").unwrap();
         let b64 = unq(left.rsplit_once("printf %s ").unwrap().1);
         let (path_q, chmod) = right.split_once(" && chmod ").unwrap();
@@ -266,7 +277,7 @@ fn interpret(state: &ShellMockState, tree: &mut Tree, cmd: &str) -> (i32, String
         tree.insert(unq(path_q), (bytes, mode));
         return (0, String::new());
     }
-    if let Some(rest) = cmd.strip_prefix("rm -f -- ") {
+    if let Some(rest) = cmd.strip_prefix("rm -rf -- ") {
         for q in rest.split_whitespace() {
             tree.remove(&unq(q));
         }
@@ -300,10 +311,18 @@ fn interpret(state: &ShellMockState, tree: &mut Tree, cmd: &str) -> (i32, String
     if let Some(q) = cmd.strip_prefix("base64 -- ") {
         let path = unq(q);
         let bare = path.strip_prefix("./").unwrap_or(&path);
-        return match tree.get(bare) {
-            Some((bytes, _)) => (0, ak_core::b64::encode(bytes)),
-            None => (1, String::new()),
+        let Some((mut bytes, _)) = tree.get(bare).cloned() else {
+            return (1, String::new());
         };
+        if state.corrupt_next_read.swap(false, Ordering::SeqCst) {
+            bytes = b"different-from-listing".to_vec();
+        }
+        if state.mutate_after_next_read.swap(false, Ordering::SeqCst) {
+            // The returned file remains self-consistent, but the tree has
+            // moved after the first listing.
+            tree.insert("late-drift.txt".into(), (b"late".to_vec(), 0o644));
+        }
+        return (0, ak_core::b64::encode(&bytes));
     }
     (0, String::new())
 }
@@ -339,7 +358,10 @@ async fn spawn_shell_mock() -> (String, Arc<ShellMockState>) {
                     async move {
                         let clone_id = format!("cow-of-{id}");
                         let mut fs = state.fs.lock().unwrap();
-                        let tree = fs.get(&id).cloned().unwrap_or_default();
+                        let mut tree = fs.get(&id).cloned().unwrap_or_default();
+                        if state.mutate_next_clone.swap(false, Ordering::SeqCst) {
+                            tree.insert("clone-drift.txt".into(), (b"late".to_vec(), 0o644));
+                        }
                         fs.insert(clone_id.clone(), tree);
                         Json(serde_json::json!({"child_id": clone_id}))
                     }
@@ -354,13 +376,23 @@ async fn spawn_shell_mock() -> (String, Arc<ShellMockState>) {
                     let state = Arc::clone(&state);
                     async move {
                         let cmd = body["command"].as_str().unwrap_or_default().to_string();
+                        if cmd == "block" && state.block_next_exec.swap(false, Ordering::SeqCst) {
+                            state.exec_started.notify_one();
+                            state.release_exec.notified().await;
+                        }
                         let mut fs = state.fs.lock().unwrap();
                         let tree = fs.entry(id).or_default();
+                        if cmd == "mutate-then-fail"
+                            && state.fail_ambiguous_exec.swap(false, Ordering::SeqCst)
+                        {
+                            tree.insert("ambiguous.txt".into(), (b"maybe".to_vec(), 0o644));
+                            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                        }
                         let (exit_code, stdout) = interpret(&state, tree, &cmd);
-                        Json(serde_json::json!({
+                        Ok(Json(serde_json::json!({
                             "exit_code": exit_code, "stdout": stdout,
                             "stderr": "", "duration_ms": 3
-                        }))
+                        })))
                     }
                 }
             }),
@@ -488,7 +520,144 @@ async fn shell_transport_sync_is_content_addressed_across_steps() {
 }
 
 #[tokio::test]
-async fn fork_inherits_the_sync_view_and_reverse_diffs_to_the_base() {
+async fn live_child_drift_is_repaired_before_execution_and_never_cow_forked() {
+    let (endpoint, mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = ForkdBackend::new(ForkdConfig::new(endpoint))
+        .unwrap()
+        .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>);
+
+    backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    let child = mock.fs.lock().unwrap().keys().next().unwrap().clone();
+    mock.fs
+        .lock()
+        .unwrap()
+        .get_mut(&child)
+        .unwrap()
+        .insert("a.txt".into(), (b"background-drift".to_vec(), 0o600));
+
+    assert!(
+        !backend
+            .fork(&StateId("st-0".into()), &BranchId("br-drift".into()))
+            .await
+            .unwrap(),
+        "a stale cache entry must not make a drifted child a CoW source"
+    );
+    let writes_before = mock.push_writes.load(Ordering::SeqCst);
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    assert_eq!(mock.push_writes.load(Ordering::SeqCst), writes_before + 1);
+    assert_eq!(
+        mock.fs.lock().unwrap()[&child]["a.txt"],
+        (b"alpha".to_vec(), 0o644)
+    );
+}
+
+#[tokio::test]
+async fn list_read_hash_race_poisons_the_child() {
+    let (endpoint, mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[]);
+    let backend = ForkdBackend::new(ForkdConfig::new(endpoint))
+        .unwrap()
+        .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>);
+
+    mock.corrupt_next_read.store(true, Ordering::SeqCst);
+    let error = backend
+        .execute(shell_req("br-1", "st-0", "put out.txt value"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("changed between list and read"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn post_read_tree_drift_poisons_the_child() {
+    let (endpoint, mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[]);
+    let backend = ForkdBackend::new(ForkdConfig::new(endpoint))
+        .unwrap()
+        .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>);
+
+    mock.mutate_after_next_read.store(true, Ordering::SeqCst);
+    let error = backend
+        .execute(shell_req("br-1", "st-0", "put out.txt value"))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changed while its state delta was being pulled"),
+        "unexpected error: {error}"
+    );
+    let poisoned_count = mock.fs.lock().unwrap().len();
+
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    assert!(
+        mock.fs.lock().unwrap().len() > poisoned_count,
+        "the drifted child must never be reused"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_exec_failure_poisons_the_child() {
+    let (endpoint, mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = ForkdBackend::new(ForkdConfig::new(endpoint))
+        .unwrap()
+        .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>);
+
+    mock.fail_ambiguous_exec.store(true, Ordering::SeqCst);
+    assert!(backend
+        .execute(shell_req("br-1", "st-0", "mutate-then-fail"))
+        .await
+        .is_err());
+    let poisoned_count = mock.fs.lock().unwrap().len();
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    assert!(mock.fs.lock().unwrap().len() > poisoned_count);
+}
+
+#[tokio::test]
+async fn mode_only_change_is_pulled() {
+    let (endpoint, _mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("run.sh", b"#!/bin/sh\n", 0o644)]);
+    let backend = ForkdBackend::new(ForkdConfig::new(endpoint))
+        .unwrap()
+        .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>);
+
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "chmod run.sh 755"))
+        .await
+        .unwrap();
+    let delta = out.workspace_delta.unwrap();
+    assert_eq!(delta.upserts.len(), 1);
+    assert_eq!(delta.upserts[0].path, "run.sh");
+    assert_eq!(delta.upserts[0].contents, b"#!/bin/sh\n");
+    assert_eq!(delta.upserts[0].mode, 0o755);
+}
+
+#[tokio::test]
+async fn fork_uses_only_an_exact_current_manifest() {
     let (endpoint, mock) = spawn_shell_mock().await;
     let provider = Arc::new(MapProvider::default());
     provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
@@ -500,21 +669,25 @@ async fn fork_inherits_the_sync_view_and_reverse_diffs_to_the_base() {
         .execute(shell_req("br-1", "st-0", "put extra.txt data"))
         .await
         .unwrap();
+    provider.add_state(
+        "st-1",
+        &[("a.txt", b"alpha", 0o644), ("extra.txt", b"data", 0o644)],
+    );
     let writes_before = mock.push_writes.load(Ordering::SeqCst);
 
     assert!(backend
-        .fork(&StateId("st-0".into()), &BranchId("br-2".into()))
+        .fork(&StateId("st-1".into()), &BranchId("br-2".into()))
         .await
         .unwrap());
 
     let out = backend
-        .execute(shell_req("br-2", "st-0", "noop"))
+        .execute(shell_req("br-2", "st-1", "noop"))
         .await
         .unwrap();
     assert_eq!(
         mock.push_writes.load(Ordering::SeqCst),
         writes_before,
-        "a CoW clone of a shared tree must not re-push shared files"
+        "an exact CoW clone must not re-push shared files"
     );
     assert!(out.workspace_delta.unwrap().is_empty());
     let fs = mock.fs.lock().unwrap();
@@ -524,7 +697,77 @@ async fn fork_inherits_the_sync_view_and_reverse_diffs_to_the_base() {
             .map(|(_, v)| v)
     });
     let clone_tree = clone.expect("forked child exists");
-    assert!(clone_tree.contains_key("a.txt") && !clone_tree.contains_key("extra.txt"));
+    assert!(clone_tree.contains_key("a.txt") && clone_tree.contains_key("extra.txt"));
+}
+
+#[tokio::test]
+async fn fork_reports_false_when_the_child_itself_is_not_exact() {
+    let (endpoint, mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = ForkdBackend::new(ForkdConfig::new(endpoint))
+        .unwrap()
+        .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>);
+    backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+
+    mock.mutate_next_clone.store(true, Ordering::SeqCst);
+    assert!(
+        !backend
+            .fork(&StateId("st-0".into()), &BranchId("br-raced".into()))
+            .await
+            .unwrap(),
+        "native CoW success requires the child itself to be exact"
+    );
+
+    let out = backend
+        .execute(shell_req("br-raced", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    let fs = mock.fs.lock().unwrap();
+    let clone = fs
+        .iter()
+        .find(|(id, _)| id.starts_with("cow-of-"))
+        .map(|(_, tree)| tree)
+        .expect("forked child exists");
+    assert!(!clone.contains_key("clone-drift.txt"));
+}
+
+#[tokio::test]
+async fn fork_never_clones_a_matching_but_busy_child() {
+    let (endpoint, mock) = spawn_shell_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = Arc::new(
+        ForkdBackend::new(ForkdConfig::new(endpoint))
+            .unwrap()
+            .with_state_provider(Arc::clone(&provider) as Arc<dyn StateProvider>),
+    );
+    backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+
+    mock.block_next_exec.store(true, Ordering::SeqCst);
+    let running = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { backend.execute(shell_req("br-1", "st-0", "block")).await })
+    };
+    mock.exec_started.notified().await;
+    assert!(!backend
+        .fork(&StateId("st-0".into()), &BranchId("br-busy".into()))
+        .await
+        .unwrap());
+
+    mock.release_exec.notify_one();
+    running.await.unwrap().unwrap();
+    assert!(backend
+        .fork(&StateId("st-0".into()), &BranchId("br-idle".into()))
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

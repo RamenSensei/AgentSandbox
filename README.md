@@ -132,14 +132,21 @@ control-plane ceremony:
   cell, never as extensions of the control plane; signed manifests vouch
   per-tool effect classes.
 - **Transparent egress** — grant egress domains in the policy and
-  `pip install` / `cargo fetch` / `git fetch` / `curl` work unmodified:
-  the sandbox stays offline except a token-authenticated loopback proxy
-  that enforces the domain globs, SSRF guards, a port allowlist and byte
-  metering at the one hop where they can actually be enforced. On Linux
+  `pip install` / `cargo fetch` / `git fetch` / `curl` work unmodified;
+  SOCKS-aware SSH and database clients use the injected `ALL_PROXY`.
+  Authenticated HTTP and SOCKS5 share one policy listener, so domain globs,
+  proxy-side DNS, SSRF guards, the port allowlist, revocation and byte
+  metering cannot diverge by protocol. The sandbox otherwise stays offline.
+  On Linux
   the bwrap sandbox keeps its unshared network namespace: the
   `ak-egress-fwd` forwarder (probe-verified at startup) bridges an
   in-namespace listener to the proxy's Unix socket, so the proxy stays
   the *only* route out — hosts where the probe fails keep egress off.
+- **Linux tree-wide resource enforcement** — when a delegated cgroup v2
+  parent passes an end-to-end probe, aggregate CPU time, `memory.max` and
+  `pids.max` cover the complete shell/session tree, including daemonized
+  descendants. CPU, peak memory, OOM kills and rejected forks come from
+  kernel counters; other hosts retain portable per-process backstops.
 - **`POST /v1/branches/{id}/explore`** — server-side parallel candidate
   search: fork N branches, run candidates + an evaluator concurrently,
   merge the winner, discard the losers, one call.
@@ -155,8 +162,10 @@ control-plane ceremony:
   into the remote sandbox (content-addressed, diffs only), the observed
   file delta is pulled back, validated against the step's writable
   prefixes, and snapshotted — a remote step is a *real* state transition.
-  Backends without sync are recorded as audit-only excursions, never as
-  pretended local state transitions.
+  Live trees are re-listed before sync-in; forks use native CoW only from a
+  quiescent tree whose complete manifest is freshly verified against the
+  committed state. Backends without sync are recorded as audit-only
+  excursions, never as pretended local state transitions.
 
 ### Authentication
 

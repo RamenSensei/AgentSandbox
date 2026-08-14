@@ -26,7 +26,7 @@ use ak_identity::{
 };
 use ak_policy::{CompiledConfinement, Decision, PolicyDocument, PolicyEngine};
 use ak_scheduler::{BackendRouter, Needs, RiskTier, SchedulerConfig, StepScheduler};
-use ak_state_dag::{Branch, BranchComparison, EpisodeHandle, StateDag};
+use ak_state_dag::{Branch, BranchComparison, BranchStatus, EpisodeHandle, StateDag};
 use chrono::Utc;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -310,42 +310,134 @@ fn validate_workspace_delta(
     writable_prefixes: &[String],
     backend: &str,
 ) -> Result<(), Denial> {
-    let check = |raw: &str, verb: &str| -> Result<(), Denial> {
-        let refuse = |why: String| Denial {
-            code: DenialCode::ConstraintViolated,
-            attempted_operation: Operation::new("backend.state_sync"),
-            reason: format!(
-                "backend `{backend}` returned a workspace delta that {verb} `{raw}`, \
-                 which {why}; the delta was rejected and the remote sandbox discarded \
-                 — the branch head is unchanged"
-            ),
-            safe_alternatives: Vec::new(),
-            requestable_scopes: Vec::new(),
-            escalation_allowed: false,
-        };
-        let path = ak_core::sync::syncable_path(raw).map_err(&refuse)?;
-        if !ak_core::path::matches_prefixes(std::path::Path::new(&path), writable_prefixes) {
-            return Err(refuse(format!(
-                "is outside the step's writable prefixes {writable_prefixes:?}"
-            )));
-        }
-        Ok(())
+    let refuse = |verb: &str, raw: &str, why: String| Denial {
+        code: DenialCode::ConstraintViolated,
+        attempted_operation: Operation::new("backend.state_sync"),
+        reason: format!(
+            "backend `{backend}` returned a workspace delta that {verb} `{raw}`, \
+             which {why}; the delta was rejected and the remote sandbox discarded \
+             — the branch head is unchanged"
+        ),
+        safe_alternatives: Vec::new(),
+        requestable_scopes: Vec::new(),
+        escalation_allowed: false,
     };
+    let check = |raw: &str, verb: &str| -> Result<String, Denial> {
+        let path = ak_core::sync::syncable_path(raw).map_err(|why| refuse(verb, raw, why))?;
+        if path != raw {
+            return Err(refuse(
+                verb,
+                raw,
+                format!("is not canonical (the canonical path is `{path}`)"),
+            ));
+        }
+        if !ak_core::path::matches_prefixes(std::path::Path::new(&path), writable_prefixes) {
+            return Err(refuse(
+                verb,
+                raw,
+                format!("is outside the step's writable prefixes {writable_prefixes:?}"),
+            ));
+        }
+        Ok(path)
+    };
+
+    // A delta is a canonical set, not an instruction stream. Duplicate or
+    // conflicting entries would otherwise make application order matter.
+    let mut touched = std::collections::BTreeSet::new();
+    let mut upserts = std::collections::BTreeSet::new();
     for f in &delta.upserts {
-        check(&f.path, "writes")?;
+        let path = check(&f.path, "writes")?;
+        if !touched.insert(path.clone()) {
+            return Err(refuse(
+                "mentions more than once",
+                &f.path,
+                "makes the delta order-dependent".into(),
+            ));
+        }
+        upserts.insert(path);
     }
     for p in &delta.deletes {
-        check(p, "deletes")?;
+        let path = check(p, "deletes")?;
+        if !touched.insert(path) {
+            return Err(refuse(
+                "both writes and/or deletes",
+                p,
+                "makes the delta order-dependent".into(),
+            ));
+        }
+    }
+    // A real tree cannot contain both a regular file and a child below it.
+    for path in &upserts {
+        let mut parent = std::path::Path::new(path).parent();
+        while let Some(p) = parent {
+            if p.as_os_str().is_empty() {
+                break;
+            }
+            let parent_path = p.to_string_lossy();
+            if upserts.contains(parent_path.as_ref()) {
+                return Err(refuse(
+                    "writes",
+                    path,
+                    format!("also writes its file ancestor `{parent_path}`"),
+                ));
+            }
+            parent = p.parent();
+        }
     }
     Ok(())
 }
 
-/// Apply a **validated** delta to the branch workspace mirror. Modes are
-/// masked to `0o777`: setuid/setgid/sticky bits never survive a remote
-/// round trip. Deletes of already-absent paths are no-ops.
+/// Remove empty directories above `path`, stopping at the workspace root or
+/// the first non-empty directory.
+fn prune_empty_parents(path: &std::path::Path, root: &std::path::Path) -> KernelResult<()> {
+    let mut parent = path.parent();
+    while let Some(dir) = parent {
+        if dir == root || !dir.starts_with(root) {
+            break;
+        }
+        match std::fs::remove_dir(dir) {
+            Ok(()) => parent = dir.parent(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent = dir.parent(),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Apply a **validated** delta to the branch workspace mirror. Deletes run
+/// before writes so file↔directory transitions work. Modes are masked to
+/// `0o777`; setuid/setgid/sticky bits never survive a remote round trip.
 fn apply_workspace_delta(dir: &std::path::Path, delta: &WorkspaceDelta) -> KernelResult<()> {
+    let mut deletes: Vec<&str> = delta.deletes.iter().map(String::as_str).collect();
+    deletes.sort_by_key(|p| std::cmp::Reverse(std::path::Path::new(p).components().count()));
+    for p in deletes {
+        let dest = dir.join(p);
+        // Deltas describe persistent files. A directory here is either an
+        // already-absent file or a parent whose listed children are removed
+        // separately; never recursively delete unreported content.
+        if std::fs::symlink_metadata(&dest)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        match std::fs::remove_file(&dest) {
+            Ok(()) => prune_empty_parents(&dest, dir)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     for f in &delta.upserts {
         let dest = dir.join(&f.path);
+        // A complete delta removed all former children first. Remove only an
+        // empty directory here; a non-empty one signals an incomplete delta.
+        if std::fs::symlink_metadata(&dest)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false)
+        {
+            std::fs::remove_dir(&dest)?;
+        }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -354,13 +446,6 @@ fn apply_workspace_delta(dir: &std::path::Path, delta: &WorkspaceDelta) -> Kerne
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(f.mode & 0o777))?;
-        }
-    }
-    for p in &delta.deletes {
-        match std::fs::remove_file(dir.join(p)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
         }
     }
     Ok(())
@@ -605,6 +690,10 @@ pub struct Kernel {
     scheduler: StepScheduler,
     backend: Arc<LocalBackend>,
     episodes: Mutex<HashMap<EpisodeId, EpisodeInfo>>,
+    /// One transition at a time per branch. Different branches still run in
+    /// parallel; serializing a single branch prevents two remote excursions
+    /// from materializing the same stale base and racing the movable head.
+    branch_gates: Mutex<HashMap<BranchId, Arc<tokio::sync::Mutex<()>>>>,
     /// Effect classes of registered connector operations, for contracts.
     op_classes: Mutex<HashMap<String, EffectClass>>,
     /// Registered connector names (routing prefixes).
@@ -735,6 +824,7 @@ impl Kernel {
             scheduler,
             backend,
             episodes: Mutex::new(episodes),
+            branch_gates: Mutex::new(HashMap::new()),
             op_classes: Mutex::new(HashMap::new()),
             connector_names: Mutex::new(Vec::new()),
             connectors: Mutex::new(HashMap::new()),
@@ -805,6 +895,36 @@ impl Kernel {
     pub fn scheduler(&self) -> &StepScheduler {
         &self.scheduler
     }
+
+    fn branch_gate(&self, branch: &BranchId) -> KernelResult<Arc<tokio::sync::Mutex<()>>> {
+        Ok(Arc::clone(
+            lock(&self.branch_gates)?
+                .entry(branch.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        ))
+    }
+
+    async fn lock_branch(
+        &self,
+        branch: &BranchId,
+    ) -> KernelResult<tokio::sync::OwnedMutexGuard<()>> {
+        Ok(self.branch_gate(branch)?.lock_owned().await)
+    }
+
+    /// Terminal branches no longer need an entry in the in-memory gate map.
+    /// Any waiter already holding the old Arc wakes and observes the durable
+    /// Merged/Discarded status before it can mutate state.
+    fn forget_branch_gate(&self, branch: &BranchId) {
+        match self.branch_gates.lock() {
+            Ok(mut gates) => {
+                gates.remove(branch);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(branch);
+            }
+        }
+    }
+
     /// The local backend (workspace materialization + discard).
     pub fn local_backend(&self) -> &Arc<LocalBackend> {
         &self.backend
@@ -1063,6 +1183,20 @@ impl Kernel {
 
     // ------------------------------------------------------------- branches
 
+    /// Load a branch only if it can still accept transitions. This check is
+    /// deliberately performed while the caller holds the branch gate, before
+    /// any backend work: discovering a terminal branch after execution would
+    /// turn a rejected step into an unrecorded side effect.
+    fn active_branch(&self, branch: &BranchId) -> KernelResult<Branch> {
+        let value = self.dag.get_branch(branch)?;
+        match value.status {
+            BranchStatus::Active => Ok(value),
+            BranchStatus::Discarded | BranchStatus::Merged => Err(KernelError::BranchDiscarded {
+                branch: branch.to_string(),
+            }),
+        }
+    }
+
     /// The principal that created `episode` (the resource owner for
     /// authorization purposes).
     pub fn episode_owner(&self, episode: &EpisodeId) -> KernelResult<PrincipalId> {
@@ -1084,13 +1218,64 @@ impl Kernel {
     /// Fork a new branch from the head of `branch` and materialize its
     /// backend workspace.
     #[instrument(skip(self))]
-    pub fn fork_branch(&self, branch: &BranchId) -> KernelResult<Branch> {
-        let head = self.dag.head(branch)?;
+    pub async fn fork_branch(&self, branch: &BranchId) -> KernelResult<Branch> {
+        let _branch_guard = self.lock_branch(branch).await?;
+        let source = self.active_branch(branch)?;
+        let head = self.dag.get_state(&source.head)?;
         let new = self.dag.fork(&head.id)?;
-        let dir = self.backend.workspace_for(&new.id)?;
-        self.dag.materialize(&new.head, &dir)?;
-        if let Some(info) = lock(&self.episodes)?.get_mut(&new.episode) {
-            info.branches.push(new.id.clone());
+        let setup = self
+            .backend
+            .workspace_for(&new.id)
+            .and_then(|dir| self.dag.materialize(&new.head, &dir));
+        if let Err(error) = setup {
+            if let Err(e) = self.backend.discard(&new.id).await {
+                warn!(branch = %new.id, error = %e,
+                      "failed to clean local workspace after fork setup failure");
+            }
+            if let Err(e) = self.dag.discard_branch(&new.id) {
+                warn!(branch = %new.id, error = %e,
+                      "failed to mark partially-created fork discarded");
+            }
+            return Err(error);
+        }
+        // Register the durable branch before optional remote optimization;
+        // after this point native fork failures merely fall back to CAS.
+        let registration_error = {
+            match lock(&self.episodes) {
+                Ok(mut episodes) => {
+                    if let Some(info) = episodes.get_mut(&new.episode) {
+                        info.branches.push(new.id.clone());
+                    }
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        };
+        if let Some(error) = registration_error {
+            if let Err(e) = self.backend.discard(&new.id).await {
+                warn!(branch = %new.id, error = %e,
+                      "failed to clean local workspace after fork registration failure");
+            }
+            if let Err(e) = self.dag.discard_branch(&new.id) {
+                warn!(branch = %new.id, error = %e,
+                      "failed to mark unregistered fork discarded");
+            }
+            return Err(error);
+        }
+        // Native remote CoW is an optimization, never a correctness
+        // dependency: adapters return false when they do not currently own
+        // this exact state, and the first step then materializes from CAS.
+        for backend in self.scheduler.backends() {
+            if !backend.profile().supports_fork {
+                continue;
+            }
+            match backend.fork(&head.id, &new.id).await {
+                Ok(true) => info!(backend = %backend.profile().name, branch = %new.id,
+                                  "forked backend state natively"),
+                Ok(false) => {}
+                Err(e) => warn!(backend = %backend.profile().name, error = %e,
+                                "native backend fork failed; branch will materialize from CAS"),
+            }
         }
         Ok(new)
     }
@@ -1115,23 +1300,110 @@ impl Kernel {
     /// Merge `source` into `target` (artifact-only three-way merge), then
     /// re-materialize the target backend workspace.
     #[instrument(skip(self))]
-    pub fn merge_branch(
+    pub async fn merge_branch(
         &self,
         target: &BranchId,
         source: &BranchId,
         actor: &PrincipalId,
     ) -> KernelResult<StateNode> {
+        if target == source {
+            return Err(KernelError::Storage(format!(
+                "cannot merge branch `{target}` into itself"
+            )));
+        }
+        // Deterministic acquisition order lets cross-merges wait safely while
+        // preventing either branch from changing under the three-way merge.
+        let (first, second) = if target.as_str() <= source.as_str() {
+            (target, source)
+        } else {
+            (source, target)
+        };
+        let _first_guard = self.lock_branch(first).await?;
+        let _second_guard = self.lock_branch(second).await?;
         let node = self.dag.merge(target, source, actor)?;
-        let dir = self.backend.workspace_for(target)?;
-        self.dag.materialize(&node.id, &dir)?;
+        let materialized = self
+            .backend
+            .workspace_for(target)
+            .and_then(|dir| self.dag.materialize(&node.id, &dir));
+        // The source is now immutable/merged. Release all of its local and
+        // remote runtime resources; cleanup failure does not un-merge the
+        // already committed DAG transition, so report it loudly and retain
+        // the adapter handle for an explicit discard retry.
+        for backend in self.scheduler.backends() {
+            if let Err(e) = backend.discard(source).await {
+                warn!(backend = %backend.profile().name, error = %e,
+                      "failed to release merged source branch resources");
+            }
+        }
+        self.forget_branch_gate(source);
+        if let Err(error) = materialized {
+            return Err(KernelError::Storage(format!(
+                "merge committed as {} but rebuilding target workspace `{target}` failed: \
+                 {error}; retrying any target step will materialize its durable head",
+                node.id
+            )));
+        }
         Ok(node)
     }
 
-    /// Discard a branch in the DAG and tear down its backend workspace.
+    /// Discard an active branch in the DAG and tear down its backend
+    /// workspace. Calling this for a merged source retries runtime cleanup
+    /// only and preserves its durable `Merged` status.
     #[instrument(skip(self))]
     pub async fn discard_branch(&self, branch: &BranchId) -> KernelResult<()> {
+        let _branch_guard = self.lock_branch(branch).await?;
+        let status = self.dag.get_branch(branch)?.status;
+        if status == BranchStatus::Discarded {
+            return Err(KernelError::BranchDiscarded {
+                branch: branch.to_string(),
+            });
+        }
+        if status == BranchStatus::Merged {
+            // Merge is already durable, but a transport failure may have
+            // left a remote adapter handle for this source. Retrying discard
+            // is the narrow cleanup operation: do not rewrite Merged to
+            // Discarded and do not resurrect the branch.
+            let mut first_error = None;
+            for backend in self.scheduler.backends() {
+                if let Err(error) = backend.discard(branch).await {
+                    warn!(backend = %backend.profile().name, error = %error,
+                          "merged branch cleanup retry failed");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            self.forget_branch_gate(branch);
+            return Ok(());
+        }
+        // Remote adapters may own a sandbox even when the most recent step
+        // ran locally. Tear every one down before making the DAG transition
+        // irreversible. Adapter discard is idempotent, so a failed deletion
+        // retains its handle and a retry can finish cleanly.
+        let local: Arc<dyn Backend> = Arc::clone(&self.backend) as Arc<dyn Backend>;
+        let mut first_error = None;
+        for backend in self.scheduler.backends() {
+            if Arc::ptr_eq(&backend, &local) {
+                continue;
+            }
+            if let Err(e) = backend.discard(branch).await {
+                warn!(backend = %backend.profile().name, error = %e,
+                      "backend branch cleanup failed");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        local.discard(branch).await?;
         self.dag.discard_branch(branch)?;
-        self.backend.discard(branch).await
+        self.forget_branch_gate(branch);
+        Ok(())
     }
 
     // ---------------------------------------------------------- capabilities
@@ -1317,8 +1589,9 @@ impl Kernel {
         branch: &BranchId,
         action: Action,
     ) -> KernelResult<StepResult> {
+        let _branch_guard = self.lock_branch(branch).await?;
         let step = StepId::generate();
-        let b = self.dag.get_branch(branch)?;
+        let b = self.active_branch(branch)?;
         let who = self.registry().get(principal).map_err(KernelError::from)?;
         let writer = self.ledger.writer(
             b.episode.clone(),
@@ -1634,7 +1907,7 @@ impl Kernel {
                     report.skipped = true;
                     return report;
                 }
-                let branch = match kernel.fork_branch(&source) {
+                let branch = match kernel.fork_branch(&source).await {
                     Ok(b) => b,
                     Err(e) => {
                         report.error = Some(format!("fork failed: {e}"));
@@ -1730,7 +2003,7 @@ impl Kernel {
         let mut merge_error = None;
         if let (true, Some(w)) = (options.merge_winner, winner) {
             if let Some(branch) = candidates[w].branch.clone() {
-                match self.merge_branch(source, &branch, principal) {
+                match self.merge_branch(source, &branch, principal).await {
                     Ok(node) => merged_state = Some(node.id),
                     Err(e) => merge_error = Some(e.to_string()),
                 }
@@ -2287,6 +2560,43 @@ impl Kernel {
         };
         let outcome = routed.outcome;
 
+        // The profile and outcome form a strict state-plane contract. A
+        // backend may share the local tree, sync a remote tree, or do
+        // neither (audit-only) — never more than one, and a syncing backend
+        // must return `Some(delta)` even when the delta is empty.
+        let contract_ok = matches!(
+            (
+                routed.backend.shares_workspace,
+                routed.backend.syncs_state,
+                outcome.workspace_delta.is_some(),
+            ),
+            (true, false, false) | (false, true, true) | (false, false, false)
+        );
+        if !contract_ok {
+            if let Err(e) = routed.executor.discard(branch).await {
+                warn!(backend = %routed.backend.name, error = %e,
+                      "failed to discard branch after state-plane contract violation");
+            }
+            let who = self.registry().get(principal).map_err(KernelError::from)?;
+            let denial = Denial {
+                code: DenialCode::BackendUnavailable,
+                attempted_operation: action.kind.required_operation(),
+                reason: format!(
+                    "backend `{}` violated its state-plane contract \
+                     (shares_workspace={}, syncs_state={}, returned_delta={}); its branch \
+                     resources were discarded and the branch head is unchanged",
+                    routed.backend.name,
+                    routed.backend.shares_workspace,
+                    routed.backend.syncs_state,
+                    outcome.workspace_delta.is_some(),
+                ),
+                safe_alternatives: Vec::new(),
+                requestable_scopes: Vec::new(),
+                escalation_allowed: false,
+            };
+            return self.deny_step(writer, b, step, &who, denial);
+        }
+
         // Record the state transition honestly, in one of three ways:
         //
         // 1. a **workspace-sharing** backend's effects are snapshotted
@@ -2303,27 +2613,52 @@ impl Kernel {
             let dir = self.backend.workspace_for(branch)?;
             self.dag
                 .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?
-        } else if let Some(delta) = &outcome.workspace_delta {
+        } else if routed.backend.syncs_state {
+            let delta = outcome
+                .workspace_delta
+                .as_ref()
+                .expect("state-plane contract checked above");
             if let Err(denial) =
                 validate_workspace_delta(delta, &writable_prefixes, &routed.backend.name)
             {
                 // The remote tree no longer matches any state the kernel
                 // would vouch for: scrap the backend's branch resources so
                 // the next step re-materializes from the (unchanged) head.
-                if let Some(backend) = self.scheduler.backend(&routed.backend.name) {
-                    if let Err(e) = backend.discard(branch).await {
-                        warn!(backend = %routed.backend.name, error = %e,
-                              "failed to discard branch after rejected sync delta");
-                    }
+                if let Err(e) = routed.executor.discard(branch).await {
+                    warn!(backend = %routed.backend.name, error = %e,
+                          "failed to discard branch after rejected sync delta");
                 }
                 let who = self.registry().get(principal).map_err(KernelError::from)?;
                 return self.deny_step(writer, b, step, &who, denial);
             }
             let dir = self.backend.workspace_for(branch)?;
-            self.dag.materialize(&base_state, &dir)?;
-            apply_workspace_delta(&dir, delta)?;
-            self.dag
-                .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?
+            let transition = (|| {
+                self.dag.materialize(&base_state, &dir)?;
+                apply_workspace_delta(&dir, delta)?;
+                self.dag
+                    .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)
+            })();
+            match transition {
+                Ok(node) => node,
+                Err(error) => {
+                    // Applying a remote delta is transactional with respect
+                    // to the local mirror: on any I/O/snapshot failure put
+                    // the mirror back at the unchanged base and poison the
+                    // remote tree whose post-state was not committed.
+                    let rollback = self.dag.materialize(&base_state, &dir);
+                    if let Err(e) = routed.executor.discard(branch).await {
+                        warn!(backend = %routed.backend.name, error = %e,
+                              "failed to discard branch after state-sync apply failure");
+                    }
+                    if let Err(rollback_error) = rollback {
+                        return Err(KernelError::Storage(format!(
+                            "state-sync apply failed ({error}); restoring the branch mirror to \
+                             {base_state} also failed ({rollback_error})"
+                        )));
+                    }
+                    return Err(error);
+                }
+            }
         } else {
             let head = self.dag.head(branch)?;
             self.dag.append_step(
@@ -2356,7 +2691,7 @@ impl Kernel {
         let observation = if outcome.exit_code == 0 {
             let via = if routed.backend.shares_workspace {
                 String::new()
-            } else if outcome.workspace_delta.is_some() {
+            } else if routed.backend.syncs_state {
                 format!(" via `{}` (state-synced)", routed.backend.name)
             } else {
                 format!(" via `{}` (audit-only excursion)", routed.backend.name)

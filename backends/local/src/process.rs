@@ -88,7 +88,10 @@ pub struct ProcessSession {
     _profile: Option<Arc<tempfile::NamedTempFile>>,
     /// Keeps the egress proxy token alive for the process lifetime; dropped
     /// (revoked) when the session is removed.
-    _egress: Option<Arc<crate::egress::EgressGrant>>,
+    egress: Option<Arc<crate::egress::EgressGrant>>,
+    /// The session's cgroup (group-level ceilings). Dropping the last
+    /// clone kills every member — even setsid escapees — and removes it.
+    cgroup: Option<Arc<crate::cgroup::StepCgroup>>,
 }
 
 impl ProcessSession {
@@ -97,7 +100,10 @@ impl ProcessSession {
     }
 
     pub fn running(&self) -> bool {
-        self.exit_code().is_none()
+        self.cgroup
+            .as_ref()
+            .and_then(|group| group.populated())
+            .unwrap_or_else(|| self.exit_code().is_none())
     }
 
     /// Send a signal to the whole process group (the child is its own group
@@ -114,6 +120,16 @@ impl ProcessSession {
         };
         if !self.running() {
             return Err("process has already exited".into());
+        }
+        // SIGKILL is terminal, so use the cgroup's atomic full-tree kill
+        // when available. Unlike a process-group signal this reaches
+        // descendants that daemonized with setsid.
+        if signal == "kill" {
+            if let Some(group) = &self.cgroup {
+                return group
+                    .kill_tree()
+                    .map_err(|e| format!("cgroup.kill failed: {e}"));
+            }
         }
         let status = std::process::Command::new("kill")
             .arg(format!("-{sig}"))
@@ -141,6 +157,12 @@ impl ProcessSession {
 
     pub fn status_json(&self) -> serde_json::Value {
         let logs = lock(&self.logs);
+        let cpu_ms = self.cgroup.as_ref().and_then(|g| g.cpu_usage_ms());
+        let memory_peak_bytes = self.cgroup.as_ref().and_then(|g| g.peak_memory());
+        let oom_kills = self.cgroup.as_ref().and_then(|g| g.oom_kills());
+        let pid_limit_hits = self.cgroup.as_ref().and_then(|g| g.pid_limit_hits());
+        let cpu_budget_exhausted = self.cgroup.as_ref().is_some_and(|g| g.cpu_exhausted());
+        let network_bytes = self.egress.as_ref().map(|g| g.used_bytes()).unwrap_or(0);
         serde_json::json!({
             "process": self.id,
             "name": self.name,
@@ -151,6 +173,12 @@ impl ProcessSession {
             "uptime_ms": self.started_at.elapsed().as_millis() as u64,
             "log_total_bytes": logs.total(),
             "log_base_offset": logs.base_offset(),
+            "cpu_ms": cpu_ms,
+            "memory_peak_bytes": memory_peak_bytes,
+            "oom_kills": oom_kills,
+            "pid_limit_hits": pid_limit_hits,
+            "cpu_budget_exhausted": cpu_budget_exhausted,
+            "network_bytes": network_bytes,
         })
     }
 }
@@ -177,6 +205,7 @@ impl ProcessRegistry {
         mut child: Child,
         profile: Option<tempfile::NamedTempFile>,
         egress: Option<crate::egress::EgressGrant>,
+        cgroup: Option<Arc<crate::cgroup::StepCgroup>>,
         log_cap: usize,
     ) -> ProcessSession {
         let id = format!("proc-{}", uuid::Uuid::new_v4().simple());
@@ -212,7 +241,8 @@ impl ProcessRegistry {
             logs,
             exit,
             _profile: profile.map(Arc::new),
-            _egress: egress.map(Arc::new),
+            egress: egress.map(Arc::new),
+            cgroup,
         };
         lock(&self.sessions).insert(id, session.clone());
         session

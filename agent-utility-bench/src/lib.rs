@@ -601,7 +601,7 @@ async fn scenario_fork_search(h: &Harness) -> anyhow::Result<ScenarioOutcome> {
     let mut branches = Vec::new();
     for _ in 0..candidates.len() {
         let t = Instant::now();
-        let b = h.kernel.fork_branch(&h.branch)?;
+        let b = h.kernel.fork_branch(&h.branch).await?;
         fork_ms.push(t.elapsed().as_secs_f64() * 1000.0);
         branches.push(b.id);
     }
@@ -636,7 +636,9 @@ async fn scenario_fork_search(h: &Harness) -> anyhow::Result<ScenarioOutcome> {
     let mut correct = false;
     if let Some(i) = winner {
         correct = i == correct_idx;
-        h.kernel.merge_branch(&h.branch, &branches[i], &h.who.id)?;
+        h.kernel
+            .merge_branch(&h.branch, &branches[i], &h.who.id)
+            .await?;
         for (j, b) in branches.iter().enumerate() {
             if j != i {
                 h.kernel.discard_branch(b).await?;

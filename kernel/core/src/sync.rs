@@ -1,13 +1,14 @@
 //! Remote state sync: the pure planning half, shared by every remote
 //! adapter that materializes kernel state in its own sandbox.
 //!
-//! A syncing backend keeps, per remote sandbox, a map of what that sandbox's
-//! workspace currently holds (`path → (blob hash, mode)`). Before executing a
-//! step it diffs that map against the base state's manifest (from the
-//! [`crate::traits::StateProvider`]) and pushes only the difference; after
-//! executing it lists the remote tree, pulls only changed files, and reports
-//! them as a [`crate::traits::WorkspaceDelta`] for the kernel to apply and
-//! snapshot. The functions here compute those diffs; adapters own transport.
+//! Before executing a step, a syncing backend lists the live remote tree and
+//! diffs it against the base state's manifest (from the
+//! [`crate::traits::StateProvider`]), pushing only the difference. After
+//! execution it lists again, pulls only files changed from the committed base,
+//! and reports a [`crate::traits::WorkspaceDelta`] for the kernel to apply and
+//! snapshot. A per-sandbox manifest cache remains a transfer/index hint, never
+//! the authority for mutable remote state. The functions here compute those
+//! diffs; adapters own transport.
 
 use crate::hash::ContentHash;
 use crate::path::normalize_relative;
@@ -58,6 +59,23 @@ pub fn push_plan(current: &SyncManifest, target: &SyncManifest) -> PushPlan {
         }
     }
     plan
+}
+
+/// Reject a manifest that claims both a file and a descendant beneath that
+/// file (for example `a` and `a/b`). No real filesystem tree can have that
+/// shape; accepting it would make sync order determine the resulting state.
+pub fn validate_manifest_shape(manifest: &SyncManifest) -> Result<(), String> {
+    for path in manifest.keys() {
+        for (separator, _) in path.match_indices('/') {
+            let ancestor = &path[..separator];
+            if manifest.contains_key(ancestor) {
+                return Err(format!(
+                    "manifest contains both file `{ancestor}` and descendant `{path}`"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Is `path` eligible for state sync? It must normalize to a clean relative
@@ -126,5 +144,17 @@ mod tests {
         assert!(syncable_path(".").is_err());
         assert!(syncable_path("node_modules/pkg/index.js").is_err());
         assert!(syncable_path("src/target").is_err());
+    }
+
+    #[test]
+    fn manifest_shape_rejects_file_ancestor_conflicts() {
+        let mut manifest = SyncManifest::new();
+        manifest.insert("a".into(), entry(b"file", 0o644));
+        manifest.insert("a-b".into(), entry(b"unrelated", 0o644));
+        manifest.insert("a/b/c".into(), entry(b"child", 0o644));
+        assert!(validate_manifest_shape(&manifest).is_err());
+
+        manifest.remove("a");
+        validate_manifest_shape(&manifest).unwrap();
     }
 }

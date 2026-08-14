@@ -210,7 +210,7 @@ async fn scenario_network_egress(h: &Harness) -> (bool, String) {
 }
 
 async fn scenario_self_merge(h: &Harness) -> (bool, String) {
-    match h.kernel.merge_branch(&h.branch, &h.branch, &h.who.id) {
+    match h.kernel.merge_branch(&h.branch, &h.branch, &h.who.id).await {
         Err(e) => pass(format!("self-merge rejected: {e}")),
         Ok(_) => fail("kernel accepted merging a branch into itself"),
     }

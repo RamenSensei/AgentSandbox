@@ -1,12 +1,12 @@
 //! Config-driven multi-backend routing with honest state recording.
 //!
 //! The policy rule's `risk_weight` sets a step's isolation floor; the
-//! router picks the cheapest satisfying backend. A backend that does not
-//! share the kernel workspace runs the step as an **audit-only excursion**:
-//! full observation in the ledger, `AuditOnly` node with an empty file
-//! delta in the DAG — never a pretended local state transition. Anything
-//! the DAG must snapshot (file actions) stays pinned to workspace-sharing
-//! backends, and an unsatisfiable floor is a *recorded* denial.
+//! router picks the cheapest satisfying backend. A remote backend with state
+//! sync returns a validated delta and advances the DAG for real; one with
+//! neither sync nor a shared workspace is recorded as an **audit-only
+//! excursion**, never a pretended local transition. Anything the DAG must
+//! snapshot routes only to one of the first two kinds, and an unsatisfiable
+//! floor is a *recorded* denial.
 
 use ak_api::{Kernel, KernelConfig};
 use ak_core::action::ActionKind;
@@ -21,8 +21,9 @@ use ak_policy::{PathPolicy, PolicyDocument, PolicyRule, PrincipalSelector, RuleE
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A strong remote backend that does not share the kernel workspace.
 struct Strongbox;
@@ -79,6 +80,13 @@ impl SyncedBox {
             discarded: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    fn returning(delta: WorkspaceDelta) -> Self {
+        Self {
+            delta,
+            discarded: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 #[async_trait]
@@ -106,6 +114,249 @@ impl Backend for SyncedBox {
             paths_written: self.delta.upserts.iter().map(|f| f.path.clone()).collect(),
             replay_class: ReplayClass::FilesystemOnly,
             workspace_delta: Some(self.delta.clone()),
+        })
+    }
+
+    async fn discard(&self, _branch: &ak_core::ids::BranchId) -> KernelResult<()> {
+        self.discarded.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A syncing backend returning a deterministic sequence of deltas. Useful
+/// for exercising transitions whose shape depends on the prior state.
+struct SequencedBox {
+    deltas: Mutex<VecDeque<WorkspaceDelta>>,
+}
+
+impl SequencedBox {
+    fn new(deltas: impl IntoIterator<Item = WorkspaceDelta>) -> Self {
+        Self {
+            deltas: Mutex::new(deltas.into_iter().collect()),
+        }
+    }
+}
+
+#[async_trait]
+impl Backend for SequencedBox {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: "sequencedbox".into(),
+            isolation_strength: 90,
+            cold_start_ms: 1,
+            replay_class: ReplayClass::FilesystemOnly,
+            supports_fork: false,
+            supports_gui: false,
+            full_linux: true,
+            shares_workspace: false,
+            syncs_state: true,
+        }
+    }
+
+    async fn execute(&self, _req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        let delta = self
+            .deltas
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("test supplied one delta per execution");
+        Ok(ExecutionOutcome {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            usage: ResourceBudget::zero(),
+            paths_written: delta
+                .upserts
+                .iter()
+                .map(|f| f.path.clone())
+                .chain(delta.deletes.iter().cloned())
+                .collect(),
+            replay_class: ReplayClass::FilesystemOnly,
+            workspace_delta: Some(delta),
+        })
+    }
+}
+
+/// Detects whether the kernel ever overlaps two state transitions on one
+/// branch and records the base state each execution received.
+struct SerialProbeBox {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    sequence: AtomicUsize,
+    bases: Mutex<Vec<ak_core::ids::StateId>>,
+}
+
+impl SerialProbeBox {
+    fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            sequence: AtomicUsize::new(0),
+            bases: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Backend for SerialProbeBox {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: "serial-probe".into(),
+            isolation_strength: 90,
+            cold_start_ms: 1,
+            replay_class: ReplayClass::FilesystemOnly,
+            supports_fork: false,
+            supports_gui: false,
+            full_linux: true,
+            shares_workspace: false,
+            syncs_state: true,
+        }
+    }
+
+    async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        self.bases.lock().unwrap().push(req.base_state);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let n = self.sequence.fetch_add(1, Ordering::SeqCst);
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let path = format!("serial/{n}.txt");
+        Ok(ExecutionOutcome {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            usage: ResourceBudget::zero(),
+            paths_written: vec![path.clone()],
+            replay_class: ReplayClass::FilesystemOnly,
+            workspace_delta: Some(WorkspaceDelta {
+                upserts: vec![SyncedFile {
+                    path,
+                    contents: n.to_string().into_bytes(),
+                    mode: 0o644,
+                }],
+                deletes: Vec::new(),
+            }),
+        })
+    }
+}
+
+/// Records the kernel's native fork and remote cleanup lifecycle calls.
+struct LifecycleBox {
+    forks: Mutex<Vec<(ak_core::ids::StateId, ak_core::ids::BranchId)>>,
+    discarded: Mutex<Vec<ak_core::ids::BranchId>>,
+    executions: AtomicUsize,
+    discard_failures: AtomicUsize,
+}
+
+impl LifecycleBox {
+    fn new() -> Self {
+        Self {
+            forks: Mutex::new(Vec::new()),
+            discarded: Mutex::new(Vec::new()),
+            executions: AtomicUsize::new(0),
+            discard_failures: AtomicUsize::new(0),
+        }
+    }
+
+    fn fail_next_discard(&self) {
+        self.discard_failures.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Backend for LifecycleBox {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: "lifecycle-box".into(),
+            isolation_strength: 90,
+            cold_start_ms: 1,
+            replay_class: ReplayClass::FilesystemOnly,
+            supports_fork: true,
+            supports_gui: false,
+            full_linux: true,
+            shares_workspace: false,
+            syncs_state: true,
+        }
+    }
+
+    async fn execute(&self, _req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ExecutionOutcome {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            usage: ResourceBudget::zero(),
+            paths_written: Vec::new(),
+            replay_class: ReplayClass::FilesystemOnly,
+            workspace_delta: Some(WorkspaceDelta::default()),
+        })
+    }
+
+    async fn fork(
+        &self,
+        from: &ak_core::ids::StateId,
+        to_branch: &ak_core::ids::BranchId,
+    ) -> KernelResult<bool> {
+        self.forks
+            .lock()
+            .unwrap()
+            .push((from.clone(), to_branch.clone()));
+        Ok(true)
+    }
+
+    async fn discard(&self, branch: &ak_core::ids::BranchId) -> KernelResult<()> {
+        self.discarded.lock().unwrap().push(branch.clone());
+        if self
+            .discard_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(ak_core::KernelError::BackendUnavailable {
+                backend: "lifecycle-box".into(),
+                reason: "injected discard failure".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Deliberately violates profile/outcome agreement.
+struct ContractLiar {
+    advertises_sync: bool,
+    returns_delta: bool,
+    discarded: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Backend for ContractLiar {
+    fn profile(&self) -> BackendProfile {
+        BackendProfile {
+            name: if self.advertises_sync {
+                "missing-delta"
+            } else {
+                "undeclared-delta"
+            }
+            .into(),
+            isolation_strength: 90,
+            cold_start_ms: 1,
+            replay_class: ReplayClass::FilesystemOnly,
+            supports_fork: false,
+            supports_gui: false,
+            full_linux: true,
+            shares_workspace: false,
+            syncs_state: self.advertises_sync,
+        }
+    }
+
+    async fn execute(&self, _req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
+        Ok(ExecutionOutcome {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            usage: ResourceBudget::zero(),
+            paths_written: Vec::new(),
+            replay_class: ReplayClass::FilesystemOnly,
+            workspace_delta: self.returns_delta.then(WorkspaceDelta::default),
         })
     }
 
@@ -473,6 +724,57 @@ async fn hostile_sync_deltas_are_rejected_and_the_sandbox_discarded() {
             "outside writable prefixes",
             SyncedBox::writing("forbidden/x.txt", b"evil"),
         ),
+        (
+            "non-canonical path",
+            SyncedBox::writing("./allowed/x.txt", b"evil"),
+        ),
+        (
+            "duplicate upsert",
+            SyncedBox::returning(WorkspaceDelta {
+                upserts: vec![
+                    SyncedFile {
+                        path: "allowed/x.txt".into(),
+                        contents: b"first".to_vec(),
+                        mode: 0o644,
+                    },
+                    SyncedFile {
+                        path: "allowed/x.txt".into(),
+                        contents: b"second".to_vec(),
+                        mode: 0o644,
+                    },
+                ],
+                deletes: Vec::new(),
+            }),
+        ),
+        (
+            "write-delete conflict",
+            SyncedBox::returning(WorkspaceDelta {
+                upserts: vec![SyncedFile {
+                    path: "allowed/x.txt".into(),
+                    contents: b"value".to_vec(),
+                    mode: 0o644,
+                }],
+                deletes: vec!["allowed/x.txt".into()],
+            }),
+        ),
+        (
+            "file ancestor conflict",
+            SyncedBox::returning(WorkspaceDelta {
+                upserts: vec![
+                    SyncedFile {
+                        path: "allowed/a".into(),
+                        contents: b"file".to_vec(),
+                        mode: 0o644,
+                    },
+                    SyncedFile {
+                        path: "allowed/a/b".into(),
+                        contents: b"child".to_vec(),
+                        mode: 0o644,
+                    },
+                ],
+                deletes: Vec::new(),
+            }),
+        ),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let mut doc = risky_shell_policy();
@@ -516,4 +818,344 @@ async fn hostile_sync_deltas_are_rejected_and_the_sandbox_discarded() {
             "{case}: the poisoned remote sandbox must be discarded"
         );
     }
+}
+
+#[tokio::test]
+async fn synced_file_directory_transitions_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    kernel.register_backend(Arc::new(SequencedBox::new([
+        WorkspaceDelta {
+            upserts: vec![SyncedFile {
+                path: "node/child.txt".into(),
+                contents: b"child".to_vec(),
+                mode: 0o644,
+            }],
+            deletes: vec!["node".into()],
+        },
+        WorkspaceDelta {
+            upserts: vec![SyncedFile {
+                path: "node".into(),
+                contents: b"file-again".to_vec(),
+                mode: 0o644,
+            }],
+            deletes: vec!["node/child.txt".into()],
+        },
+    ])));
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "shape-transitions")
+        .unwrap();
+    kernel
+        .execute_step_auto(
+            &who.id,
+            &ep.branch,
+            ActionKind::WriteFile {
+                path: "node".into(),
+                contents_b64: ak_backend_local::b64::encode(b"file-first"),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    kernel
+        .execute_step_auto(&who.id, &ep.branch, shell("to-directory"), None, None)
+        .await
+        .unwrap();
+    let workspace = kernel.local_backend().workspace_for(&ep.branch).unwrap();
+    assert_eq!(
+        std::fs::read(workspace.join("node/child.txt")).unwrap(),
+        b"child"
+    );
+
+    kernel
+        .execute_step_auto(&who.id, &ep.branch, shell("to-file"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(workspace.join("node")).unwrap(),
+        b"file-again"
+    );
+    assert!(!workspace.join("node/child.txt").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn synced_mode_only_change_is_a_recorded_delta() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    kernel.register_backend(Arc::new(SyncedBox::returning(WorkspaceDelta {
+        upserts: vec![SyncedFile {
+            path: "run.sh".into(),
+            contents: b"#!/bin/sh\n".to_vec(),
+            mode: 0o755,
+        }],
+        deletes: Vec::new(),
+    })));
+    let who = agent(&kernel);
+    let ep = kernel.create_episode(&who.id, None, "chmod-sync").unwrap();
+    kernel
+        .execute_step_auto(
+            &who.id,
+            &ep.branch,
+            ActionKind::WriteFile {
+                path: "run.sh".into(),
+                contents_b64: ak_backend_local::b64::encode(b"#!/bin/sh\n"),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = kernel
+        .execute_step_auto(&who.id, &ep.branch, shell("chmod-only"), None, None)
+        .await
+        .unwrap();
+    let node = kernel.dag().get_state(&result.result.state).unwrap();
+    assert_eq!(
+        node.delta.files.len(),
+        1,
+        "chmod must be visible in the DAG"
+    );
+    assert!(matches!(
+        &node.delta.files[0],
+        ak_core::state::FileChange::Modified { old_blob, new_blob, .. } if old_blob == new_blob
+    ));
+    let workspace = kernel.local_backend().workspace_for(&ep.branch).unwrap();
+    assert_eq!(
+        std::fs::metadata(workspace.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[tokio::test]
+async fn profile_outcome_state_contract_is_enforced() {
+    for (advertises_sync, returns_delta) in [(true, false), (false, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+        let discarded = Arc::new(AtomicBool::new(false));
+        kernel.register_backend(Arc::new(ContractLiar {
+            advertises_sync,
+            returns_delta,
+            discarded: Arc::clone(&discarded),
+        }));
+        let who = agent(&kernel);
+        let ep = kernel.create_episode(&who.id, None, "contract").unwrap();
+        let before = kernel.dag().head(&ep.branch).unwrap().id;
+
+        let result = kernel
+            .execute_step_auto(&who.id, &ep.branch, shell("contract-lie"), None, None)
+            .await
+            .unwrap();
+        match result.result.observation {
+            Observation::Denied { denial } => {
+                assert_eq!(denial.code, ak_core::denial::DenialCode::BackendUnavailable);
+                assert!(denial.reason.contains("state-plane contract"));
+            }
+            other => panic!("contract violation must be a recorded denial: {other:?}"),
+        }
+        assert_eq!(kernel.dag().head(&ep.branch).unwrap().id, before);
+        assert!(discarded.load(Ordering::SeqCst));
+    }
+}
+
+#[tokio::test]
+async fn concurrent_steps_on_one_branch_serialize_their_base_states() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    let backend = Arc::new(SerialProbeBox::new());
+    kernel.register_backend(Arc::clone(&backend) as Arc<dyn Backend>);
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "serial-state")
+        .unwrap();
+    let root = ep.root.id.clone();
+
+    let (a, b) = tokio::join!(
+        kernel.execute_step_auto(&who.id, &ep.branch, shell("a"), None, None),
+        kernel.execute_step_auto(&who.id, &ep.branch, shell("b"), None, None),
+    );
+    assert!(matches!(
+        a.unwrap().result.observation,
+        Observation::Success { .. }
+    ));
+    assert!(matches!(
+        b.unwrap().result.observation,
+        Observation::Success { .. }
+    ));
+    assert_eq!(
+        backend.max_active.load(Ordering::SeqCst),
+        1,
+        "one branch must never execute two state transitions concurrently"
+    );
+    let bases = backend.bases.lock().unwrap();
+    assert_eq!(bases.len(), 2);
+    assert_eq!(bases[0], root);
+    assert_ne!(
+        bases[1], root,
+        "the second step must see the first step's head"
+    );
+
+    let workspace = kernel.local_backend().workspace_for(&ep.branch).unwrap();
+    assert_eq!(std::fs::read(workspace.join("serial/0.txt")).unwrap(), b"0");
+    assert_eq!(std::fs::read(workspace.join("serial/1.txt")).unwrap(), b"1");
+}
+
+#[tokio::test]
+async fn different_branches_still_execute_in_parallel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    let backend = Arc::new(SerialProbeBox::new());
+    kernel.register_backend(Arc::clone(&backend) as Arc<dyn Backend>);
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "parallel-state")
+        .unwrap();
+    let fork = kernel.fork_branch(&ep.branch).await.unwrap();
+
+    let (a, b) = tokio::join!(
+        kernel.execute_step_auto(&who.id, &ep.branch, shell("a"), None, None),
+        kernel.execute_step_auto(&who.id, &fork.id, shell("b"), None, None),
+    );
+    assert!(a.is_ok() && b.is_ok());
+    assert_eq!(
+        backend.max_active.load(Ordering::SeqCst),
+        2,
+        "branch serialization must not become a global execution lock"
+    );
+}
+
+#[tokio::test]
+async fn fork_and_merge_drive_the_remote_backend_lifecycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    let backend = Arc::new(LifecycleBox::new());
+    kernel.register_backend(Arc::clone(&backend) as Arc<dyn Backend>);
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "remote-lifecycle")
+        .unwrap();
+
+    let stepped = kernel
+        .execute_step_auto(&who.id, &ep.branch, shell("remote"), None, None)
+        .await
+        .unwrap();
+    let fork = kernel.fork_branch(&ep.branch).await.unwrap();
+    assert_eq!(
+        backend.forks.lock().unwrap().as_slice(),
+        &[(stepped.result.state.clone(), fork.id.clone())],
+        "native CoW must fork the exact committed head into the new branch"
+    );
+
+    kernel
+        .merge_branch(&ep.branch, &fork.id, &who.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.discarded.lock().unwrap().as_slice(),
+        &[fork.id],
+        "a merged source must release its remote sandbox"
+    );
+}
+
+#[tokio::test]
+async fn normal_discard_releases_remote_branch_resources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    let backend = SyncedBox::writing("out.txt", b"remote");
+    let discarded = Arc::clone(&backend.discarded);
+    kernel.register_backend(Arc::new(backend));
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "discard-remote")
+        .unwrap();
+    kernel
+        .execute_step_auto(&who.id, &ep.branch, shell("remote"), None, None)
+        .await
+        .unwrap();
+
+    kernel.discard_branch(&ep.branch).await.unwrap();
+    assert!(discarded.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn merged_branch_cleanup_can_retry_without_changing_lifecycle_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    let backend = Arc::new(LifecycleBox::new());
+    kernel.register_backend(Arc::clone(&backend) as Arc<dyn Backend>);
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "merge-cleanup-retry")
+        .unwrap();
+    let source = kernel.fork_branch(&ep.branch).await.unwrap();
+
+    backend.fail_next_discard();
+    kernel
+        .merge_branch(&ep.branch, &source.id, &who.id)
+        .await
+        .unwrap();
+    assert_eq!(backend.discarded.lock().unwrap().len(), 1);
+
+    kernel.discard_branch(&source.id).await.unwrap();
+    assert_eq!(backend.discarded.lock().unwrap().len(), 2);
+    assert_eq!(
+        kernel.dag().get_branch(&source.id).unwrap().status,
+        ak_state_dag::BranchStatus::Merged,
+        "cleanup retry must not rewrite durable branch history"
+    );
+}
+
+#[tokio::test]
+async fn terminal_branches_never_reenter_a_backend_or_fork() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_with_policy(&tmp, risky_shell_policy());
+    let backend = Arc::new(LifecycleBox::new());
+    kernel.register_backend(Arc::clone(&backend) as Arc<dyn Backend>);
+    let who = agent(&kernel);
+    let ep = kernel
+        .create_episode(&who.id, None, "terminal-branches")
+        .unwrap();
+
+    let merged = kernel.fork_branch(&ep.branch).await.unwrap();
+    kernel
+        .merge_branch(&ep.branch, &merged.id, &who.id)
+        .await
+        .unwrap();
+    let forks_before = backend.forks.lock().unwrap().len();
+    assert!(matches!(
+        kernel
+            .execute_step_auto(&who.id, &merged.id, shell("must-not-run"), None, None)
+            .await,
+        Err(ak_core::KernelError::BranchDiscarded { .. })
+    ));
+    assert!(matches!(
+        kernel.fork_branch(&merged.id).await,
+        Err(ak_core::KernelError::BranchDiscarded { .. })
+    ));
+    assert_eq!(backend.executions.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.forks.lock().unwrap().len(), forks_before);
+
+    kernel.discard_branch(&ep.branch).await.unwrap();
+    assert!(matches!(
+        kernel
+            .execute_step_auto(&who.id, &ep.branch, shell("must-not-run"), None, None)
+            .await,
+        Err(ak_core::KernelError::BranchDiscarded { .. })
+    ));
+    assert!(matches!(
+        kernel.fork_branch(&ep.branch).await,
+        Err(ak_core::KernelError::BranchDiscarded { .. })
+    ));
+    assert_eq!(backend.executions.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.forks.lock().unwrap().len(), forks_before);
 }

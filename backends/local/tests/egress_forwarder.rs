@@ -80,7 +80,8 @@ fn wrapped_command_exit_code_is_propagated() {
 
 /// The forwarder bridges arbitrary bytes, not just the probe line: a raw
 /// TCP client through the listener reaches the Unix side verbatim. Uses a
-/// fixed high port (the in-netns contract) — skipped if it is taken.
+/// dynamically selected host port (the production netns uses a fixed port,
+/// but its fresh namespace guarantees exclusivity).
 #[test]
 fn bridges_raw_bytes_between_tcp_and_unix() {
     let dir = tempfile::tempdir().unwrap();
@@ -105,7 +106,9 @@ fn bridges_raw_bytes_between_tcp_and_unix() {
         }
     });
 
-    let port = 18790; // fixed: mirrors the in-netns fixed-port contract
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
     let Ok(mut child) = Command::new(FWD)
         .args(["--listen", &format!("127.0.0.1:{port}")])
         .arg("--unix")

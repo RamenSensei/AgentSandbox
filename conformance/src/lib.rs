@@ -472,7 +472,11 @@ async fn lease_exhaustion(params: &Value) -> Result<(), String> {
 
 async fn lease_branch_binding(_params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
-    let other = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
+    let other = f
+        .kernel
+        .fork_branch(&f.branch)
+        .await
+        .map_err(|e| e.to_string())?;
     let lease = f.lease("proc.shell", &other.id)?;
     // Presenting a lease bound to `other` on the main branch must fail.
     let r = f
@@ -708,14 +712,23 @@ async fn merge_conflict_reporting(params: &Value) -> Result<(), String> {
     let f = Fixture::build(100, None, EffectClass::Compensatable).await?;
     let file = p_str(params, "file", "conflict.txt");
     f.shell(&f.branch, &format!("printf base > {file}")).await?;
-    let a = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
-    let b = f.kernel.fork_branch(&f.branch).map_err(|e| e.to_string())?;
+    let a = f
+        .kernel
+        .fork_branch(&f.branch)
+        .await
+        .map_err(|e| e.to_string())?;
+    let b = f
+        .kernel
+        .fork_branch(&f.branch)
+        .await
+        .map_err(|e| e.to_string())?;
     f.shell(&a.id, &format!("printf edit-a > {file}")).await?;
     f.shell(&b.id, &format!("printf edit-b > {file}")).await?;
     f.kernel
         .merge_branch(&f.branch, &a.id, &f.agent.id)
+        .await
         .map_err(|e| e.to_string())?;
-    match f.kernel.merge_branch(&f.branch, &b.id, &f.agent.id) {
+    match f.kernel.merge_branch(&f.branch, &b.id, &f.agent.id).await {
         Err(KernelError::MergeConflict { paths }) => {
             if paths != vec![file.to_string()] {
                 return Err(format!("conflict must name `{file}`, got {paths:?}"));

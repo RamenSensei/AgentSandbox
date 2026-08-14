@@ -118,8 +118,8 @@ async fn full_lifecycle_fork_compare_merge_discard() {
     assert!(matches!(r.observation, Observation::Success { .. }));
 
     // Fork two candidate branches and apply different edits.
-    let a = kernel.fork_branch(&ep.branch).unwrap();
-    let b = kernel.fork_branch(&ep.branch).unwrap();
+    let a = kernel.fork_branch(&ep.branch).await.unwrap();
+    let b = kernel.fork_branch(&ep.branch).await.unwrap();
     let ra = shell(&kernel, &who, &a.id, "printf fix-a > fix_a.txt").await;
     assert!(matches!(ra.observation, Observation::Success { .. }));
     let rb = shell(&kernel, &who, &b.id, "printf fix-b > fix_b.txt").await;
@@ -133,7 +133,10 @@ async fn full_lifecycle_fork_compare_merge_discard() {
     assert_eq!(cmp.changed_in_b[0].path(), "fix_b.txt");
 
     // Merge the winner (a) into main, discard the loser (b).
-    let merged = kernel.merge_branch(&ep.branch, &a.id, &who.id).unwrap();
+    let merged = kernel
+        .merge_branch(&ep.branch, &a.id, &who.id)
+        .await
+        .unwrap();
     assert!(merged.merge_parent.is_some());
     kernel.discard_branch(&b.id).await.unwrap();
     assert!(
@@ -206,7 +209,7 @@ async fn denied_step_returns_structured_denial() {
     assert_eq!(events.len(), 1);
 
     // Lease bound to a different branch → BranchMismatch.
-    let other = kernel.fork_branch(&ep.branch).unwrap();
+    let other = kernel.fork_branch(&ep.branch).await.unwrap();
     let lease = kernel
         .request_capability(
             &who.id,

@@ -617,7 +617,7 @@ async fn process_sessions_are_branch_scoped_and_die_with_the_branch() {
     let kernel = kernel_in(&tmp);
     let who = agent(&kernel);
     let ep = kernel.create_episode(&who.id, None, "scoping").unwrap();
-    let fork = kernel.fork_branch(&ep.branch).unwrap();
+    let fork = kernel.fork_branch(&ep.branch).await.unwrap();
 
     let r = auto(
         &kernel,
@@ -760,7 +760,7 @@ async fn denials_carry_concrete_recovery_scopes() {
     }
 
     // Branch-mismatched lease → recovery scope present too.
-    let other_branch = kernel.fork_branch(&ep.branch).unwrap();
+    let other_branch = kernel.fork_branch(&ep.branch).await.unwrap();
     let lease = kernel
         .request_capability(
             &who.id,

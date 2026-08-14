@@ -341,7 +341,7 @@ async fn fork_branch(
 ) -> ApiResult<impl IntoResponse> {
     let id = BranchId::parse(&id)?;
     auth.require_owner(&k.branch_owner(&id)?)?;
-    let branch = k.fork_branch(&id)?;
+    let branch = k.fork_branch(&id).await?;
     Ok(Json(
         serde_json::to_value(&branch).map_err(KernelError::from)?,
     ))
@@ -382,7 +382,7 @@ async fn merge_branch(
     let id = BranchId::parse(&id)?;
     auth.require_owner(&k.branch_owner(&id)?)?;
     let actor = auth.act_as(&req.actor)?;
-    let node = k.merge_branch(&id, &req.source, &actor)?;
+    let node = k.merge_branch(&id, &req.source, &actor).await?;
     Ok(Json(
         serde_json::to_value(&node).map_err(KernelError::from)?,
     ))

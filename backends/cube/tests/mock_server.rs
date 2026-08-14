@@ -94,7 +94,7 @@ async fn exec_happy_path() {
 }
 
 #[tokio::test]
-async fn fork_snapshots_and_clones() {
+async fn fork_without_a_state_provider_falls_back() {
     let endpoint = spawn_mock().await;
     let backend = Arc::new(CubeBackend::new(CubeConfig::new(endpoint)).unwrap());
     // Unknown state: honest "no native fork" answer.
@@ -102,22 +102,17 @@ async fn fork_snapshots_and_clones() {
         .fork(&StateId("st-unknown".into()), &BranchId("br-x".into()))
         .await
         .unwrap());
-    // Execute to register the state, then fork it.
+    // Executing a mutable sandbox is not enough to associate it with a
+    // kernel state ID. Without a provider the adapter must not guess.
     backend
         .execute(shell_req("br-1", "st-42", "true"))
         .await
         .unwrap();
-    let forked = backend
+    assert!(!backend
         .fork(&StateId("st-42".into()), &BranchId("br-2".into()))
         .await
-        .unwrap();
-    assert!(forked);
-    // The forked branch executes in the cloned sandbox.
-    let out = backend
-        .execute(shell_req("br-2", "st-43", "pwd"))
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("clone-from-snap-of-"));
+        .unwrap());
+    assert!(!backend.profile().supports_fork);
 }
 
 #[tokio::test]
@@ -235,6 +230,13 @@ struct SyncMockState {
     fs: Mutex<HashMap<String, Tree>>,
     writes: AtomicUsize,
     fail_next_write: AtomicBool,
+    fail_next_exec: AtomicBool,
+    corrupt_next_read: AtomicBool,
+    mutate_after_next_read: AtomicBool,
+    mutate_next_clone: AtomicBool,
+    block_next_exec: AtomicBool,
+    exec_started: tokio::sync::Notify,
+    release_exec: tokio::sync::Notify,
 }
 
 /// Mock implementing the full files API plus an exec that mutates the FS:
@@ -266,17 +268,32 @@ async fn spawn_sync_mock() -> (String, Arc<SyncMockState>) {
                     let state = Arc::clone(&state);
                     async move {
                         let cmd = body["command"].as_str().unwrap_or_default().to_string();
+                        if cmd == "block" && state.block_next_exec.swap(false, Ordering::SeqCst) {
+                            state.exec_started.notify_one();
+                            state.release_exec.notified().await;
+                        }
                         let mut fs = state.fs.lock().unwrap();
                         let tree = fs.entry(id).or_default();
+                        if state.fail_next_exec.swap(false, Ordering::SeqCst) {
+                            // Model the ambiguous failure: the action changed
+                            // state, then the control response was lost.
+                            tree.insert("ambiguous.txt".into(), (b"maybe".to_vec(), 0o644));
+                            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                        }
                         if let Some(rest) = cmd.strip_prefix("put ") {
                             let (path, contents) = rest.split_once(' ').unwrap();
                             tree.insert(path.into(), (contents.as_bytes().to_vec(), 0o644));
                         } else if let Some(path) = cmd.strip_prefix("del ") {
                             tree.remove(path);
+                        } else if let Some(rest) = cmd.strip_prefix("chmod ") {
+                            let (path, mode) = rest.split_once(' ').unwrap();
+                            if let Some((_, current_mode)) = tree.get_mut(path) {
+                                *current_mode = u32::from_str_radix(mode, 8).unwrap();
+                            }
                         }
-                        Json(serde_json::json!({
+                        Ok(Json(serde_json::json!({
                             "exit_code": 0, "stdout": "", "stderr": "", "duration_ms": 7
-                        }))
+                        })))
                     }
                 }
             }),
@@ -314,12 +331,21 @@ async fn spawn_sync_mock() -> (String, Arc<SyncMockState>) {
                 move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| {
                     let state = Arc::clone(&state);
                     async move {
-                        let fs = state.fs.lock().unwrap();
-                        let (bytes, _) = fs
-                            .get(&id)
-                            .and_then(|t| t.get(body["path"].as_str().unwrap()))
+                        let mut fs = state.fs.lock().unwrap();
+                        let tree = fs.entry(id).or_default();
+                        let (mut bytes, _) = tree
+                            .get(body["path"].as_str().unwrap())
                             .cloned()
                             .unwrap_or_default();
+                        if state.corrupt_next_read.swap(false, Ordering::SeqCst) {
+                            bytes = b"different-from-listing".to_vec();
+                        }
+                        if state.mutate_after_next_read.swap(false, Ordering::SeqCst) {
+                            // The bytes just returned still match the first
+                            // listing; only a full post-pull re-list sees this
+                            // later tree mutation.
+                            tree.insert("late-drift.txt".into(), (b"late".to_vec(), 0o644));
+                        }
                         Json(serde_json::json!({"contents_b64": ak_core::b64::encode(&bytes)}))
                     }
                 }
@@ -390,7 +416,10 @@ async fn spawn_sync_mock() -> (String, Arc<SyncMockState>) {
                         let source = id.trim_start_matches("snap-of-").to_string();
                         let clone_id = format!("clone-from-{id}");
                         let mut fs = state.fs.lock().unwrap();
-                        let tree = fs.get(&source).cloned().unwrap_or_default();
+                        let mut tree = fs.get(&source).cloned().unwrap_or_default();
+                        if state.mutate_next_clone.swap(false, Ordering::SeqCst) {
+                            tree.insert("clone-drift.txt".into(), (b"late".to_vec(), 0o644));
+                        }
                         fs.insert(clone_id.clone(), tree);
                         Json(serde_json::json!({"sandbox_id": clone_id}))
                     }
@@ -517,6 +546,94 @@ async fn sync_is_content_addressed_across_steps() {
 }
 
 #[tokio::test]
+async fn live_remote_drift_is_repaired_before_execution_and_never_cow_cloned() {
+    let (endpoint, mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = sync_backend(endpoint, Arc::clone(&provider));
+
+    backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    let sandbox = mock.fs.lock().unwrap().keys().next().unwrap().clone();
+    mock.fs
+        .lock()
+        .unwrap()
+        .get_mut(&sandbox)
+        .unwrap()
+        .insert("a.txt".into(), (b"background-drift".to_vec(), 0o600));
+
+    assert!(
+        !backend
+            .fork(&StateId("st-0".into()), &BranchId("br-drift".into()))
+            .await
+            .unwrap(),
+        "a stale cache entry must not make a drifted sandbox a CoW source"
+    );
+    let writes_before = mock.writes.load(Ordering::SeqCst);
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    assert_eq!(mock.writes.load(Ordering::SeqCst), writes_before + 1);
+    assert_eq!(
+        mock.fs.lock().unwrap()[&sandbox]["a.txt"],
+        (b"alpha".to_vec(), 0o644)
+    );
+}
+
+#[tokio::test]
+async fn list_read_hash_race_poisons_the_sandbox() {
+    let (endpoint, mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[]);
+    let backend = sync_backend(endpoint, Arc::clone(&provider));
+
+    mock.corrupt_next_read.store(true, Ordering::SeqCst);
+    let error = backend
+        .execute(shell_req("br-1", "st-0", "put out.txt value"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("changed between list and read"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn post_read_tree_drift_poisons_the_sandbox() {
+    let (endpoint, mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[]);
+    let backend = sync_backend(endpoint, Arc::clone(&provider));
+
+    mock.mutate_after_next_read.store(true, Ordering::SeqCst);
+    let error = backend
+        .execute(shell_req("br-1", "st-0", "put out.txt value"))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changed while its state delta was being pulled"),
+        "unexpected error: {error}"
+    );
+    let poisoned_count = mock.fs.lock().unwrap().len();
+
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    assert!(
+        mock.fs.lock().unwrap().len() > poisoned_count,
+        "the drifted sandbox must never be reused"
+    );
+}
+
+#[tokio::test]
 async fn push_failure_poisons_the_sandbox_and_the_next_step_recreates_it() {
     let (endpoint, mock) = spawn_sync_mock().await;
     let provider = Arc::new(MapProvider::default());
@@ -549,42 +666,151 @@ async fn push_failure_poisons_the_sandbox_and_the_next_step_recreates_it() {
 }
 
 #[tokio::test]
-async fn fork_inherits_the_sync_view_and_reverse_diffs_to_the_base() {
+async fn ambiguous_exec_failure_poisons_the_sandbox() {
     let (endpoint, mock) = spawn_sync_mock().await;
     let provider = Arc::new(MapProvider::default());
     provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
     let backend = sync_backend(endpoint, Arc::clone(&provider));
 
-    // Step on br-1 from st-0 writes extra.txt; the sandbox tree is now past
-    // st-0, and st-0 maps to this sandbox for forking.
+    mock.fail_next_exec.store(true, Ordering::SeqCst);
+    assert!(backend
+        .execute(shell_req("br-1", "st-0", "put ignored.txt x"))
+        .await
+        .is_err());
+    let poisoned_count = mock.fs.lock().unwrap().len();
+
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    assert!(mock.fs.lock().unwrap().len() > poisoned_count);
+}
+
+#[tokio::test]
+async fn mode_only_change_is_pulled() {
+    let (endpoint, _mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("run.sh", b"#!/bin/sh\n", 0o644)]);
+    let backend = sync_backend(endpoint, Arc::clone(&provider));
+
+    let out = backend
+        .execute(shell_req("br-1", "st-0", "chmod run.sh 755"))
+        .await
+        .unwrap();
+    let delta = out.workspace_delta.unwrap();
+    assert_eq!(delta.upserts.len(), 1);
+    assert_eq!(delta.upserts[0].path, "run.sh");
+    assert_eq!(delta.upserts[0].contents, b"#!/bin/sh\n");
+    assert_eq!(delta.upserts[0].mode, 0o755);
+}
+
+#[tokio::test]
+async fn fork_uses_only_an_exact_current_manifest() {
+    let (endpoint, mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = sync_backend(endpoint, Arc::clone(&provider));
+
+    // Step on br-1 from st-0 writes extra.txt; register the state the kernel
+    // would append from that returned delta.
     backend
         .execute(shell_req("br-1", "st-0", "put extra.txt data"))
         .await
         .unwrap();
+    provider.add_state(
+        "st-1",
+        &[("a.txt", b"alpha", 0o644), ("extra.txt", b"data", 0o644)],
+    );
     let writes_before = mock.writes.load(Ordering::SeqCst);
 
     assert!(backend
-        .fork(&StateId("st-0".into()), &BranchId("br-2".into()))
+        .fork(&StateId("st-1".into()), &BranchId("br-2".into()))
         .await
         .unwrap());
 
-    // The forked branch executes from st-0: the clone inherited the source
-    // tree (with extra.txt), so sync-in must *reverse-diff* — delete the
-    // file that st-0 does not contain, push nothing.
+    // The clone is already exactly st-1, so its first step pushes nothing.
     let out = backend
-        .execute(shell_req("br-2", "st-0", "noop"))
+        .execute(shell_req("br-2", "st-1", "noop"))
         .await
         .unwrap();
     assert_eq!(
         mock.writes.load(Ordering::SeqCst),
         writes_before,
-        "a CoW clone of a shared tree must not re-push shared files"
+        "an exact CoW clone must not re-push shared files"
     );
     assert!(out.workspace_delta.unwrap().is_empty());
     let fs = mock.fs.lock().unwrap();
     let clone_tree = fs
         .values()
-        .find(|t| t.contains_key("a.txt") && !t.contains_key("extra.txt"))
-        .expect("the clone must have been reverse-diffed back to st-0");
-    assert_eq!(clone_tree.len(), 1);
+        .find(|t| t.contains_key("a.txt") && t.contains_key("extra.txt"))
+        .expect("the clone must retain the exact st-1 tree");
+    assert_eq!(clone_tree.len(), 2);
+}
+
+#[tokio::test]
+async fn fork_reports_false_when_the_clone_itself_is_not_exact() {
+    let (endpoint, mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = sync_backend(endpoint, Arc::clone(&provider));
+    backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+
+    mock.mutate_next_clone.store(true, Ordering::SeqCst);
+    assert!(
+        !backend
+            .fork(&StateId("st-0".into()), &BranchId("br-raced".into()))
+            .await
+            .unwrap(),
+        "native CoW success requires the clone itself to be exact"
+    );
+
+    let out = backend
+        .execute(shell_req("br-raced", "st-0", "noop"))
+        .await
+        .unwrap();
+    assert!(out.workspace_delta.unwrap().is_empty());
+    let fs = mock.fs.lock().unwrap();
+    let clone = fs
+        .iter()
+        .find(|(id, _)| id.starts_with("clone-from-"))
+        .map(|(_, tree)| tree)
+        .expect("clone exists");
+    assert!(!clone.contains_key("clone-drift.txt"));
+}
+
+#[tokio::test]
+async fn fork_never_clones_a_matching_but_busy_sandbox() {
+    let (endpoint, mock) = spawn_sync_mock().await;
+    let provider = Arc::new(MapProvider::default());
+    provider.add_state("st-0", &[("a.txt", b"alpha", 0o644)]);
+    let backend = Arc::new(sync_backend(endpoint, Arc::clone(&provider)));
+    backend
+        .execute(shell_req("br-1", "st-0", "noop"))
+        .await
+        .unwrap();
+
+    mock.block_next_exec.store(true, Ordering::SeqCst);
+    let running = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { backend.execute(shell_req("br-1", "st-0", "block")).await })
+    };
+    mock.exec_started.notified().await;
+    assert!(
+        !backend
+            .fork(&StateId("st-0".into()), &BranchId("br-busy".into()))
+            .await
+            .unwrap(),
+        "the sync cache is stale while its mutable sandbox is executing"
+    );
+
+    mock.release_exec.notify_one();
+    running.await.unwrap().unwrap();
+    assert!(backend
+        .fork(&StateId("st-0".into()), &BranchId("br-idle".into()))
+        .await
+        .unwrap());
 }

@@ -75,6 +75,9 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
             // must work under bwrap exactly as under Seatbelt.
         }
         SandboxTech::Bwrap => {
+            if std::env::var("AK_REQUIRE_NETNS_EGRESS").as_deref() == Ok("1") {
+                panic!("AK_REQUIRE_NETNS_EGRESS=1 but the bwrap forwarder probe failed");
+            }
             // No verified forwarder route: the backend must keep egress
             // OFF rather than pretend. The step runs, curl fails to
             // connect, and no proxy env leaks in.
@@ -83,20 +86,23 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
             let outcome = backend
                 .execute(shell_request(
                     &branch,
-                    "echo proxy=${HTTP_PROXY:-unset}; curl -sS --max-time 3 http://127.0.0.1:1/ && echo LEAK",
+                    "echo http=${HTTP_PROXY:-unset} all=${ALL_PROXY:-unset}; curl -sS --max-time 3 http://127.0.0.1:1/ && echo LEAK",
                     vec!["127.0.0.1".into()],
                 ))
                 .await
                 .unwrap();
             let stdout = String::from_utf8_lossy(&outcome.stdout);
             assert!(
-                stdout.contains("proxy=unset"),
+                stdout.contains("http=unset all=unset"),
                 "bwrap must not get proxy env: {stdout}"
             );
             assert!(!stdout.contains("LEAK"));
             return;
         }
         SandboxTech::None => {
+            if std::env::var("AK_REQUIRE_NETNS_EGRESS").as_deref() == Ok("1") {
+                panic!("AK_REQUIRE_NETNS_EGRESS=1 but no OS sandbox verified");
+            }
             eprintln!("skipping: no verified OS sandbox on this host");
             return;
         }
@@ -134,7 +140,34 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
         "egress bytes must be metered at the proxy"
     );
 
-    // 2. Bypassing the proxy from inside the sandbox: denied by Seatbelt.
+    // 2. The same route also speaks authenticated SOCKS5. This is the
+    //    non-HTTP path used by SSH/database clients via ALL_PROXY; DNS stays
+    //    at the policy-enforcing proxy (`socks5h`).
+    let outcome = backend
+        .execute(shell_request(
+            &branch,
+            &format!(
+                "curl -sS --max-time 5 --proxy \"$ALL_PROXY\" http://127.0.0.1:{}/hello",
+                target.port()
+            ),
+            vec!["127.0.0.1".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.exit_code,
+        0,
+        "SOCKS5 stderr: {}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&outcome.stdout).contains("hello-through-egress-proxy"),
+        "SOCKS5 route failed: {}",
+        String::from_utf8_lossy(&outcome.stdout)
+    );
+    assert!(outcome.usage.network_bytes > 0);
+
+    // 3. Bypassing the proxy from inside the sandbox: denied by Seatbelt.
     let outcome = backend
         .execute(shell_request(
             &branch,
@@ -151,7 +184,7 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
         "direct network must stay denied; only the proxy port is open"
     );
 
-    // 3. A domain outside the step's egress grant: refused at the proxy
+    // 4. A domain outside the step's egress grant: refused at the proxy
     //    (403 → `curl -f` fails, and the content never crosses).
     let outcome = backend
         .execute(shell_request(
@@ -170,17 +203,18 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
         "proxy must refuse hosts outside the granted domains, got: {stdout}"
     );
 
-    // 4. No egress domains at all: no proxy env, fully offline.
+    // 5. No egress domains at all: no proxy env of either protocol, fully
+    //    offline.
     let outcome = backend
         .execute(shell_request(
             &branch,
-            "echo proxy=${HTTP_PROXY:-unset}",
+            "echo http=${HTTP_PROXY:-unset} all=${ALL_PROXY:-unset}",
             Vec::new(),
         ))
         .await
         .unwrap();
     assert!(
-        String::from_utf8_lossy(&outcome.stdout).contains("proxy=unset"),
+        String::from_utf8_lossy(&outcome.stdout).contains("http=unset all=unset"),
         "no egress grant must mean no proxy environment"
     );
 }
@@ -189,9 +223,16 @@ async fn sandboxed_curl_reaches_allowlisted_target_only_through_the_proxy() {
 async fn process_sessions_keep_their_egress_grant_until_they_die() {
     let tmp = tempfile::tempdir().unwrap();
     let backend = backend(&tmp);
-    if backend.sandbox_tech() != SandboxTech::SandboxExec {
-        eprintln!("skipping: needs Seatbelt loopback confinement");
-        return;
+    match backend.sandbox_tech() {
+        SandboxTech::SandboxExec => {}
+        SandboxTech::Bwrap if backend.netns_egress_verified() => {}
+        SandboxTech::Bwrap | SandboxTech::None => {
+            if std::env::var("AK_REQUIRE_NETNS_EGRESS").as_deref() == Ok("1") {
+                panic!("AK_REQUIRE_NETNS_EGRESS=1 but confined proxy reachability failed");
+            }
+            eprintln!("skipping: no verified confined proxy route");
+            return;
+        }
     }
     let target = doc_server().await;
     let branch = BranchId::generate();
@@ -240,4 +281,13 @@ async fn process_sessions_keep_their_egress_grant_until_they_die() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(seen, "the process session's egress grant must stay live");
+    let status = backend
+        .processes()
+        .get(&branch, &proc)
+        .unwrap()
+        .status_json();
+    assert!(
+        status["network_bytes"].as_u64().unwrap_or(0) > 0,
+        "session status must expose its live proxy accounting: {status}"
+    );
 }

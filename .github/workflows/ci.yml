@@ -32,6 +32,36 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - name: Test
         run: cargo test --workspace
+      - name: Prepare delegated cgroup v2 parent
+        run: |
+          set -euo pipefail
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          for controller in cpu memory pids; do
+            grep -qw "$controller" /sys/fs/cgroup/cgroup.controllers
+            if ! grep -qw "$controller" /sys/fs/cgroup/cgroup.subtree_control; then
+              sudo sh -c "echo +$controller > /sys/fs/cgroup/cgroup.subtree_control"
+            fi
+          done
+          sudo mkdir /sys/fs/cgroup/agent-kernel-ci
+          sudo chown "$(id -u):$(id -g)" \
+            /sys/fs/cgroup/agent-kernel-ci \
+            /sys/fs/cgroup/agent-kernel-ci/cgroup.procs \
+            /sys/fs/cgroup/agent-kernel-ci/cgroup.threads \
+            /sys/fs/cgroup/agent-kernel-ci/cgroup.subtree_control
+      - name: Linux cgroup and netns enforcement E2E
+        env:
+          AK_CGROUP_PARENT: /sys/fs/cgroup/agent-kernel-ci
+          AK_REQUIRE_CGROUP: "1"
+          AK_REQUIRE_NETNS_EGRESS: "1"
+        run: |
+          cargo test -p ak-backend-local --test cgroup_enforce --test egress_sandbox -- --nocapture
+          cargo test -p ak-backend-local cgroup::tests::lifecycle_on_delegated_hosts -- --nocapture
+      - name: Remove delegated cgroup v2 parent
+        if: always()
+        run: |
+          if test -d /sys/fs/cgroup/agent-kernel-ci; then
+            sudo rmdir /sys/fs/cgroup/agent-kernel-ci
+          fi
 
   audit:
     runs-on: ubuntu-latest

@@ -34,31 +34,35 @@
 //!
 //! - **push** — `mkdir -p … && printf %s <b64> | base64 -d > path && chmod`;
 //! - **list** — `find` (pruning the cache/scratch tier) piped through
-//!   `sha256sum`, then `stat -c '%a %n'` over the changed set;
+//!   `sha256sum`, then `stat -c '%a %n'` over the listed files;
 //! - **pull** — `base64 -- path` per changed file.
 //!
 //! This assumes a GNU userland in the child image (`find`, `xargs`,
 //! `sha256sum`, `stat`, `base64`, `sh`) — the norm for `full_linux`
 //! sandboxes. Two honest limitations, both failing loudly rather than
 //! silently: filenames containing newlines or backslashes are rejected
-//! (`sha256sum` escapes them; the step fails), and a mode-only change with
-//! identical content does not sync back (the content hash is the change
-//! detector). Sync commands run under the **adapter's** authority with the
+//! (`sha256sum` escapes them; the step fails). Content and mode are compared
+//! independently, so chmod-only changes sync back as real state changes.
+//! Sync commands run under the **adapter's** authority with the
 //! child's whole workspace writable — they materialize committed kernel
 //! state, not agent-chosen writes; the agent's own command still executes
 //! under the step's confinement, and the kernel re-validates every pulled
 //! path against the step's writable prefixes before touching the local
-//! mirror. Any sync failure poisons the child (deleted best-effort; the
-//! next step re-forks and re-materializes from the branch head).
+//! mirror. Live manifests are re-read before sync-in and CoW, the forked
+//! child itself is verified before native success is reported, and a
+//! list/read hash mismatch or complete-tree drift during pull fails instead
+//! of committing a raced tree. Any sync failure poisons the child (deleted
+//! best-effort; the next step re-forks and re-materializes from the branch
+//! head).
 
 use ak_core::action::ActionKind;
 use ak_core::budget::ResourceBudget;
 use ak_core::error::{KernelError, KernelResult};
-use ak_core::hash::hash_bytes;
+use ak_core::hash::{hash_bytes, ContentHash};
 use ak_core::ids::{BranchId, StateId};
 use ak_core::replay::ReplayClass;
 use ak_core::state::DEFAULT_SNAPSHOT_IGNORES;
-use ak_core::sync::{push_plan, syncable_path, SyncEntry, SyncManifest};
+use ak_core::sync::{push_plan, syncable_path, validate_manifest_shape, SyncEntry, SyncManifest};
 use ak_core::traits::{
     Backend, BackendProfile, ExecutionOutcome, ExecutionRequest, StateProvider, SyncedFile,
     WorkspaceDelta,
@@ -382,11 +386,14 @@ pub struct ForkdBackend {
     client: ForkdClient,
     parent: Mutex<Option<String>>,
     children: Mutex<HashMap<BranchId, String>>,
-    state_children: Mutex<HashMap<StateId, String>>,
     /// Resolves kernel states to manifests/blobs for state sync.
     state_provider: Option<Arc<dyn StateProvider>>,
-    /// What each child's workspace currently holds (path → blob, mode).
+    /// Last verified manifest per child. This is a transfer/CoW candidate
+    /// cache only; the live child is re-listed before sync-in and cloning.
     synced: Mutex<HashMap<String, SyncManifest>>,
+    /// Serializes mutation of each remote child and lets CoW fork reserve
+    /// only a quiescent exact-manifest source.
+    child_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl ForkdBackend {
@@ -395,9 +402,9 @@ impl ForkdBackend {
             client: ForkdClient::new(config)?,
             parent: Mutex::new(None),
             children: Mutex::new(HashMap::new()),
-            state_children: Mutex::new(HashMap::new()),
             state_provider: None,
             synced: Mutex::new(HashMap::new()),
+            child_gates: Mutex::new(HashMap::new()),
         })
     }
 
@@ -408,13 +415,78 @@ impl ForkdBackend {
         self
     }
 
+    async fn child_gate(&self, child: &str) -> Arc<Mutex<()>> {
+        Arc::clone(
+            self.child_gates
+                .lock()
+                .await
+                .entry(child.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    async fn quiescent_source(
+        &self,
+        target: &SyncManifest,
+        budget: &ResourceBudget,
+    ) -> KernelResult<Option<(String, tokio::sync::OwnedMutexGuard<()>)>> {
+        let candidates: Vec<String> = self
+            .synced
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, current)| *current == target)
+            .map(|(child, _)| child.clone())
+            .collect();
+        for child in candidates {
+            let gate = self.child_gate(&child).await;
+            if let Ok(guard) = gate.try_lock_owned() {
+                // A retained process can mutate the child after the prior
+                // step. Treat the cache only as a candidate index and prove
+                // the live tree again before CoW cloning it.
+                let current = self.remote_manifest(&child, budget).await?;
+                self.synced
+                    .lock()
+                    .await
+                    .insert(child.clone(), current.clone());
+                if &current == target {
+                    return Ok(Some((child, guard)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Get-or-create is atomic: the children map lock is held across the
     /// remote fork so concurrent first uses of a branch cannot race two
     /// children (and the parent lock is held across parent creation).
-    async fn child_for(&self, branch: &BranchId) -> KernelResult<String> {
+    async fn child_for(
+        &self,
+        branch: &BranchId,
+        target: Option<&SyncManifest>,
+        budget: &ResourceBudget,
+    ) -> KernelResult<(String, tokio::sync::OwnedMutexGuard<()>)> {
         let mut children = self.children.lock().await;
         if let Some(id) = children.get(branch) {
-            return Ok(id.clone());
+            let id = id.clone();
+            drop(children);
+            let guard = self.child_gate(&id).await.lock_owned().await;
+            return Ok((id, guard));
+        }
+        // Lazy CoW for a newly-forked kernel branch: clone a live child only
+        // when its complete current manifest exactly matches the requested
+        // base. This avoids the old, unsound state-id -> mutable-child map.
+        if let Some(target) = target {
+            if let Some((source, _source_guard)) = self.quiescent_source(target, budget).await? {
+                let child = self.client.fork_child(&source, branch).await?;
+                self.synced
+                    .lock()
+                    .await
+                    .insert(child.clone(), target.clone());
+                children.insert(branch.clone(), child.clone());
+                let guard = self.child_gate(&child).await.lock_owned().await;
+                return Ok((child, guard));
+            }
         }
         let parent = {
             let mut guard = self.parent.lock().await;
@@ -429,7 +501,8 @@ impl ForkdBackend {
         };
         let child = self.client.fork_parent(&parent, branch).await?;
         children.insert(branch.clone(), child.clone());
-        Ok(child)
+        let guard = self.child_gate(&child).await.lock_owned().await;
+        Ok((child, guard))
     }
 
     /// Forget a branch's child after a failed sync and delete it
@@ -437,6 +510,7 @@ impl ForkdBackend {
     async fn poison(&self, branch: &BranchId, child: &str) {
         self.children.lock().await.remove(branch);
         self.synced.lock().await.remove(child);
+        self.child_gates.lock().await.remove(child);
         if let Err(e) = self.client.delete_child(child).await {
             tracing::warn!(child, error = %e, "failed to delete poisoned child");
         }
@@ -485,34 +559,42 @@ impl ForkdBackend {
         &self,
         provider: &Arc<dyn StateProvider>,
         child: &str,
-        base_state: &StateId,
+        target: &SyncManifest,
         budget: &ResourceBudget,
     ) -> KernelResult<()> {
-        let target = provider.manifest(base_state)?;
-        let current = self
-            .synced
-            .lock()
-            .await
-            .get(child)
-            .cloned()
-            .unwrap_or_default();
-        let plan = push_plan(&current, &target);
+        let current = self.remote_manifest(child, budget).await?;
+        let plan = push_plan(&current, target);
+        // Delete first, then write, so file/directory transitions work in
+        // both directions. Each upsert also removes its exact destination:
+        // this clears an old empty directory without touching siblings.
+        for chunk in plan.deletes.chunks(64) {
+            let args: Vec<String> = chunk.iter().map(|p| shq(p)).collect();
+            let cmd = format!("rm -rf -- {}", args.join(" "));
+            self.sync_exec(child, budget, &cmd).await?;
+        }
         for (path, entry) in &plan.upserts {
             let bytes = provider.blob(&entry.blob)?;
             let cmd = format!(
-                "mkdir -p \"$(dirname {p})\" && printf %s {b} | base64 -d > {p} && chmod {m:o} {p}",
+                "rm -rf -- {p} && mkdir -p \"$(dirname {p})\" && \
+                 printf %s {b} | base64 -d > {p} && chmod {m:o} {p}",
                 p = shq(path),
                 b = shq(&ak_core::b64::encode(&bytes)),
                 m = entry.mode & 0o777,
             );
             self.sync_exec(child, budget, &cmd).await?;
         }
-        for chunk in plan.deletes.chunks(64) {
-            let args: Vec<String> = chunk.iter().map(|p| shq(p)).collect();
-            let cmd = format!("rm -f -- {}", args.join(" "));
-            self.sync_exec(child, budget, &cmd).await?;
+        if !plan.is_empty() {
+            let verified = self.remote_manifest(child, budget).await?;
+            if &verified != target {
+                return Err(unavailable(
+                    "child did not materialize the requested base manifest exactly",
+                ));
+            }
         }
-        self.synced.lock().await.insert(child.to_string(), target);
+        self.synced
+            .lock()
+            .await
+            .insert(child.to_string(), target.clone());
         Ok(())
     }
 
@@ -529,21 +611,19 @@ impl ForkdBackend {
         )
     }
 
-    /// List the child's tree after execution and pull only changed files,
-    /// returning the delta against what was pushed.
-    async fn sync_out(&self, child: &str, budget: &ResourceBudget) -> KernelResult<WorkspaceDelta> {
+    /// Read and validate the child's current workspace manifest. The shell
+    /// listing is the data-plane source of truth; `synced` is only a cache
+    /// used to find likely CoW sources and changed files.
+    async fn remote_manifest(
+        &self,
+        child: &str,
+        budget: &ResourceBudget,
+    ) -> KernelResult<SyncManifest> {
         let listing = self.sync_exec(child, budget, &Self::list_command()).await?;
-        let known = self
-            .synced
-            .lock()
-            .await
-            .get(child)
-            .cloned()
-            .unwrap_or_default();
+        let mut hashes: BTreeMap<String, String> = BTreeMap::new();
 
         // Parse `sha256sum` lines: `<64 hex>  <path>`. A leading backslash
         // marks an escaped (newline/backslash) filename — refused loudly.
-        let mut remote: Vec<(String, String)> = Vec::new(); // (path, hex)
         for line in listing.lines() {
             if line.is_empty() {
                 continue;
@@ -566,7 +646,7 @@ impl ForkdBackend {
             };
             let path = path.strip_prefix("./").unwrap_or(path);
             let path = match syncable_path(path) {
-                Ok(p) => p,
+                Ok(path) => path,
                 // Defense in depth: the prune list already excludes these.
                 Err(reason) if reason.contains("cache/scratch") => continue,
                 Err(reason) => {
@@ -575,25 +655,22 @@ impl ForkdBackend {
                     )))
                 }
             };
-            remote.push((path, hex.to_ascii_lowercase()));
+            if hashes
+                .insert(path.clone(), hex.to_ascii_lowercase())
+                .is_some()
+            {
+                return Err(unavailable(format!(
+                    "child listed duplicate canonical path `{path}`"
+                )));
+            }
         }
 
-        // Changed set: content hash differs from what was pushed/pulled.
-        let changed: Vec<&(String, String)> = remote
-            .iter()
-            .filter(|(path, hex)| {
-                known
-                    .get(path)
-                    .map(|e| e.blob.as_str() != format!("sha256:{hex}"))
-                    .unwrap_or(true)
-            })
-            .collect();
-
-        // Modes for the changed set only (`stat -c '%a %n'`). A mode-only
-        // change with identical content is invisible to this transport.
-        let mut modes: HashMap<String, u32> = HashMap::new();
-        for chunk in changed.chunks(64) {
-            let args: Vec<String> = chunk.iter().map(|(p, _)| shq(&format!("./{p}"))).collect();
+        // Fetch modes for every file. Modes and hashes are separate state:
+        // chmod-only transitions must survive even when bytes do not move.
+        let paths: Vec<String> = hashes.keys().cloned().collect();
+        let mut modes: BTreeMap<String, u32> = BTreeMap::new();
+        for chunk in paths.chunks(64) {
+            let args: Vec<String> = chunk.iter().map(|p| shq(&format!("./{p}"))).collect();
             let out = self
                 .sync_exec(
                     child,
@@ -601,7 +678,7 @@ impl ForkdBackend {
                     &format!("stat -c '%a %n' -- {}", args.join(" ")),
                 )
                 .await?;
-            for line in out.lines().filter(|l| !l.is_empty()) {
+            for line in out.lines().filter(|line| !line.is_empty()) {
                 let Some((mode, path)) = line.split_once(' ') else {
                     return Err(unavailable(format!(
                         "unparseable stat line from child: {line:?}"
@@ -610,45 +687,93 @@ impl ForkdBackend {
                 let mode = u32::from_str_radix(mode, 8)
                     .map_err(|_| unavailable(format!("bad mode in stat line: {line:?}")))?;
                 let path = path.strip_prefix("./").unwrap_or(path);
-                modes.insert(path.to_string(), mode & 0o777);
+                let path = syncable_path(path).map_err(|reason| {
+                    unavailable(format!("stat returned an unsyncable path: {reason}"))
+                })?;
+                if !hashes.contains_key(&path) {
+                    return Err(unavailable(format!("stat returned unlisted file `{path}`")));
+                }
+                if modes.insert(path.clone(), mode & 0o777).is_some() {
+                    return Err(unavailable(format!(
+                        "stat returned duplicate file `{path}`"
+                    )));
+                }
             }
         }
 
+        let mut manifest = SyncManifest::new();
+        for (path, hex) in hashes {
+            let mode = modes
+                .remove(&path)
+                .ok_or_else(|| unavailable(format!("stat output omitted listed file `{path}`")))?;
+            manifest.insert(
+                path,
+                SyncEntry {
+                    blob: ContentHash(format!("sha256:{hex}")),
+                    mode,
+                },
+            );
+        }
+        validate_manifest_shape(&manifest).map_err(unavailable)?;
+        Ok(manifest)
+    }
+
+    /// List the child's tree after execution and pull only changed files,
+    /// returning the delta against what was pushed.
+    async fn sync_out(&self, child: &str, budget: &ResourceBudget) -> KernelResult<WorkspaceDelta> {
+        let remote = self.remote_manifest(child, budget).await?;
+        let known = self
+            .synced
+            .lock()
+            .await
+            .get(child)
+            .cloned()
+            .unwrap_or_default();
+
         let mut delta = WorkspaceDelta::default();
-        let mut next = SyncManifest::new();
-        for (path, hex) in &remote {
-            let is_changed = changed.iter().any(|(p, _)| p == path);
-            if !is_changed {
-                if let Some(entry) = known.get(path) {
-                    next.insert(path.clone(), entry.clone());
-                    continue;
+        for (path, listed) in &remote {
+            if known.get(path) != Some(listed) {
+                let b64_out = self
+                    .sync_exec(
+                        child,
+                        budget,
+                        &format!("base64 -- {}", shq(&format!("./{path}"))),
+                    )
+                    .await?;
+                let bytes = ak_core::b64::decode(&b64_out)
+                    .map_err(|e| unavailable(format!("child returned invalid base64: {e}")))?;
+                let actual = hash_bytes(&bytes);
+                if actual != listed.blob {
+                    return Err(unavailable(format!(
+                        "child file `{path}` changed between list and read"
+                    )));
                 }
+                delta.upserts.push(SyncedFile {
+                    path: path.clone(),
+                    contents: bytes,
+                    mode: listed.mode,
+                });
             }
-            let b64_out = self
-                .sync_exec(
-                    child,
-                    budget,
-                    &format!("base64 -- {}", shq(&format!("./{path}"))),
-                )
-                .await?;
-            let bytes = ak_core::b64::decode(&b64_out)
-                .map_err(|e| unavailable(format!("child returned invalid base64: {e}")))?;
-            let blob = hash_bytes(&bytes);
-            debug_assert_eq!(blob.as_str(), format!("sha256:{hex}"));
-            let mode = modes.get(path).copied().unwrap_or(0o644);
-            next.insert(path.clone(), SyncEntry { blob, mode });
-            delta.upserts.push(SyncedFile {
-                path: path.clone(),
-                contents: bytes,
-                mode,
-            });
         }
         for path in known.keys() {
-            if !next.contains_key(path) {
+            if !remote.contains_key(path) {
                 delta.deletes.push(path.clone());
             }
         }
-        self.synced.lock().await.insert(child.to_string(), next);
+        // A matching hash proves each individual read, not that the whole
+        // set stayed fixed throughout a multi-file pull. Re-list under the
+        // child mutation gate before accepting the delta; background drift
+        // then fails the step and poisons the child instead of committing a
+        // mixed-time state.
+        if !delta.upserts.is_empty() {
+            let verified = self.remote_manifest(child, budget).await?;
+            if verified != remote {
+                return Err(unavailable(
+                    "child workspace changed while its state delta was being pulled",
+                ));
+            }
+        }
+        self.synced.lock().await.insert(child.to_string(), remote);
         Ok(delta)
     }
 }
@@ -661,7 +786,9 @@ impl Backend for ForkdBackend {
             isolation_strength: 90,
             cold_start_ms: 15,
             replay_class: ReplayClass::ProcessAndFilesystem,
-            supports_fork: true,
+            // A state provider is required to prove which mutable remote
+            // tree exactly represents the requested source state.
+            supports_fork: self.state_provider.is_some(),
             supports_gui: false,
             full_linux: true,
             // Remote workspace: never the kernel's own tree.
@@ -672,12 +799,23 @@ impl Backend for ForkdBackend {
     }
 
     async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
-        let child = self.child_for(&req.branch).await?;
+        let target = match &self.state_provider {
+            Some(provider) => Some(provider.manifest(&req.base_state)?),
+            None => None,
+        };
+        let (child, _child_guard) = self
+            .child_for(&req.branch, target.as_ref(), &req.budget)
+            .await?;
         // State sync in: materialize the base state before acting. Failure
         // poisons the child — a half-pushed tree must not execute.
         if let Some(provider) = &self.state_provider {
             if let Err(e) = self
-                .sync_in(provider, &child, &req.base_state, &req.budget)
+                .sync_in(
+                    provider,
+                    &child,
+                    target.as_ref().expect("provider produced a target"),
+                    &req.budget,
+                )
                 .await
             {
                 self.poison(&req.branch, &child).await;
@@ -701,17 +839,15 @@ impl Backend for ForkdBackend {
                 }
             };
         }
-        let out = match &req.action {
+        let executed = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.client
                     .exec(&child, params!(command, cwd.as_deref(), env))
-                    .await?
+                    .await
             }
             ActionKind::ReadFile { path } => {
                 let cmd = format!("cat {}", shq(path));
-                self.client
-                    .exec(&child, params!(&cmd, None, &empty))
-                    .await?
+                self.client.exec(&child, params!(&cmd, None, &empty)).await
             }
             ActionKind::WriteFile { path, contents_b64 } => {
                 let cmd = format!(
@@ -719,21 +855,25 @@ impl Backend for ForkdBackend {
                     p = shq(path),
                     b = shq(contents_b64)
                 );
-                self.client
-                    .exec(&child, params!(&cmd, None, &empty))
-                    .await?
+                self.client.exec(&child, params!(&cmd, None, &empty)).await
             }
             ActionKind::DeletePath { path } => {
                 let cmd = format!("rm -rf -- {}", shq(path));
-                self.client
-                    .exec(&child, params!(&cmd, None, &empty))
-                    .await?
+                self.client.exec(&child, params!(&cmd, None, &empty)).await
             }
-            other => {
-                return Err(unavailable(format!(
-                    "forkd backend does not execute `{}` actions",
-                    other.required_operation().0
-                )))
+            other => Err(unavailable(format!(
+                "forkd backend does not execute `{}` actions",
+                other.required_operation().0
+            ))),
+        };
+        // A lost/failed exec response leaves the remote tree ambiguous. It
+        // may have mutated before the transport failed, so the cached base
+        // can never be reused.
+        let out = match executed {
+            Ok(out) => out,
+            Err(e) => {
+                self.poison(&req.branch, &child).await;
+                return Err(e);
             }
         };
         // State sync out: pull the post-execution delta regardless of exit
@@ -749,10 +889,6 @@ impl Backend for ForkdBackend {
             },
             None => None,
         };
-        self.state_children
-            .lock()
-            .await
-            .insert(req.base_state.clone(), child);
         let paths_written = match &workspace_delta {
             Some(delta) => delta
                 .upserts
@@ -783,28 +919,48 @@ impl Backend for ForkdBackend {
         })
     }
 
-    /// CoW fan-out: fork the live child that produced `from`. Returns
-    /// `Ok(false)` when that state is unknown to this backend. The forked
-    /// child inherits the source's sync view — its tree is a CoW copy.
+    /// CoW fan-out from a live child whose complete current manifest exactly
+    /// equals `from`. Mutable children are never retained under stale state
+    /// IDs.
     async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
-        let source = { self.state_children.lock().await.get(from).cloned() };
-        let Some(source) = source else {
+        let Some(provider) = &self.state_provider else {
+            return Ok(false);
+        };
+        let target = provider.manifest(from)?;
+        let budget = ResourceBudget::step_default();
+        let Some((source, _source_guard)) = self.quiescent_source(&target, &budget).await? else {
             return Ok(false);
         };
         let child = self.client.fork_child(&source, to_branch).await?;
-        let inherited = { self.synced.lock().await.get(&source).cloned() };
-        if let Some(manifest) = inherited {
-            self.synced.lock().await.insert(child.clone(), manifest);
-        }
+        // Verify the child itself after the fork boundary. A background
+        // process can race the source listing; only an exact clone may be
+        // advertised as native CoW. A drifted clone stays registered as a
+        // warm candidate and sync-in repairs it before any command runs.
+        let current = match self.remote_manifest(&child, &budget).await {
+            Ok(current) => current,
+            Err(error) => {
+                self.children
+                    .lock()
+                    .await
+                    .insert(to_branch.clone(), child.clone());
+                self.poison(to_branch, &child).await;
+                return Err(error);
+            }
+        };
+        let exact = current == target;
+        self.synced.lock().await.insert(child.clone(), current);
         self.children.lock().await.insert(to_branch.clone(), child);
-        Ok(true)
+        Ok(exact)
     }
 
     async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
-        let child = { self.children.lock().await.remove(branch) };
+        let child = { self.children.lock().await.get(branch).cloned() };
         if let Some(child) = child {
-            self.synced.lock().await.remove(&child);
+            let _guard = self.child_gate(&child).await.lock_owned().await;
             self.client.delete_child(&child).await?;
+            self.children.lock().await.remove(branch);
+            self.synced.lock().await.remove(&child);
+            self.child_gates.lock().await.remove(&child);
         }
         Ok(())
     }

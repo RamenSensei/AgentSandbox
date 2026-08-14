@@ -10,6 +10,14 @@ and on-disk formats.
 ## [Unreleased]
 
 ### Added
+- **Authenticated SOCKS5 on the transparent egress path.** The same proxy
+  listener now accepts RFC 1928 CONNECT with mandatory per-step RFC 1929
+  credentials and injects `ALL_PROXY=socks5h://…`, so SOCKS-aware SSH,
+  database and arbitrary TCP clients work without a sandbox-specific
+  connector. Hostname resolution remains at the proxy; SOCKS5 reuses the
+  exact HTTP domain/port allowlist, SSRF guards, pinned resolved address,
+  byte cap and live revocation. Anonymous auth, BIND/UDP, zero ports,
+  malformed address types and literal private/metadata targets fail closed.
 - **Linux netns egress forwarder: bwrap gets real, confined egress.** The
   bubblewrap sandbox keeps its fully unshared network namespace and still
   reaches the egress proxy: a new `ak-egress-fwd` binary runs inside the
@@ -26,6 +34,18 @@ and on-disk formats.
   bypass. Ships as a `[[bin]]` of `ak-backend-local`; discovery order:
   `LocalBackendConfig::egress_forwarder`, `AK_EGRESS_FWD`, alongside the
   current executable, `PATH`.
+- **Linux cgroup v2 group enforcement.** A probe-verified delegated parent
+  now gives every shell step and process session a fresh cgroup with
+  aggregate lifetime CPU enforcement, `memory.max` with swap disabled,
+  `pids.max`, tree-wide
+  CPU/peak-memory accounting and atomic `cgroup.kill` teardown (including
+  `setsid` escapees). OOM kills, PID-limit hits and CPU exhaustion are
+  explicit observations instead of unexplained signals. Process status
+  exposes the same counters. The portable rlimits remain as backstops when
+  no delegated hierarchy verifies; the probe checks the cgroup2 filesystem
+  magic before trusting control-file writes. Linux CI creates a real
+  delegation and requires the cgroup and bwrap-netns E2E suites to run
+  rather than skip.
 
 ### Fixed
 - **Linux build of the rlimit backstops.** The `setrlimit` resource
@@ -51,10 +71,25 @@ and on-disk formats.
   on `files/write`); forkd syncs over its shell transport (GNU userland in
   the child image; filenames needing `sha256sum` escaping are refused
   loudly). The router now lets state-syncing backends satisfy the
-  workspace need, so **high-risk file actions and process-workspace steps
-  can finally run under strong isolation** instead of being denied.
+  workspace need, so **high-risk file actions can finally run under strong
+  isolation** instead of being denied. Long-lived process sessions remain a
+  local-workspace capability.
   `BackendProfile.syncs_state` advertises the verified capability;
-  `ExecutionOutcome.workspace_delta` carries the pulled delta.
+  `ExecutionOutcome.workspace_delta` carries the pulled delta. Follow-up
+  hardening makes the contract strict (profile and outcome must agree),
+  serializes transitions per branch while preserving cross-branch
+  parallelism, handles chmod-only and file↔directory changes, poisons
+  ambiguous failed executions, and drives remote fork/discard/merge
+  lifecycle from the kernel. Native CoW selects only a quiescent sandbox
+  whose complete current manifest exactly matches the committed source —
+  never a stale state-ID alias to a mutable tree. Live trees are re-listed
+  before every sync-in and CoW decision, so between-step background drift is
+  repaired rather than trusted; malformed manifests and list/read hash races
+  poison the remote sandbox. A complete post-pull re-list also rejects
+  additions, deletions or rewrites by retained processes during a multi-file
+  download, so the kernel never commits a mixed-time remote tree. Native CoW
+  success is reported only after the clone itself is re-listed and proven
+  exact; a raced clone is repaired by ordinary CAS sync-in.
 - **Config-driven multi-backend routing.** `KernelConfig.backends` (and
   `agent-kernel-server --backend kind=endpoint`) registers remote isolation
   backends — gVisor, forkd, Cube, Kubernetes — as router candidates next to
@@ -68,23 +103,31 @@ and on-disk formats.
   and agent hints still cannot lower it. An unsatisfiable floor is a
   *recorded* denial naming the floor and the recovery (register a stronger
   backend or lower the rule's weight), not a bare 500.
-- **Honest excursion recording.** A backend that does not share the kernel
-  workspace (`BackendProfile.shares_workspace = false`, the honest value
-  for every remote adapter until state sync lands) runs shell steps as
+- **Honest excursion recording.** A backend that neither shares the kernel
+  workspace nor syncs it (`shares_workspace = false`, `syncs_state = false`)
+  runs shell steps as
   **audit-only excursions**: the full observation lands in the ledger, the
   DAG records an `AuditOnly` node with an empty file delta and an unchanged
   workspace root, and the observation summary names the executing backend.
   File actions and process sessions — anything the DAG must snapshot —
-  stay pinned to workspace-sharing backends by construction.
+  route only to workspace-sharing or state-syncing backends by construction.
 - **Inherited rlimit backstops** in the local backend: `RLIMIT_CPU` from
   the step's `cpu_ms` budget (+1s grace) and `RLIMIT_FSIZE` from the new
   `LocalBackendConfig::max_file_bytes` (default 4 GiB) are set before exec
   and inherited by every descendant across fork and exec. A process that
   escapes the timeout's process-group kill via `setsid` still dies on its
   own CPU clock (proven in-test against a daemonized spinner), and no
-  single runaway write can fill the host disk. These are per-process
-  backstops, not per-tree ceilings — cgroup enforcement stays on the
-  roadmap.
+  single runaway write can fill the host disk. These remain the portable
+  per-process backstops when the probe-verified Linux cgroup path is
+  unavailable.
+- **Strict egress byte caps and listener lifecycle.** Concurrent tunnel
+  directions reserve from one cancellation-safe atomic counter without
+  overshooting or charging unwritten bytes; an HTTP request header is
+  forwarded only if it fits in full. Dropping a grant revokes existing
+  tunnels at the next buffer boundary. Domain matching is case-insensitive,
+  backend Unix sockets are collision-free, probe threads
+  terminate, and dropping the last proxy/grant owner stops listeners and
+  removes socket files.
 
 ## [0.8.0] - 2026-08-13
 

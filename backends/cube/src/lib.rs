@@ -48,9 +48,12 @@
 //! never travels in either direction. Any push/pull failure **poisons** the
 //! branch's sandbox: the adapter forgets it and deletes it best-effort, so
 //! the next step re-materializes from the branch head instead of trusting a
-//! half-synced tree. A service that misreports listing hashes can only
-//! corrupt its own branch's delta — paths are still validated and confined
-//! by the kernel before anything touches the workspace mirror.
+//! half-synced tree. The adapter re-lists before every sync-in and CoW clone,
+//! then verifies the clone itself before reporting native CoW success,
+//! and rejects malformed manifests, a file whose bytes no longer match its
+//! listing hash, or a complete tree that drifts while its delta is pulled;
+//! paths are then independently validated and confined by the kernel before
+//! anything touches the workspace mirror.
 //!
 //! Without a provider the profile stays `syncs_state = false` and shell
 //! steps are recorded as audit-only excursions, exactly as before.
@@ -61,7 +64,7 @@ use ak_core::error::{KernelError, KernelResult};
 use ak_core::hash::{hash_bytes, ContentHash};
 use ak_core::ids::{BranchId, StateId};
 use ak_core::replay::ReplayClass;
-use ak_core::sync::{push_plan, syncable_path, SyncEntry, SyncManifest};
+use ak_core::sync::{push_plan, syncable_path, validate_manifest_shape, SyncEntry, SyncManifest};
 use ak_core::traits::{
     Backend, BackendProfile, ExecutionOutcome, ExecutionRequest, StateProvider, SyncedFile,
     WorkspaceDelta,
@@ -468,15 +471,15 @@ pub struct CubeBackend {
     client: CubeClient,
     /// Live sandbox per branch.
     sandboxes: Mutex<HashMap<BranchId, String>>,
-    /// Sandbox that materialized each base state (for `fork`).
-    state_sandboxes: Mutex<HashMap<StateId, String>>,
     /// Resolves kernel states to manifests/blobs for state sync.
     state_provider: Option<Arc<dyn StateProvider>>,
-    /// What each sandbox's workspace currently holds (path → blob, mode),
-    /// maintained across pushes and pulls. Content-addressed: sync-in
-    /// diffs are computed against this, so a sandbox already at the base
-    /// state transfers nothing.
+    /// Last verified manifest per sandbox (path → blob, mode). This is a
+    /// transfer/CoW candidate cache only; live state is re-listed before
+    /// sync-in and before cloning.
     synced: Mutex<HashMap<String, SyncManifest>>,
+    /// Serializes mutation of each remote sandbox and lets CoW clone reserve
+    /// only a quiescent exact-manifest source.
+    sandbox_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl CubeBackend {
@@ -484,9 +487,9 @@ impl CubeBackend {
         Ok(Self {
             client: CubeClient::new(config)?,
             sandboxes: Mutex::new(HashMap::new()),
-            state_sandboxes: Mutex::new(HashMap::new()),
             state_provider: None,
             synced: Mutex::new(HashMap::new()),
+            sandbox_gates: Mutex::new(HashMap::new()),
         })
     }
 
@@ -497,16 +500,86 @@ impl CubeBackend {
         self
     }
 
+    async fn sandbox_gate(&self, sandbox: &str) -> Arc<Mutex<()>> {
+        Arc::clone(
+            self.sandbox_gates
+                .lock()
+                .await
+                .entry(sandbox.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Find and reserve a quiescent sandbox at exactly `target`. A matching
+    /// cache entry is insufficient while that sandbox is executing: its
+    /// mutable tree may already have moved ahead of the cached manifest.
+    async fn quiescent_source(
+        &self,
+        target: &SyncManifest,
+    ) -> KernelResult<Option<(String, tokio::sync::OwnedMutexGuard<()>)>> {
+        let candidates: Vec<String> = self
+            .synced
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, current)| *current == target)
+            .map(|(sandbox, _)| sandbox.clone())
+            .collect();
+        for sandbox in candidates {
+            let gate = self.sandbox_gate(&sandbox).await;
+            if let Ok(guard) = gate.try_lock_owned() {
+                // The cache is only a candidate index. A process retained by
+                // the remote sandbox may have changed files between steps;
+                // re-list under the mutation gate before cloning it.
+                let current = self.remote_manifest(&sandbox).await?;
+                self.synced
+                    .lock()
+                    .await
+                    .insert(sandbox.clone(), current.clone());
+                if &current == target {
+                    return Ok(Some((sandbox, guard)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Get-or-create is atomic: the map lock is held across the remote create
     /// so concurrent first uses of a branch cannot race two sandboxes.
-    async fn sandbox_for(&self, branch: &BranchId) -> KernelResult<String> {
+    async fn sandbox_for(
+        &self,
+        branch: &BranchId,
+        target: Option<&SyncManifest>,
+    ) -> KernelResult<(String, tokio::sync::OwnedMutexGuard<()>)> {
         let mut sandboxes = self.sandboxes.lock().await;
         if let Some(id) = sandboxes.get(branch) {
-            return Ok(id.clone());
+            let id = id.clone();
+            drop(sandboxes);
+            let guard = self.sandbox_gate(&id).await.lock_owned().await;
+            return Ok((id, guard));
+        }
+        // Lazy CoW: a just-forked kernel branch first arrives with exactly
+        // its fork-point manifest. If a live sandbox still has that exact
+        // tree, clone it instead of creating an empty sandbox and re-pushing
+        // every blob. Equality is against the full manifest, never a stale
+        // state-id -> mutable-sandbox association.
+        if let Some(target) = target {
+            if let Some((source, _source_guard)) = self.quiescent_source(target).await? {
+                let snapshot = self.client.snapshot(&source).await?;
+                let clone = self.client.clone_snapshot(&snapshot, branch).await?;
+                self.synced
+                    .lock()
+                    .await
+                    .insert(clone.clone(), target.clone());
+                sandboxes.insert(branch.clone(), clone.clone());
+                let guard = self.sandbox_gate(&clone).await.lock_owned().await;
+                return Ok((clone, guard));
+            }
         }
         let id = self.client.create_sandbox(branch).await?;
         sandboxes.insert(branch.clone(), id.clone());
-        Ok(id)
+        let guard = self.sandbox_gate(&id).await.lock_owned().await;
+        Ok((id, guard))
     }
 
     /// Forget a branch's sandbox after a failed sync and delete it
@@ -515,29 +588,67 @@ impl CubeBackend {
     async fn poison(&self, branch: &BranchId, sandbox: &str) {
         self.sandboxes.lock().await.remove(branch);
         self.synced.lock().await.remove(sandbox);
+        self.sandbox_gates.lock().await.remove(sandbox);
         if let Err(e) = self.client.delete_sandbox(sandbox).await {
             tracing::warn!(sandbox, error = %e, "failed to delete poisoned sandbox");
         }
     }
 
+    /// Read and validate the service's current workspace manifest. This is
+    /// the data-plane source of truth; `synced` is only a transfer cache.
+    async fn remote_manifest(&self, sandbox: &str) -> KernelResult<SyncManifest> {
+        let listing = self.client.list_files(sandbox).await?;
+        let mut manifest = SyncManifest::new();
+        for file in listing {
+            let path = match syncable_path(&file.path) {
+                Ok(path) => path,
+                // The cache/scratch tier stays remote; every other invalid
+                // path is a protocol violation.
+                Err(reason) if reason.contains("cache/scratch") => continue,
+                Err(reason) => {
+                    return Err(unavailable(format!(
+                        "service listed an unsyncable path: {reason}"
+                    )))
+                }
+            };
+            if file.sha256.len() != 64 || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(unavailable(format!(
+                    "service listed an invalid SHA-256 for `{path}`"
+                )));
+            }
+            let entry = SyncEntry {
+                blob: ContentHash(format!("sha256:{}", file.sha256.to_ascii_lowercase())),
+                mode: file.mode & 0o777,
+            };
+            if manifest.insert(path.clone(), entry).is_some() {
+                return Err(unavailable(format!(
+                    "service listed duplicate canonical path `{path}`"
+                )));
+            }
+        }
+        validate_manifest_shape(&manifest).map_err(unavailable)?;
+        Ok(manifest)
+    }
+
     /// Bring `sandbox`'s workspace to `base_state` by pushing the diff
-    /// between what it holds and the base-state manifest.
+    /// between a fresh remote listing and the base-state manifest.
     async fn sync_in(
         &self,
         provider: &Arc<dyn StateProvider>,
         sandbox: &str,
-        base_state: &StateId,
+        target: &SyncManifest,
     ) -> KernelResult<()> {
-        let target = provider.manifest(base_state)?;
-        let current = self
-            .synced
-            .lock()
-            .await
-            .get(sandbox)
-            .cloned()
-            .unwrap_or_default();
-        let plan = push_plan(&current, &target);
+        let current = self.remote_manifest(sandbox).await?;
+        let plan = push_plan(&current, target);
+        // Delete first, then write. This is required for file/directory
+        // transitions (`a` -> `a/b`, or the reverse). Deleting an upsert's
+        // destination as well clears an empty/old directory at that path;
+        // the files API's delete operation is idempotent.
+        for path in &plan.deletes {
+            self.client.delete_path(sandbox, path).await?;
+        }
         for (path, entry) in &plan.upserts {
+            self.client.delete_path(sandbox, path).await?;
             let bytes = provider.blob(&entry.blob)?;
             self.client
                 .write_file(
@@ -548,19 +659,27 @@ impl CubeBackend {
                 )
                 .await?;
         }
-        for path in &plan.deletes {
-            self.client.delete_path(sandbox, path).await?;
+        if !plan.is_empty() {
+            let verified = self.remote_manifest(sandbox).await?;
+            if &verified != target {
+                return Err(unavailable(
+                    "service did not materialize the requested base manifest exactly",
+                ));
+            }
         }
-        self.synced.lock().await.insert(sandbox.to_string(), target);
+        self.synced
+            .lock()
+            .await
+            .insert(sandbox.to_string(), target.clone());
         Ok(())
     }
 
     /// List the remote tree after execution and pull only changed files,
-    /// returning the delta against what was pushed. Updates the sync cache
-    /// to the observed tree (hashes recomputed from the pulled bytes — the
-    /// listing hash only decides what to download).
+    /// returning the delta against what was pushed. Every downloaded file
+    /// must hash to the listing entry, rejecting a concurrent mutation
+    /// instead of committing a mixed-time tree.
     async fn sync_out(&self, sandbox: &str) -> KernelResult<WorkspaceDelta> {
-        let listing = self.client.list_files(sandbox).await?;
+        let remote = self.remote_manifest(sandbox).await?;
         let known = self
             .synced
             .lock()
@@ -569,46 +688,41 @@ impl CubeBackend {
             .cloned()
             .unwrap_or_default();
         let mut delta = WorkspaceDelta::default();
-        let mut next = SyncManifest::new();
-        for file in &listing {
-            let path = match syncable_path(&file.path) {
-                Ok(p) => p,
-                // The cache/scratch tier stays remote; hostile paths are a
-                // protocol violation.
-                Err(reason) if reason.contains("cache/scratch") => continue,
-                Err(reason) => {
+        for (path, listed) in &remote {
+            if known.get(path) != Some(listed) {
+                let bytes = self.client.read_file(sandbox, path).await?;
+                let actual = hash_bytes(&bytes);
+                if actual != listed.blob {
                     return Err(unavailable(format!(
-                        "service listed an unsyncable path: {reason}"
-                    )))
+                        "service file `{path}` changed between list and read"
+                    )));
                 }
-            };
-            let mode = file.mode & 0o777;
-            let listed = SyncEntry {
-                blob: ContentHash(format!("sha256:{}", file.sha256)),
-                mode,
-            };
-            match known.get(&path) {
-                Some(entry) if *entry == listed => {
-                    next.insert(path, listed);
-                }
-                _ => {
-                    let bytes = self.client.read_file(sandbox, &path).await?;
-                    let blob = hash_bytes(&bytes);
-                    next.insert(path.clone(), SyncEntry { blob, mode });
-                    delta.upserts.push(SyncedFile {
-                        path,
-                        contents: bytes,
-                        mode,
-                    });
-                }
+                delta.upserts.push(SyncedFile {
+                    path: path.clone(),
+                    contents: bytes,
+                    mode: listed.mode,
+                });
             }
         }
         for path in known.keys() {
-            if !next.contains_key(path) {
+            if !remote.contains_key(path) {
                 delta.deletes.push(path.clone());
             }
         }
-        self.synced.lock().await.insert(sandbox.to_string(), next);
+        // Per-file hashes reject a mutation between that file's list/read,
+        // but a retained background process could still change an already
+        // downloaded file (or add/delete another one) while the rest of the
+        // tree is being pulled. Re-list the complete tree before vouching for
+        // the delta; a mismatch poisons this sandbox at the caller.
+        if !delta.upserts.is_empty() {
+            let verified = self.remote_manifest(sandbox).await?;
+            if verified != remote {
+                return Err(unavailable(
+                    "service workspace changed while its state delta was being pulled",
+                ));
+            }
+        }
+        self.synced.lock().await.insert(sandbox.to_string(), remote);
         Ok(delta)
     }
 }
@@ -621,7 +735,9 @@ impl Backend for CubeBackend {
             isolation_strength: 90,
             cold_start_ms: 250,
             replay_class: ReplayClass::ProcessAndFilesystem,
-            supports_fork: true,
+            // A state provider is required to prove which mutable remote
+            // tree exactly represents the requested source state.
+            supports_fork: self.state_provider.is_some(),
             supports_gui: false,
             full_linux: true,
             // Remote workspace: never the kernel's own tree.
@@ -632,16 +748,27 @@ impl Backend for CubeBackend {
     }
 
     async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
-        let sandbox = self.sandbox_for(&req.branch).await?;
+        let target = match &self.state_provider {
+            Some(provider) => Some(provider.manifest(&req.base_state)?),
+            None => None,
+        };
+        let (sandbox, _sandbox_guard) = self.sandbox_for(&req.branch, target.as_ref()).await?;
         // State sync in: materialize the base state before acting. Failure
         // poisons the sandbox — a half-pushed tree must not execute.
         if let Some(provider) = &self.state_provider {
-            if let Err(e) = self.sync_in(provider, &sandbox, &req.base_state).await {
+            if let Err(e) = self
+                .sync_in(
+                    provider,
+                    &sandbox,
+                    target.as_ref().expect("provider produced a target"),
+                )
+                .await
+            {
                 self.poison(&req.branch, &sandbox).await;
                 return Err(e);
             }
         }
-        let (exit_code, stdout, stderr, duration_ms, network_bytes) = match &req.action {
+        let executed = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.client
                     .exec(
@@ -657,28 +784,37 @@ impl Backend for CubeBackend {
                             egress_domains: &req.egress_domains,
                         },
                     )
-                    .await?
+                    .await
             }
             ActionKind::ReadFile { path } => {
-                let bytes = self.client.read_file(&sandbox, path).await?;
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                (0, text, String::new(), 0, None)
+                self.client.read_file(&sandbox, path).await.map(|bytes| {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    (0, text, String::new(), 0, None)
+                })
             }
-            ActionKind::WriteFile { path, contents_b64 } => {
-                self.client
-                    .write_file(&sandbox, path, contents_b64, None)
-                    .await?;
-                (0, String::new(), String::new(), 0, None)
-            }
-            ActionKind::DeletePath { path } => {
-                self.client.delete_path(&sandbox, path).await?;
-                (0, String::new(), String::new(), 0, None)
-            }
-            other => {
-                return Err(unavailable(format!(
-                    "cube backend does not execute `{}` actions",
-                    other.required_operation().0
-                )))
+            ActionKind::WriteFile { path, contents_b64 } => self
+                .client
+                .write_file(&sandbox, path, contents_b64, None)
+                .await
+                .map(|()| (0, String::new(), String::new(), 0, None)),
+            ActionKind::DeletePath { path } => self
+                .client
+                .delete_path(&sandbox, path)
+                .await
+                .map(|()| (0, String::new(), String::new(), 0, None)),
+            other => Err(unavailable(format!(
+                "cube backend does not execute `{}` actions",
+                other.required_operation().0
+            ))),
+        };
+        // A transport/status failure is ambiguous: the remote action may
+        // have changed the tree before its response was lost. Never reuse
+        // that sandbox under the old sync cache.
+        let (exit_code, stdout, stderr, duration_ms, network_bytes) = match executed {
+            Ok(out) => out,
+            Err(e) => {
+                self.poison(&req.branch, &sandbox).await;
+                return Err(e);
             }
         };
         // State sync out: pull the post-execution delta regardless of exit
@@ -695,10 +831,6 @@ impl Backend for CubeBackend {
             },
             None => None,
         };
-        self.state_sandboxes
-            .lock()
-            .await
-            .insert(req.base_state.clone(), sandbox.clone());
         let paths_written = match &workspace_delta {
             Some(delta) => delta
                 .upserts
@@ -729,30 +861,49 @@ impl Backend for CubeBackend {
         })
     }
 
-    /// Fork via snapshot + clone. Returns `Ok(false)` when the source state
-    /// is unknown to this backend (kernel then re-materializes from the CAS).
-    /// The clone inherits the source sandbox's sync view: its tree is a
-    /// byte-identical copy, so the next push diffs from the same manifest.
+    /// Fork via snapshot + clone. The source is selected only when a live
+    /// sandbox's complete sync manifest exactly equals `from`; mutable
+    /// sandboxes are never remembered under stale state IDs.
     async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
-        let source = { self.state_sandboxes.lock().await.get(from).cloned() };
-        let Some(source) = source else {
+        let Some(provider) = &self.state_provider else {
+            return Ok(false);
+        };
+        let target = provider.manifest(from)?;
+        let Some((source, _source_guard)) = self.quiescent_source(&target).await? else {
             return Ok(false);
         };
         let snapshot = self.client.snapshot(&source).await?;
         let clone = self.client.clone_snapshot(&snapshot, to_branch).await?;
-        let inherited = { self.synced.lock().await.get(&source).cloned() };
-        if let Some(manifest) = inherited {
-            self.synced.lock().await.insert(clone.clone(), manifest);
-        }
+        // The source was exact before snapshotting, but a retained process
+        // can race that control-plane boundary. Verify the clone itself
+        // before reporting native CoW success. A non-exact clone remains a
+        // safe warm materialization candidate: sync-in repairs it from CAS
+        // before the first command, so return false honestly.
+        let current = match self.remote_manifest(&clone).await {
+            Ok(current) => current,
+            Err(error) => {
+                self.sandboxes
+                    .lock()
+                    .await
+                    .insert(to_branch.clone(), clone.clone());
+                self.poison(to_branch, &clone).await;
+                return Err(error);
+            }
+        };
+        let exact = current == target;
+        self.synced.lock().await.insert(clone.clone(), current);
         self.sandboxes.lock().await.insert(to_branch.clone(), clone);
-        Ok(true)
+        Ok(exact)
     }
 
     async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
-        let sandbox = { self.sandboxes.lock().await.remove(branch) };
+        let sandbox = { self.sandboxes.lock().await.get(branch).cloned() };
         if let Some(sandbox) = sandbox {
-            self.synced.lock().await.remove(&sandbox);
+            let _guard = self.sandbox_gate(&sandbox).await.lock_owned().await;
             self.client.delete_sandbox(&sandbox).await?;
+            self.sandboxes.lock().await.remove(branch);
+            self.synced.lock().await.remove(&sandbox);
+            self.sandbox_gates.lock().await.remove(&sandbox);
         }
         Ok(())
     }

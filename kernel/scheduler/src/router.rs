@@ -87,6 +87,11 @@ impl BackendRouter {
         self.backends.iter().map(|b| b.profile()).collect()
     }
 
+    /// Cloned handles for lifecycle fan-out (for example branch discard).
+    pub fn backends(&self) -> Vec<Arc<dyn Backend>> {
+        self.backends.clone()
+    }
+
     /// Look up a registered backend by profile name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Backend>> {
         self.backends

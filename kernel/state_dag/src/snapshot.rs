@@ -319,7 +319,10 @@ pub fn diff_manifests(old: &Manifest, new: &Manifest) -> Vec<FileChange> {
                 blob: e.blob.clone(),
                 mode: e.mode,
             }),
-            Some(o) if o.blob != e.blob => changes.push(FileChange::Modified {
+            // A chmod is a real artifact change even when the bytes are
+            // identical.  Keep the existing wire shape: equal old/new blob
+            // hashes mean this `modified` record is metadata-only.
+            Some(o) if o != e => changes.push(FileChange::Modified {
                 path: path.clone(),
                 old_blob: o.blob.clone(),
                 new_blob: e.blob.clone(),
@@ -415,6 +418,38 @@ mod tests {
             .any(|c| matches!(c, FileChange::Added { path, .. } if path == "c.txt")));
 
         assert!(diff_manifests(&m2, &m2).is_empty());
+    }
+
+    #[test]
+    fn diff_records_mode_only_changes() {
+        let blob = ak_core::hash::hash_bytes(b"same bytes");
+        let old = Manifest {
+            files: BTreeMap::from([(
+                "run.sh".into(),
+                ManifestEntry {
+                    blob: blob.clone(),
+                    mode: 0o644,
+                },
+            )]),
+        };
+        let new = Manifest {
+            files: BTreeMap::from([(
+                "run.sh".into(),
+                ManifestEntry {
+                    blob: blob.clone(),
+                    mode: 0o755,
+                },
+            )]),
+        };
+
+        assert_eq!(
+            diff_manifests(&old, &new),
+            vec![FileChange::Modified {
+                path: "run.sh".into(),
+                old_blob: blob.clone(),
+                new_blob: blob,
+            }]
+        );
     }
 
     #[test]

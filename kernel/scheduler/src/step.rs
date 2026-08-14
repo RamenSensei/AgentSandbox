@@ -31,13 +31,26 @@ use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
 
 /// An executed step's outcome plus the profile of the backend that ran
-/// it. The kernel's state recording depends on the profile: only a
-/// workspace-sharing backend's effects can be snapshotted into the DAG;
-/// everything else is recorded as an audit-only excursion.
-#[derive(Debug)]
+/// it. The kernel's state recording depends on the profile: a workspace-
+/// sharing backend is snapshotted directly, a state-syncing backend's
+/// validated delta is applied and snapshotted, and only a backend with
+/// neither capability becomes an audit-only excursion.
 pub struct RoutedOutcome {
     pub outcome: ExecutionOutcome,
     pub backend: BackendProfile,
+    /// The exact routed instance. Profile names are introspection labels and
+    /// need not be unique; cleanup must never target a different instance
+    /// merely because its label matches.
+    pub executor: Arc<dyn Backend>,
+}
+
+impl std::fmt::Debug for RoutedOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoutedOutcome")
+            .field("outcome", &self.outcome)
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Step-boundary accounting record, exposed for the ledger: which backend ran
@@ -203,6 +216,11 @@ impl StepScheduler {
     /// Profiles of every registered backend, for introspection.
     pub fn backend_profiles(&self) -> Vec<BackendProfile> {
         self.router_read().profiles()
+    }
+
+    /// Every registered backend, used for branch lifecycle cleanup.
+    pub fn backends(&self) -> Vec<Arc<dyn Backend>> {
+        self.router_read().backends()
     }
 
     /// Look up a registered backend by profile name (e.g. to release its
@@ -482,6 +500,7 @@ impl StepScheduler {
         Ok(RoutedOutcome {
             outcome,
             backend: backend_profile,
+            executor: backend,
         })
     }
 

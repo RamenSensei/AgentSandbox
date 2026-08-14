@@ -227,19 +227,31 @@ pub fn probe_netns_egress(forwarder: &Path) -> Option<Vec<String>> {
     std::fs::create_dir_all(&ws).ok()?;
     let sock = dir.path().join("probe.sock");
     let listener = std::os::unix::net::UnixListener::bind(&sock).ok()?;
-    listener.set_nonblocking(false).ok()?;
+    listener.set_nonblocking(true).ok()?;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_stop = std::sync::Arc::clone(&stop);
     // Host side of the probe: echo the expected pong for each connection.
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Write};
-        for conn in listener.incoming().flatten() {
-            let mut reader = BufReader::new(conn);
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_ok() && line.trim() == "AK_EGRESS_PROBE" {
-                let mut conn = reader.into_inner();
-                let _ = conn.write_all(b"AK_EGRESS_PONG\n");
+        use std::sync::atomic::Ordering;
+        while !server_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    let mut reader = BufReader::new(conn);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() && line.trim() == "AK_EGRESS_PROBE" {
+                        let mut conn = reader.into_inner();
+                        let _ = conn.write_all(b"AK_EGRESS_PONG\n");
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
             }
         }
     });
+    let mut verified = None;
     for variant in NETNS_CAP_VARIANTS {
         let variant: Vec<String> = variant.iter().map(|s| s.to_string()).collect();
         let mut cmd = std::process::Command::new("bwrap");
@@ -253,9 +265,15 @@ pub fn probe_netns_egress(forwarder: &Path) -> Option<Vec<String>> {
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("probe-ok"))
             .unwrap_or(false);
         if ok {
-            tracing::info!(?variant, "netns egress forwarder probe verified");
-            return Some(variant);
+            verified = Some(variant);
+            break;
         }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    let _ = server.join();
+    if let Some(variant) = verified {
+        tracing::info!(?variant, "netns egress forwarder probe verified");
+        return Some(variant);
     }
     tracing::warn!(
         "netns egress forwarder probe failed under every capability variant; \

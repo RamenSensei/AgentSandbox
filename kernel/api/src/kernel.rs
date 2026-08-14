@@ -16,7 +16,9 @@ use ak_core::ids::{
 use ak_core::observation::{distill_output, extract_causal_failure, Observation};
 use ak_core::replay::ReplayClass;
 use ak_core::state::{FileChange, StateDelta, StateNode};
-use ak_core::traits::{Backend, Connector, ExecutionRequest, PreparedEffect};
+use ak_core::traits::{
+    Backend, Connector, ExecutionRequest, PreparedEffect, StateProvider, WorkspaceDelta,
+};
 use ak_core::{KernelError, KernelResult, Principal};
 use ak_effect_broker::{EffectBroker, SecretVault};
 use ak_identity::{
@@ -218,19 +220,60 @@ impl KernelConfig {
 
 /// Construct a remote backend adapter from its setup. Auth tokens are read
 /// from each adapter's environment variable, never from configuration.
-fn build_backend(setup: &BackendSetup) -> KernelResult<Arc<dyn Backend>> {
+/// [`StateProvider`] over the kernel's state DAG and CAS: resolves a state
+/// to its manifest (path → blob hash, mode) and blobs to bytes. Handed to
+/// remote backends that sync state.
+struct DagStateProvider(Arc<StateDag>);
+
+impl StateProvider for DagStateProvider {
+    fn manifest(&self, state: &StateId) -> KernelResult<ak_core::sync::SyncManifest> {
+        let node = self.0.get_state(state)?;
+        let manifest = ak_state_dag::Manifest::load(self.0.cas(), &node.workspace_root)?;
+        Ok(manifest
+            .files
+            .into_iter()
+            .map(|(path, e)| {
+                (
+                    path,
+                    ak_core::sync::SyncEntry {
+                        blob: e.blob,
+                        mode: e.mode,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    fn blob(&self, hash: &ak_core::hash::ContentHash) -> KernelResult<Vec<u8>> {
+        self.0.cas().get(hash)
+    }
+}
+
+fn build_backend(
+    setup: &BackendSetup,
+    state_provider: Arc<dyn StateProvider>,
+) -> KernelResult<Arc<dyn Backend>> {
     Ok(match setup {
         BackendSetup::Gvisor { endpoint, image } => {
             let mut config = ak_backend_gvisor::GvisorConfig::from_env(endpoint.clone());
             config.image = image.clone();
             Arc::new(ak_backend_gvisor::GvisorBackend::new(config)?)
         }
-        BackendSetup::Forkd { endpoint } => Arc::new(ak_backend_forkd::ForkdBackend::new(
-            ak_backend_forkd::ForkdConfig::from_env(endpoint.clone()),
-        )?),
-        BackendSetup::Cube { endpoint } => Arc::new(ak_backend_cube::CubeBackend::new(
-            ak_backend_cube::CubeConfig::from_env(endpoint.clone()),
-        )?),
+        // forkd and Cube get the kernel's state provider: their steps are
+        // real state transitions (push base state, pull the delta), not
+        // audit-only excursions.
+        BackendSetup::Forkd { endpoint } => Arc::new(
+            ak_backend_forkd::ForkdBackend::new(ak_backend_forkd::ForkdConfig::from_env(
+                endpoint.clone(),
+            ))?
+            .with_state_provider(state_provider),
+        ),
+        BackendSetup::Cube { endpoint } => Arc::new(
+            ak_backend_cube::CubeBackend::new(ak_backend_cube::CubeConfig::from_env(
+                endpoint.clone(),
+            ))?
+            .with_state_provider(state_provider),
+        ),
         BackendSetup::Kubernetes {
             endpoint,
             isolation_strength,
@@ -254,6 +297,75 @@ fn build_backend(setup: &BackendSetup) -> KernelResult<Arc<dyn Backend>> {
     })
 }
 
+/// Validate a state-synced excursion's returned delta before it may touch
+/// the branch workspace mirror. The remote sandbox is *outside* the
+/// kernel's trust boundary: every path must be a clean workspace-relative
+/// path outside the cache/scratch tier (`..`, absolute paths and ignored
+/// components are refused — the latter closes symlink ambush via preserved
+/// cache directories) **and** inside this step's writable prefixes. A
+/// violation means the remote failed to enforce the confinement it was
+/// handed; the delta is rejected wholesale.
+fn validate_workspace_delta(
+    delta: &WorkspaceDelta,
+    writable_prefixes: &[String],
+    backend: &str,
+) -> Result<(), Denial> {
+    let check = |raw: &str, verb: &str| -> Result<(), Denial> {
+        let refuse = |why: String| Denial {
+            code: DenialCode::ConstraintViolated,
+            attempted_operation: Operation::new("backend.state_sync"),
+            reason: format!(
+                "backend `{backend}` returned a workspace delta that {verb} `{raw}`, \
+                 which {why}; the delta was rejected and the remote sandbox discarded \
+                 — the branch head is unchanged"
+            ),
+            safe_alternatives: Vec::new(),
+            requestable_scopes: Vec::new(),
+            escalation_allowed: false,
+        };
+        let path = ak_core::sync::syncable_path(raw).map_err(&refuse)?;
+        if !ak_core::path::matches_prefixes(std::path::Path::new(&path), writable_prefixes) {
+            return Err(refuse(format!(
+                "is outside the step's writable prefixes {writable_prefixes:?}"
+            )));
+        }
+        Ok(())
+    };
+    for f in &delta.upserts {
+        check(&f.path, "writes")?;
+    }
+    for p in &delta.deletes {
+        check(p, "deletes")?;
+    }
+    Ok(())
+}
+
+/// Apply a **validated** delta to the branch workspace mirror. Modes are
+/// masked to `0o777`: setuid/setgid/sticky bits never survive a remote
+/// round trip. Deletes of already-absent paths are no-ops.
+fn apply_workspace_delta(dir: &std::path::Path, delta: &WorkspaceDelta) -> KernelResult<()> {
+    for f in &delta.upserts {
+        let dest = dir.join(&f.path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &f.contents)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(f.mode & 0o777))?;
+        }
+    }
+    for p in &delta.deletes {
+        match std::fs::remove_file(dir.join(p)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 /// Map a policy rule's risk weight to the scheduler's risk tier (and so an
 /// isolation floor): `0..=2` low, `3..=6` medium, `>=7` high. The tier is
 /// decided by policy — never by the agent's own hints.
@@ -266,10 +378,11 @@ fn risk_tier_of(weight: u32) -> RiskTier {
 }
 
 /// Compatibility needs implied by the action itself. Anything whose effects
-/// the state DAG must snapshot — file actions, process sessions — pins the
-/// step to a workspace-sharing backend. A plain shell command may route to
-/// any backend satisfying the risk floor; when a non-sharing backend runs
-/// it, the step is recorded as an audit-only excursion.
+/// the state DAG must snapshot — file actions, process sessions — requires
+/// a backend that either shares the kernel workspace or syncs state back.
+/// A plain shell command may route to any backend satisfying the risk
+/// floor; when a backend with neither capability runs it, the step is
+/// recorded as an audit-only excursion.
 fn needs_of(kind: &ActionKind) -> Needs {
     Needs {
         workspace: !matches!(kind, ActionKind::Shell { .. }),
@@ -482,7 +595,7 @@ pub struct ReplaySandboxReport {
 /// and the module docs of every component crate for their invariants.
 pub struct Kernel {
     config: KernelConfig,
-    dag: StateDag,
+    dag: Arc<StateDag>,
     ledger: Arc<Ledger>,
     delegation: DelegationService,
     keypair: Arc<KernelKeypair>,
@@ -542,10 +655,10 @@ impl Kernel {
     #[instrument(skip(config), fields(data_dir = %config.data_dir.display()))]
     pub fn open(config: KernelConfig) -> KernelResult<Self> {
         std::fs::create_dir_all(&config.data_dir)?;
-        let dag = StateDag::open(
+        let dag = Arc::new(StateDag::open(
             &config.data_dir.join("dag.db"),
             &config.data_dir.join("cas"),
-        )?;
+        )?);
         let ledger = Arc::new(Ledger::open(&config.data_dir.join("ledger.db"))?);
         let identity_db =
             IdentityDb::open(config.data_dir.join("identity.db")).map_err(KernelError::from)?;
@@ -643,10 +756,13 @@ impl Kernel {
             kernel.spawn_mcp_server(setup)?;
         }
         // Public multi-backend routing: configured remote backends become
-        // router candidates next to the built-in local sandbox.
+        // router candidates next to the built-in local sandbox. Sync-capable
+        // adapters receive the kernel's state provider so their steps are
+        // real state transitions.
         let backend_setups = kernel.config.backends.clone();
         for setup in &backend_setups {
-            kernel.register_backend(build_backend(setup)?);
+            let provider = kernel.state_provider();
+            kernel.register_backend(build_backend(setup, provider)?);
         }
         Ok(kernel)
     }
@@ -657,7 +773,13 @@ impl Kernel {
         &self.config
     }
     pub fn dag(&self) -> &StateDag {
-        &self.dag
+        self.dag.as_ref()
+    }
+
+    /// A read-only [`StateProvider`] over this kernel's DAG + CAS, for
+    /// state-syncing backends (see [`Kernel::register_backend`]).
+    pub fn state_provider(&self) -> Arc<dyn StateProvider> {
+        Arc::new(DagStateProvider(Arc::clone(&self.dag)))
     }
     pub fn ledger(&self) -> &Arc<Ledger> {
         &self.ledger
@@ -738,10 +860,16 @@ impl Kernel {
 
     /// Register an additional isolation backend with the router. Steps whose
     /// policy risk tier demands more isolation than the built-in local
-    /// sandbox provides route to the cheapest satisfying backend. A backend
-    /// whose profile does not share the kernel workspace has its steps
-    /// recorded as **audit-only excursions**: full observations in the
-    /// ledger, no local state transition claimed.
+    /// sandbox provides route to the cheapest satisfying backend.
+    ///
+    /// A backend that advertises `syncs_state` (build the adapter with a
+    /// [`StateProvider`] from [`Kernel::state_provider`]) runs steps as
+    /// **real state transitions**: it materializes the base state remotely
+    /// and returns the observed delta, which the kernel validates against
+    /// the step's confinement, applies to the branch mirror and snapshots.
+    /// A backend with neither `shares_workspace` nor `syncs_state` has its
+    /// steps recorded as **audit-only excursions**: full observations in
+    /// the ledger, no local state transition claimed.
     pub fn register_backend(&self, backend: Arc<dyn Backend>) {
         self.scheduler.register_backend(backend);
     }
@@ -2106,6 +2234,9 @@ impl Kernel {
         // compatibility needs. Neither is influenced by agent hints.
         let risk = risk_tier_of(confinement.risk_weight);
         let needs = needs_of(&action.kind);
+        // Kept for validating a state-synced excursion's returned delta
+        // against exactly what this step was allowed to write.
+        let writable_prefixes = confinement.writable_prefixes.clone();
         let req = ExecutionRequest {
             branch: branch.clone(),
             base_state: base_state.clone(),
@@ -2156,12 +2287,41 @@ impl Kernel {
         };
         let outcome = routed.outcome;
 
-        // Record the state transition honestly. Only a workspace-sharing
-        // backend's effects are visible to the snapshotter; an excursion to
-        // any other backend leaves the local tree untouched and is recorded
-        // as exactly that: an audit-only node with an empty file delta.
+        // Record the state transition honestly, in one of three ways:
+        //
+        // 1. a **workspace-sharing** backend's effects are snapshotted
+        //    directly from the kernel tree;
+        // 2. a **state-syncing** backend returns the delta it observed
+        //    remotely; the kernel validates every path against this step's
+        //    writable prefixes, applies it to the branch's local mirror
+        //    (materialized at the base state first) and snapshots — a real
+        //    state transition;
+        // 3. any other backend leaves the local tree untouched and is
+        //    recorded as exactly that: an audit-only node with an empty
+        //    file delta.
         let node = if routed.backend.shares_workspace {
             let dir = self.backend.workspace_for(branch)?;
+            self.dag
+                .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?
+        } else if let Some(delta) = &outcome.workspace_delta {
+            if let Err(denial) =
+                validate_workspace_delta(delta, &writable_prefixes, &routed.backend.name)
+            {
+                // The remote tree no longer matches any state the kernel
+                // would vouch for: scrap the backend's branch resources so
+                // the next step re-materializes from the (unchanged) head.
+                if let Some(backend) = self.scheduler.backend(&routed.backend.name) {
+                    if let Err(e) = backend.discard(branch).await {
+                        warn!(backend = %routed.backend.name, error = %e,
+                              "failed to discard branch after rejected sync delta");
+                    }
+                }
+                let who = self.registry().get(principal).map_err(KernelError::from)?;
+                return self.deny_step(writer, b, step, &who, denial);
+            }
+            let dir = self.backend.workspace_for(branch)?;
+            self.dag.materialize(&base_state, &dir)?;
+            apply_workspace_delta(&dir, delta)?;
             self.dag
                 .snapshot_and_append(branch, &step, principal, &dir, outcome.replay_class)?
         } else {
@@ -2196,6 +2356,8 @@ impl Kernel {
         let observation = if outcome.exit_code == 0 {
             let via = if routed.backend.shares_workspace {
                 String::new()
+            } else if outcome.workspace_delta.is_some() {
+                format!(" via `{}` (state-synced)", routed.backend.name)
             } else {
                 format!(" via `{}` (audit-only excursion)", routed.backend.name)
             };

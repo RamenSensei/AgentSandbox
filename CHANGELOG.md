@@ -10,6 +10,30 @@ and on-disk formats.
 ## [Unreleased]
 
 ### Added
+- **Remote-backend state sync: excursions become real state transitions.**
+  The forkd and Cube adapters now accept a `StateProvider` (wired
+  automatically for `KernelConfig.backends`) and materialize kernel state
+  in their remote sandboxes: before each step the base state's manifest is
+  diffed against what the sandbox already holds and only the difference is
+  pushed (content-addressed — re-running on a synced branch pushes
+  nothing); after each step the remote tree is listed, changed files are
+  pulled, and the kernel **validates every returned path against the
+  step's writable prefixes** (plus `..`/absolute/cache-tier refusals),
+  applies the delta to the branch's local workspace mirror and snapshots
+  it into the state DAG. A remote step now advances the branch head with a
+  real file delta; branches can hop between local and remote backends with
+  full state continuity, and `fork` inherits the sync view so CoW fan-out
+  never re-pushes shared files. A delta that violates confinement is
+  rejected wholesale as a recorded `constraint_violated` denial and the
+  remote sandbox is discarded (poisoned sandboxes are never trusted
+  again). Cube syncs over its files API (new `files/list` endpoint, `mode`
+  on `files/write`); forkd syncs over its shell transport (GNU userland in
+  the child image; filenames needing `sha256sum` escaping are refused
+  loudly). The router now lets state-syncing backends satisfy the
+  workspace need, so **high-risk file actions and process-workspace steps
+  can finally run under strong isolation** instead of being denied.
+  `BackendProfile.syncs_state` advertises the verified capability;
+  `ExecutionOutcome.workspace_delta` carries the pulled delta.
 - **Config-driven multi-backend routing.** `KernelConfig.backends` (and
   `agent-kernel-server --backend kind=endpoint`) registers remote isolation
   backends — gVisor, forkd, Cube, Kubernetes — as router candidates next to

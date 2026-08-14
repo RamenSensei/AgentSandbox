@@ -134,8 +134,19 @@ NOT_FOUND`.
 ## 4. Steps and observations
 
 `step.execute` takes `{branch, actor, action}`. The kernel — never the
-agent — selects the isolation backend. The response's `Observation` is one
-of:
+agent — selects the isolation backend. How the step is **recorded** depends
+on the backend's honest capabilities: a backend sharing the kernel
+workspace is snapshotted directly; a backend with **state sync** pushes the
+base state into its remote sandbox, pulls the observed file delta back, and
+the kernel validates every returned path against the step's writable
+prefixes before applying it to the branch mirror and snapshotting — a real
+state transition (`state-synced` in the observation summary). A backend
+with neither capability is recorded as an **audit-only excursion**: full
+observation in the ledger, an `AuditOnly` node with an empty file delta,
+and no local state claimed. A sync delta violating confinement is rejected
+wholesale as a recorded denial and the remote sandbox is discarded.
+
+The response's `Observation` is one of:
 
 | kind               | Meaning |
 |--------------------|---------|

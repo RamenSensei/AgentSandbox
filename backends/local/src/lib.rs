@@ -77,7 +77,7 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod b64;
@@ -238,48 +238,16 @@ fn denial(code: DenialCode, op: &str, reason: impl Into<String>) -> KernelError 
 
 /// Normalize a workspace-relative path: reject absolute paths, `..`
 /// components, and empty paths. Returns the normalized relative `PathBuf`.
+/// Semantics live in [`ak_core::path`]; this wraps refusals as denials.
 fn normalize_relative(op: &str, raw: &str) -> KernelResult<PathBuf> {
-    let p = Path::new(raw);
-    if p.as_os_str().is_empty() {
-        return Err(denial(DenialCode::ConstraintViolated, op, "empty path"));
-    }
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::Normal(c) => out.push(c),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(denial(
-                    DenialCode::ConstraintViolated,
-                    op,
-                    format!("path `{raw}` contains `..`"),
-                ))
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(denial(
-                    DenialCode::ConstraintViolated,
-                    op,
-                    format!("path `{raw}` is absolute; only workspace-relative paths are allowed"),
-                ))
-            }
-        }
-    }
-    Ok(out)
+    ak_core::path::normalize_relative(raw)
+        .map_err(|reason| denial(DenialCode::ConstraintViolated, op, reason))
 }
 
 /// Check a normalized relative path against allowed prefixes. An empty prefix
 /// list means the whole workspace is allowed; an empty-string prefix likewise.
 fn matches_prefixes(rel: &Path, prefixes: &[String]) -> bool {
-    if prefixes.is_empty() {
-        return true;
-    }
-    prefixes.iter().any(|p| {
-        let p = p.trim_start_matches("./").trim_end_matches('/');
-        if p.is_empty() {
-            return true;
-        }
-        rel.starts_with(p)
-    })
+    ak_core::path::matches_prefixes(rel, prefixes)
 }
 
 /// Resolve a workspace-relative path with full confinement:
@@ -1035,6 +1003,8 @@ impl Backend for LocalBackend {
             // Executes in the kernel's own workspace tree: snapshots see
             // every filesystem effect.
             shares_workspace: true,
+            // The local tree IS the kernel workspace; nothing to sync.
+            syncs_state: false,
         }
     }
 
@@ -1204,6 +1174,8 @@ impl Backend for LocalBackend {
             },
             paths_written,
             replay_class,
+            // Local effects are snapshotted directly from the tree.
+            workspace_delta: None,
         })
     }
 

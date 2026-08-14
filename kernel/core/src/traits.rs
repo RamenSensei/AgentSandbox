@@ -5,8 +5,10 @@ use crate::action::ActionKind;
 use crate::budget::ResourceBudget;
 use crate::effect::{EffectClass, EffectContract};
 use crate::error::KernelResult;
+use crate::hash::ContentHash;
 use crate::ids::{BranchId, PrincipalId, StateId};
 use crate::replay::ReplayClass;
+use crate::sync::SyncManifest;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +39,52 @@ pub struct ExecutionOutcome {
     /// Workspace-relative paths the backend observed being written.
     pub paths_written: Vec<String>,
     pub replay_class: ReplayClass,
+    /// Filesystem changes a state-syncing remote backend pulled back after
+    /// executing, relative to the base state it materialized beforehand.
+    /// `Some` (even when empty) means the remote tree was honestly synced
+    /// and the kernel may record a real state transition; `None` means the
+    /// backend has no state sync — a non-workspace-sharing backend's step
+    /// is then recorded as an audit-only excursion.
+    #[serde(default)]
+    pub workspace_delta: Option<WorkspaceDelta>,
+}
+
+/// One file pushed to or pulled from a remote synced workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncedFile {
+    /// Workspace-relative path (`/`-separated, no `..`, not absolute).
+    pub path: String,
+    pub contents: Vec<u8>,
+    /// Unix permission bits. The kernel masks these to `0o777` on apply —
+    /// setuid/setgid/sticky bits never survive a remote round trip.
+    pub mode: u32,
+}
+
+/// Filesystem changes observed in a remote synced workspace, expressed
+/// against the base state the backend materialized before executing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceDelta {
+    /// Files created or modified.
+    pub upserts: Vec<SyncedFile>,
+    /// Paths removed.
+    pub deletes: Vec<String>,
+}
+
+impl WorkspaceDelta {
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty()
+    }
+}
+
+/// Read-only access to committed workspace state, injected into remote
+/// backends that materialize kernel state in their own sandboxes (state
+/// sync). Implementations resolve a state to its file manifest and blobs
+/// from the kernel's CAS. Calls are synchronous local reads.
+pub trait StateProvider: Send + Sync {
+    /// The workspace tree of `state`: path → (blob hash, mode).
+    fn manifest(&self, state: &StateId) -> KernelResult<SyncManifest>;
+    /// The raw bytes of one blob.
+    fn blob(&self, hash: &ContentHash) -> KernelResult<Vec<u8>>;
 }
 
 /// Capabilities a backend advertises so the router can pick the cheapest one
@@ -55,11 +103,16 @@ pub struct BackendProfile {
     pub full_linux: bool,
     /// Whether the backend executes against the kernel's own workspace
     /// tree, so the state DAG can snapshot its filesystem effects. Remote
-    /// backends without state sync must report `false`: their steps are
-    /// recorded as audit-only excursions, never as local state
-    /// transitions.
+    /// backends must report `false`.
     #[serde(default)]
     pub shares_workspace: bool,
+    /// Whether the backend materializes kernel state in its own sandbox
+    /// and returns a [`WorkspaceDelta`] after each step (state sync). Steps
+    /// on such a backend are real state transitions; a remote backend with
+    /// neither `shares_workspace` nor `syncs_state` runs steps as
+    /// audit-only excursions.
+    #[serde(default)]
+    pub syncs_state: bool,
 }
 
 /// An isolation backend: local OS sandbox, gVisor, microVM, cluster, …

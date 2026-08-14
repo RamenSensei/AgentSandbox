@@ -39,6 +39,7 @@ impl Backend for Slow {
             usage: self.usage,
             paths_written: vec![],
             replay_class: ReplayClass::FilesystemOnly,
+            workspace_delta: None,
         })
     }
 }
@@ -53,6 +54,7 @@ fn profile(name: &str, iso: u8, cold: u64, fork: bool) -> BackendProfile {
         supports_gui: false,
         full_linux: true,
         shares_workspace: name == "local",
+        syncs_state: false,
     }
 }
 

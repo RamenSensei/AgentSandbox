@@ -19,6 +19,7 @@
 //! 4. **No denial without a machine-readable explanation.**
 
 pub mod action;
+pub mod b64;
 pub mod budget;
 pub mod capability;
 pub mod denial;
@@ -28,9 +29,11 @@ pub mod hash;
 pub mod ids;
 pub mod net;
 pub mod observation;
+pub mod path;
 pub mod principal;
 pub mod replay;
 pub mod state;
+pub mod sync;
 pub mod traits;
 
 pub use action::{Action, ActionKind};
@@ -44,7 +47,10 @@ pub use observation::Observation;
 pub use principal::{Principal, PrincipalKind, TrustLevel};
 pub use replay::ReplayClass;
 pub use state::{StateDelta, StateNode};
-pub use traits::{Backend, CommitProbe, Connector, ExecutionOutcome, ExecutionRequest};
+pub use traits::{
+    Backend, CommitProbe, Connector, ExecutionOutcome, ExecutionRequest, StateProvider,
+    WorkspaceDelta,
+};
 
 /// Semantic version of the Agent Execution Protocol implemented by this tree.
 pub const PROTOCOL_VERSION: &str = "0.8";

@@ -205,6 +205,12 @@ impl StepScheduler {
         self.router_read().profiles()
     }
 
+    /// Look up a registered backend by profile name (e.g. to release its
+    /// branch resources after a rejected state sync).
+    pub fn backend(&self, name: &str) -> Option<Arc<dyn Backend>> {
+        self.router_read().get(name)
+    }
+
     fn router_read(&self) -> std::sync::RwLockReadGuard<'_, BackendRouter> {
         self.router.read().unwrap_or_else(|p| p.into_inner())
     }

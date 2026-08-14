@@ -420,6 +420,7 @@ impl Backend for KubernetesBackend {
             // Remote workspace, no state sync into the kernel's CAS yet:
             // steps are recorded as audit-only excursions.
             shares_workspace: false,
+            syncs_state: false,
         }
     }
 
@@ -495,6 +496,7 @@ impl Backend for KubernetesBackend {
             },
             paths_written,
             replay_class: ReplayClass::FilesystemOnly,
+            workspace_delta: None,
         })
     }
 

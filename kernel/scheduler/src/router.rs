@@ -7,9 +7,11 @@
 //!    `Low >= 20`, `Medium >= 60`, `High >= 85`. The floor is a hard
 //!    requirement — nothing (in particular no intent hint) can lower it.
 //! 2. A candidate backend must additionally satisfy every set flag in
-//!    [`Needs`] (`full_linux`, `gui`, `fork`) and, when `replay_at_least` is
-//!    set, advertise a replay class at least that strong (using the total
-//!    order on [`ReplayClass`]).
+//!    [`Needs`]: `full_linux`, `gui`, `fork` map to the matching profile
+//!    flags; `workspace` is satisfied by a backend that shares the kernel
+//!    workspace **or** advertises state sync; and when `replay_at_least` is
+//!    set the backend must advertise a replay class at least that strong
+//!    (using the total order on [`ReplayClass`]).
 //! 3. Among the satisfying candidates, the **cheapest** wins, by the cost
 //!    model `cost = cold_start_ms + 10 * isolation_strength` (stronger
 //!    isolation carries per-step overhead: syscall interception, guest
@@ -53,9 +55,10 @@ pub struct Needs {
     pub gui: bool,
     /// Requires native CoW fork for branch fan-out.
     pub fork: bool,
-    /// Requires execution against the kernel's own workspace tree (file
-    /// actions, process sessions — anything whose effects the state DAG
-    /// must snapshot).
+    /// Requires that the step's filesystem effects reach the state DAG
+    /// (file actions, process sessions): satisfied by a backend that shares
+    /// the kernel workspace **or** one that syncs state back after every
+    /// step.
     pub workspace: bool,
     /// Requires at least this replay guarantee.
     pub replay_at_least: Option<ReplayClass>,
@@ -102,7 +105,7 @@ impl BackendRouter {
             && (!needs.full_linux || profile.full_linux)
             && (!needs.gui || profile.supports_gui)
             && (!needs.fork || profile.supports_fork)
-            && (!needs.workspace || profile.shares_workspace)
+            && (!needs.workspace || profile.shares_workspace || profile.syncs_state)
             && needs
                 .replay_at_least
                 .map(|floor| profile.replay_class >= floor)
@@ -160,6 +163,7 @@ mod tests {
                 usage: ResourceBudget::zero(),
                 paths_written: vec![],
                 replay_class: self.0.replay_class,
+                workspace_delta: None,
             })
         }
     }
@@ -178,6 +182,7 @@ mod tests {
             supports_gui: false,
             full_linux: true,
             shares_workspace: name == "local",
+            syncs_state: false,
         }
     }
 
@@ -276,6 +281,25 @@ mod tests {
                 b.profile().name
             ),
         }
+    }
+
+    #[test]
+    fn state_syncing_backend_satisfies_the_workspace_need() {
+        // A remote backend that syncs state back can host workspace-needing
+        // steps: its effects reach the DAG, so the need is satisfied even
+        // though it does not share the kernel tree.
+        let mut r = router();
+        let mut p = profile("syncer", 90, 10, false);
+        p.syncs_state = true;
+        r.register(Arc::new(Fake(p)));
+        let needs = Needs {
+            workspace: true,
+            ..Needs::default()
+        };
+        assert_eq!(
+            r.route(RiskTier::High, &needs).unwrap().profile().name,
+            "syncer"
+        );
     }
 
     #[test]

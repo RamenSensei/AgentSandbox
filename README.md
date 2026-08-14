@@ -144,11 +144,15 @@ control-plane ceremony:
   line, with the whole blob a hash away.
 - **Denials are recovery plans** — every runtime denial names the exact
   scope to request (`requestable_scopes`) and whether a human is needed.
-- **Risk-routed backends** — the policy rule's `risk_weight` sets each
-  step's isolation floor; configured backends (gVisor, forkd, Cube,
-  Kubernetes) are routed to when the floor demands them, and steps on a
-  backend that does not share the kernel workspace are recorded as
-  audit-only excursions, never as pretended local state transitions.
+- **Risk-routed backends with state sync** — the policy rule's
+  `risk_weight` sets each step's isolation floor; configured backends
+  (gVisor, forkd, Cube, Kubernetes) are routed to when the floor demands
+  them. forkd and Cube adapters **sync state**: the base state is pushed
+  into the remote sandbox (content-addressed, diffs only), the observed
+  file delta is pulled back, validated against the step's writable
+  prefixes, and snapshotted — a remote step is a *real* state transition.
+  Backends without sync are recorded as audit-only excursions, never as
+  pretended local state transitions.
 
 ### Authentication
 

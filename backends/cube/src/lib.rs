@@ -14,9 +14,10 @@
 //! |---|---|---|
 //! | `POST /v1/sandboxes` | `{"metadata": {"branch": "..."}}` | `{"sandbox_id": "sb-..."}` |
 //! | `POST /v1/sandboxes/{id}/exec` | `{"command","cwd?","env","timeout_ms"}` | `{"exit_code","stdout","stderr","duration_ms"}` |
-//! | `POST /v1/sandboxes/{id}/files/write` | `{"path","contents_b64"}` | `{}` |
+//! | `POST /v1/sandboxes/{id}/files/write` | `{"path","contents_b64","mode?"}` | `{}` |
 //! | `POST /v1/sandboxes/{id}/files/read` | `{"path"}` | `{"contents_b64"}` |
 //! | `POST /v1/sandboxes/{id}/files/delete` | `{"path"}` | `{}` |
+//! | `POST /v1/sandboxes/{id}/files/list` | `{}` | `{"files":[{"path","sha256","mode"}]}` |
 //! | `POST /v1/sandboxes/{id}/snapshot` | `{}` | `{"snapshot_id"}` |
 //! | `POST /v1/snapshots/{id}/clone` | `{"metadata": {"branch": "..."}}` | `{"sandbox_id"}` |
 //! | `DELETE /v1/sandboxes/{id}` | — | `{}` |
@@ -27,16 +28,48 @@
 //! Profile: isolation_strength **90** (microVM), `supports_fork = true`
 //! (snapshot + clone), replay class `ProcessAndFilesystem` (snapshots capture
 //! the process tree and filesystem).
+//!
+//! ## State sync (real state transitions, not audit-only excursions)
+//!
+//! With a [`StateProvider`] attached ([`CubeBackend::with_state_provider`]),
+//! every step becomes a **real kernel state transition**:
+//!
+//! 1. **Push** — before executing, the adapter diffs what the sandbox's
+//!    workspace currently holds against the step's base-state manifest and
+//!    transfers only the difference (content-addressed: re-running on the
+//!    same branch pushes nothing).
+//! 2. **Pull** — after executing, it lists the remote tree
+//!    (`files/list`), downloads only files whose hash changed, and returns
+//!    them as a [`WorkspaceDelta`] for the kernel to validate against the
+//!    step's confinement, apply to the branch workspace mirror, and
+//!    snapshot into the state DAG.
+//!
+//! The cache/scratch tier ([`ak_core::state::DEFAULT_SNAPSHOT_IGNORES`])
+//! never travels in either direction. Any push/pull failure **poisons** the
+//! branch's sandbox: the adapter forgets it and deletes it best-effort, so
+//! the next step re-materializes from the branch head instead of trusting a
+//! half-synced tree. A service that misreports listing hashes can only
+//! corrupt its own branch's delta — paths are still validated and confined
+//! by the kernel before anything touches the workspace mirror.
+//!
+//! Without a provider the profile stays `syncs_state = false` and shell
+//! steps are recorded as audit-only excursions, exactly as before.
 
 use ak_core::action::ActionKind;
 use ak_core::budget::ResourceBudget;
 use ak_core::error::{KernelError, KernelResult};
+use ak_core::hash::{hash_bytes, ContentHash};
 use ak_core::ids::{BranchId, StateId};
 use ak_core::replay::ReplayClass;
-use ak_core::traits::{Backend, BackendProfile, ExecutionOutcome, ExecutionRequest};
+use ak_core::sync::{push_plan, syncable_path, SyncEntry, SyncManifest};
+use ak_core::traits::{
+    Backend, BackendProfile, ExecutionOutcome, ExecutionRequest, StateProvider, SyncedFile,
+    WorkspaceDelta,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -202,6 +235,9 @@ struct ExecResponse {
 struct FileWriteRequest<'a> {
     path: &'a str,
     contents_b64: &'a str,
+    /// Unix permission bits; services without mode support may ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,6 +253,25 @@ struct FileReadResponse {
 #[derive(Debug, Deserialize)]
 struct SnapshotResponse {
     snapshot_id: String,
+}
+
+/// One entry of `files/list`: the remote workspace manifest.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteFile {
+    pub path: String,
+    /// Lowercase hex SHA-256 of the file's bytes.
+    pub sha256: String,
+    #[serde(default = "default_remote_mode")]
+    pub mode: u32,
+}
+
+fn default_remote_mode() -> u32 {
+    0o644
+}
+
+#[derive(Debug, Deserialize)]
+struct FileListResponse {
+    files: Vec<RemoteFile>,
 }
 
 // ---- Client ----------------------------------------------------------------
@@ -309,15 +364,32 @@ impl CubeClient {
         sandbox: &str,
         path: &str,
         contents_b64: &str,
+        mode: Option<u32>,
     ) -> KernelResult<()> {
         validate_remote_id(sandbox)?;
         let _: serde_json::Value = self
             .post(
                 &format!("/v1/sandboxes/{sandbox}/files/write"),
-                &FileWriteRequest { path, contents_b64 },
+                &FileWriteRequest {
+                    path,
+                    contents_b64,
+                    mode,
+                },
             )
             .await?;
         Ok(())
+    }
+
+    /// List the sandbox's workspace tree: path, content hash, mode.
+    pub async fn list_files(&self, sandbox: &str) -> KernelResult<Vec<RemoteFile>> {
+        validate_remote_id(sandbox)?;
+        let resp: FileListResponse = self
+            .post(
+                &format!("/v1/sandboxes/{sandbox}/files/list"),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(resp.files)
     }
 
     pub async fn read_file(&self, sandbox: &str, path: &str) -> KernelResult<Vec<u8>> {
@@ -328,7 +400,7 @@ impl CubeClient {
                 &FilePathRequest { path },
             )
             .await?;
-        b64_decode(&resp.contents_b64)
+        ak_core::b64::decode(&resp.contents_b64)
             .map_err(|e| unavailable(format!("service returned invalid base64: {e}")))
     }
 
@@ -390,13 +462,21 @@ impl CubeClient {
 // ---- Backend ---------------------------------------------------------------
 
 /// Cube backend: routes actions to per-branch remote sandboxes and supports
-/// CoW fork via snapshot + clone.
+/// CoW fork via snapshot + clone. With a [`StateProvider`] attached it
+/// performs full state sync (see the module docs).
 pub struct CubeBackend {
     client: CubeClient,
     /// Live sandbox per branch.
     sandboxes: Mutex<HashMap<BranchId, String>>,
     /// Sandbox that materialized each base state (for `fork`).
     state_sandboxes: Mutex<HashMap<StateId, String>>,
+    /// Resolves kernel states to manifests/blobs for state sync.
+    state_provider: Option<Arc<dyn StateProvider>>,
+    /// What each sandbox's workspace currently holds (path → blob, mode),
+    /// maintained across pushes and pulls. Content-addressed: sync-in
+    /// diffs are computed against this, so a sandbox already at the base
+    /// state transfers nothing.
+    synced: Mutex<HashMap<String, SyncManifest>>,
 }
 
 impl CubeBackend {
@@ -405,7 +485,16 @@ impl CubeBackend {
             client: CubeClient::new(config)?,
             sandboxes: Mutex::new(HashMap::new()),
             state_sandboxes: Mutex::new(HashMap::new()),
+            state_provider: None,
+            synced: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Attach a state provider, turning excursions into real state
+    /// transitions (the profile then advertises `syncs_state`).
+    pub fn with_state_provider(mut self, provider: Arc<dyn StateProvider>) -> Self {
+        self.state_provider = Some(provider);
+        self
     }
 
     /// Get-or-create is atomic: the map lock is held across the remote create
@@ -418,6 +507,109 @@ impl CubeBackend {
         let id = self.client.create_sandbox(branch).await?;
         sandboxes.insert(branch.clone(), id.clone());
         Ok(id)
+    }
+
+    /// Forget a branch's sandbox after a failed sync and delete it
+    /// best-effort: a half-synced tree must never serve another step, so
+    /// the next use re-creates and re-materializes from the branch head.
+    async fn poison(&self, branch: &BranchId, sandbox: &str) {
+        self.sandboxes.lock().await.remove(branch);
+        self.synced.lock().await.remove(sandbox);
+        if let Err(e) = self.client.delete_sandbox(sandbox).await {
+            tracing::warn!(sandbox, error = %e, "failed to delete poisoned sandbox");
+        }
+    }
+
+    /// Bring `sandbox`'s workspace to `base_state` by pushing the diff
+    /// between what it holds and the base-state manifest.
+    async fn sync_in(
+        &self,
+        provider: &Arc<dyn StateProvider>,
+        sandbox: &str,
+        base_state: &StateId,
+    ) -> KernelResult<()> {
+        let target = provider.manifest(base_state)?;
+        let current = self
+            .synced
+            .lock()
+            .await
+            .get(sandbox)
+            .cloned()
+            .unwrap_or_default();
+        let plan = push_plan(&current, &target);
+        for (path, entry) in &plan.upserts {
+            let bytes = provider.blob(&entry.blob)?;
+            self.client
+                .write_file(
+                    sandbox,
+                    path,
+                    &ak_core::b64::encode(&bytes),
+                    Some(entry.mode & 0o777),
+                )
+                .await?;
+        }
+        for path in &plan.deletes {
+            self.client.delete_path(sandbox, path).await?;
+        }
+        self.synced.lock().await.insert(sandbox.to_string(), target);
+        Ok(())
+    }
+
+    /// List the remote tree after execution and pull only changed files,
+    /// returning the delta against what was pushed. Updates the sync cache
+    /// to the observed tree (hashes recomputed from the pulled bytes — the
+    /// listing hash only decides what to download).
+    async fn sync_out(&self, sandbox: &str) -> KernelResult<WorkspaceDelta> {
+        let listing = self.client.list_files(sandbox).await?;
+        let known = self
+            .synced
+            .lock()
+            .await
+            .get(sandbox)
+            .cloned()
+            .unwrap_or_default();
+        let mut delta = WorkspaceDelta::default();
+        let mut next = SyncManifest::new();
+        for file in &listing {
+            let path = match syncable_path(&file.path) {
+                Ok(p) => p,
+                // The cache/scratch tier stays remote; hostile paths are a
+                // protocol violation.
+                Err(reason) if reason.contains("cache/scratch") => continue,
+                Err(reason) => {
+                    return Err(unavailable(format!(
+                        "service listed an unsyncable path: {reason}"
+                    )))
+                }
+            };
+            let mode = file.mode & 0o777;
+            let listed = SyncEntry {
+                blob: ContentHash(format!("sha256:{}", file.sha256)),
+                mode,
+            };
+            match known.get(&path) {
+                Some(entry) if *entry == listed => {
+                    next.insert(path, listed);
+                }
+                _ => {
+                    let bytes = self.client.read_file(sandbox, &path).await?;
+                    let blob = hash_bytes(&bytes);
+                    next.insert(path.clone(), SyncEntry { blob, mode });
+                    delta.upserts.push(SyncedFile {
+                        path,
+                        contents: bytes,
+                        mode,
+                    });
+                }
+            }
+        }
+        for path in known.keys() {
+            if !next.contains_key(path) {
+                delta.deletes.push(path.clone());
+            }
+        }
+        self.synced.lock().await.insert(sandbox.to_string(), next);
+        Ok(delta)
     }
 }
 
@@ -432,14 +624,23 @@ impl Backend for CubeBackend {
             supports_fork: true,
             supports_gui: false,
             full_linux: true,
-            // Remote workspace, no state sync into the kernel's CAS yet:
-            // steps are recorded as audit-only excursions.
+            // Remote workspace: never the kernel's own tree.
             shares_workspace: false,
+            // Honest capability: real state sync only with a provider.
+            syncs_state: self.state_provider.is_some(),
         }
     }
 
     async fn execute(&self, req: ExecutionRequest) -> KernelResult<ExecutionOutcome> {
         let sandbox = self.sandbox_for(&req.branch).await?;
+        // State sync in: materialize the base state before acting. Failure
+        // poisons the sandbox — a half-pushed tree must not execute.
+        if let Some(provider) = &self.state_provider {
+            if let Err(e) = self.sync_in(provider, &sandbox, &req.base_state).await {
+                self.poison(&req.branch, &sandbox).await;
+                return Err(e);
+            }
+        }
         let (exit_code, stdout, stderr, duration_ms, network_bytes) = match &req.action {
             ActionKind::Shell { command, cwd, env } => {
                 self.client
@@ -464,7 +665,9 @@ impl Backend for CubeBackend {
                 (0, text, String::new(), 0, None)
             }
             ActionKind::WriteFile { path, contents_b64 } => {
-                self.client.write_file(&sandbox, path, contents_b64).await?;
+                self.client
+                    .write_file(&sandbox, path, contents_b64, None)
+                    .await?;
                 (0, String::new(), String::new(), 0, None)
             }
             ActionKind::DeletePath { path } => {
@@ -478,13 +681,35 @@ impl Backend for CubeBackend {
                 )))
             }
         };
+        // State sync out: pull the post-execution delta regardless of exit
+        // code (failed commands write files too). Failure poisons the
+        // sandbox and fails the step — the kernel never sees a half-pulled
+        // delta, and the branch head stays at the base state.
+        let workspace_delta = match &self.state_provider {
+            Some(_) => match self.sync_out(&sandbox).await {
+                Ok(delta) => Some(delta),
+                Err(e) => {
+                    self.poison(&req.branch, &sandbox).await;
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
         self.state_sandboxes
             .lock()
             .await
             .insert(req.base_state.clone(), sandbox.clone());
-        let paths_written = match &req.action {
-            ActionKind::WriteFile { path, .. } => vec![path.clone()],
-            _ => Vec::new(),
+        let paths_written = match &workspace_delta {
+            Some(delta) => delta
+                .upserts
+                .iter()
+                .map(|f| f.path.clone())
+                .chain(delta.deletes.iter().cloned())
+                .collect(),
+            None => match &req.action {
+                ActionKind::WriteFile { path, .. } => vec![path.clone()],
+                _ => Vec::new(),
+            },
         };
         let bytes = network_bytes.unwrap_or(0);
         Ok(ExecutionOutcome {
@@ -500,11 +725,14 @@ impl Backend for CubeBackend {
             },
             paths_written,
             replay_class: ReplayClass::ProcessAndFilesystem,
+            workspace_delta,
         })
     }
 
     /// Fork via snapshot + clone. Returns `Ok(false)` when the source state
     /// is unknown to this backend (kernel then re-materializes from the CAS).
+    /// The clone inherits the source sandbox's sync view: its tree is a
+    /// byte-identical copy, so the next push diffs from the same manifest.
     async fn fork(&self, from: &StateId, to_branch: &BranchId) -> KernelResult<bool> {
         let source = { self.state_sandboxes.lock().await.get(from).cloned() };
         let Some(source) = source else {
@@ -512,6 +740,10 @@ impl Backend for CubeBackend {
         };
         let snapshot = self.client.snapshot(&source).await?;
         let clone = self.client.clone_snapshot(&snapshot, to_branch).await?;
+        let inherited = { self.synced.lock().await.get(&source).cloned() };
+        if let Some(manifest) = inherited {
+            self.synced.lock().await.insert(clone.clone(), manifest);
+        }
         self.sandboxes.lock().await.insert(to_branch.clone(), clone);
         Ok(true)
     }
@@ -519,45 +751,9 @@ impl Backend for CubeBackend {
     async fn discard(&self, branch: &BranchId) -> KernelResult<()> {
         let sandbox = { self.sandboxes.lock().await.remove(branch) };
         if let Some(sandbox) = sandbox {
+            self.synced.lock().await.remove(&sandbox);
             self.client.delete_sandbox(&sandbox).await?;
         }
         Ok(())
     }
-}
-
-/// Minimal standard base64 decode (padding optional) for file reads.
-fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
-    fn val(c: u8) -> Result<u32, String> {
-        match c {
-            b'A'..=b'Z' => Ok(u32::from(c - b'A')),
-            b'a'..=b'z' => Ok(u32::from(c - b'a') + 26),
-            b'0'..=b'9' => Ok(u32::from(c - b'0') + 52),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            _ => Err(format!("invalid base64 byte 0x{c:02x}")),
-        }
-    }
-    let cleaned: Vec<u8> = input
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
-        .collect();
-    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
-    for chunk in cleaned.chunks(4) {
-        if chunk.len() == 1 {
-            return Err("truncated base64 input".into());
-        }
-        let mut n: u32 = 0;
-        for &c in chunk {
-            n = (n << 6) | val(c)?;
-        }
-        n <<= 6 * (4 - chunk.len()) as u32;
-        out.push((n >> 16) as u8);
-        if chunk.len() > 2 {
-            out.push((n >> 8) as u8);
-        }
-        if chunk.len() > 3 {
-            out.push(n as u8);
-        }
-    }
-    Ok(out)
 }

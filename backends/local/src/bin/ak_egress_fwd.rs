@@ -97,6 +97,14 @@ fn up_loopback() -> std::io::Result<()> {
             libc::close(fd);
             return Err(e);
         }
+        // Standalone probe/bridge tests (and operational diagnostics) run
+        // in the host namespace, whose loopback is already up. Avoid a
+        // needless privileged SIOCSIFFLAGS there; a fresh bwrap netns still
+        // reaches the write below and therefore still requires CAP_NET_ADMIN.
+        if ifr.ifr_ifru.ifru_flags & libc::IFF_UP as libc::c_short != 0 {
+            libc::close(fd);
+            return Ok(());
+        }
         ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
         if libc::ioctl(fd, libc::SIOCSIFFLAGS, &ifr) < 0 {
             let e = std::io::Error::last_os_error();
